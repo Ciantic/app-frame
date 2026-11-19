@@ -1,0 +1,15 @@
+[package]
+name = "email-service"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+facet.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+pgtest-server = { path = "../pgtest-server" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

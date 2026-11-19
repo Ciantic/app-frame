@@ -10,14 +10,13 @@ use sqlx::Postgres;
 use sqlx::postgres::PgArguments;
 use sqlx::postgres::PgRow;
 use sqlx::query::Query;
-use user_service::db::schema::SCHEMA;
 use std::collections::BTreeSet;
 use user_service::db::models::user::User;
 use user_service::db::models::user::UserId;
 use user_service::db::models::user_session::UserSession;
 use user_service::db::models::user_session::UserSessionId;
+use user_service::db::schema::SCHEMA;
 use uuid::Uuid;
-
 
 // Fixed ids, so the session can reference the user without a round trip.
 const USER_ID: Uuid = Uuid::from_u128(1);

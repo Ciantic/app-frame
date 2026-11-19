@@ -228,6 +228,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "email-service"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "facet",
+ "pgtest-server",
+ "serde",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
