@@ -1,15 +1,17 @@
 use crate::user::UserId;
 use chrono::DateTime;
 use chrono::Utc;
+use facet::Facet;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, Facet)]
+#[facet(transparent)]
 #[sqlx(transparent)]
 pub struct UserSessionId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Facet)]
 pub struct UserSession {
     pub id: UserSessionId,
     pub user_id: UserId,
