@@ -1,0 +1,11 @@
+[package]
+name = "dbkit-macros"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+syn.workspace = true
