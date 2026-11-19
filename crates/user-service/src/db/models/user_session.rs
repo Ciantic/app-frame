@@ -1,4 +1,4 @@
-use crate::user::UserId;
+use super::user::UserId;
 use chrono::DateTime;
 use chrono::Utc;
 use facet::Facet;
