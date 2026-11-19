@@ -24,8 +24,8 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-// For TimescaleDB, use the image below and ensure the extension setup in `attach`.
-// const IMAGE: &str = "docker.io/timescale/timescaledb:latest-pg18"
+// For TimescaleDB, use the image below and ensure the extension setup in
+// `attach`. const IMAGE: &str = "docker.io/timescale/timescaledb:latest-pg18"
 
 const IMAGE: &str = "docker.io/library/postgres:18";
 const USER: &str = "postgres";
@@ -131,7 +131,7 @@ impl PgtestServer {
         //     .execute(&mut connection)
         //     .await
         //     .expect("failed to create the timescaledb extension");
-        
+
         drop(server.connect().await);
 
         registry
