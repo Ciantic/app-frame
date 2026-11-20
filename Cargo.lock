@@ -194,22 +194,18 @@ dependencies = [
 name = "dbkit"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "dbkit-macros",
- "pgtest-server",
  "serde",
  "serde_json",
- "sqlx",
- "tokio",
- "uuid",
 ]
 
 [[package]]
 name = "dbkit-macros"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "proc-macro2",
  "syn 2.0.119",
+ "uuid",
 ]
 
 [[package]]
@@ -257,6 +253,7 @@ dependencies = [
  "facet",
  "pgtest-server",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
  "uuid",
@@ -1556,6 +1553,7 @@ dependencies = [
  "facet",
  "pgtest-server",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
  "uuid",

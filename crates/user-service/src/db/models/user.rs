@@ -14,9 +14,11 @@ pub struct UserId(pub Uuid);
 pub struct User {
     pub id: UserId,
     pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
     pub version: i64,
 }

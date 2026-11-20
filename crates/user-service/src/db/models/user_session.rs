@@ -17,6 +17,7 @@ pub struct UserSession {
     pub user_id: UserId,
     pub token_hash: String,
     pub expires_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

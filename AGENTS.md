@@ -35,3 +35,11 @@ Docs if needed: https://docs.rs/sqlx
 
 - Each model should be serializable to JSON and back
 - Each model is defined in Rust side as a plain struct deriving `sqlx::FromRow`
+- Empty values are omitted, not `null`: every `Option` field carries
+  `#[serde(skip_serializing_if = "Option::is_none")]`, so a `None` field never
+  reaches the wire as `null`
+- Patches are input-only and do not implement `Serialize`: a missing key leaves
+  the column unchanged, `null` clears a nullable column, a value sets it
+- Insert inputs are `Option<T>`: a missing nullable column is inserted as
+  `NULL`, a missing defaulted column (`id`, timestamps, `version`) is filled in
+  by the repository

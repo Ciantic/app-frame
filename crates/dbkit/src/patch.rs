@@ -1,15 +1,16 @@
 use serde::Deserialize;
 use serde::Deserializer;
-use serde::Serialize;
-use serde::Serializer;
 
 /// One field of an update, distinguishing "not given" from "set to `NULL`".
 ///
-/// `#[serde(default)]` maps a missing key to [`Patch::Absent`] and an explicit
-/// `null` to [`Patch::Null`](Patch::Null), so a JSON body spells all three
-/// states without custom deserializers. Fields are serialized with
-/// `skip_serializing_if = "Patch::is_absent"`, which also keeps `Absent` off
-/// the wire.
+/// A patch is an input type: it deserializes, it does not serialize. That is
+/// what keeps `null` from being propagated over the wire — `Patch::Null` only
+/// travels from the client to the repository to express "clear this nullable
+/// column", and a model never echoes it back.
+///
+/// With `#[serde(default)]` on the field, a missing key is [`Patch::Absent`],
+/// an explicit `null` is [`Patch::Null`] and any other value is
+/// [`Patch::Set`]. No custom deserializers are needed on the patch struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Patch<T> {
     #[default]
@@ -54,15 +55,6 @@ impl<T> Patch<T> {
     }
 }
 
-impl<T: Serialize> Serialize for Patch<T> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Patch::Absent | Patch::Null => serializer.serialize_none(),
-            Patch::Set(value) => value.serialize(serializer),
-        }
-    }
-}
-
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match Option::<T>::deserialize(deserializer)? {
@@ -72,44 +64,36 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
     }
 }
 
+/// Restates the rule at the type level: a patch never serializes, so
+/// `Patch::Null` cannot become a `null` in a response.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Deserialize)]
     struct Sample {
-        #[serde(default, skip_serializing_if = "Patch::is_absent")]
+        #[serde(default)]
         name: Patch<String>,
     }
 
     #[test]
-    fn absent_is_the_default() {
+    fn missing_key_is_absent() {
         let sample: Sample = serde_json::from_str("{}").unwrap();
 
         assert!(sample.name.is_absent());
-        assert_eq!(serde_json::to_string(&sample).unwrap(), "{}");
     }
 
     #[test]
-    fn reads_set_and_null() {
-        let set: Sample = serde_json::from_str(r#"{"name":"Thingie"}"#).unwrap();
-        let null: Sample = serde_json::from_str(r#"{"name":null}"#).unwrap();
+    fn null_is_null() {
+        let sample: Sample = serde_json::from_str(r#"{"name":null}"#).unwrap();
 
-        assert_eq!(set.name, Patch::Set("Thingie".to_owned()));
-        assert_eq!(null.name, Patch::Null);
+        assert!(sample.name.is_null());
     }
 
     #[test]
-    fn writes_set_and_null() {
-        let set = Sample {
-            name: Patch::Set("Thingie".to_owned()),
-        };
-        let null = Sample { name: Patch::Null };
+    fn value_is_set() {
+        let sample: Sample = serde_json::from_str(r#"{"name":"Thingie"}"#).unwrap();
 
-        assert_eq!(
-            serde_json::to_string(&set).unwrap(),
-            r#"{"name":"Thingie"}"#
-        );
-        assert_eq!(serde_json::to_string(&null).unwrap(), r#"{"name":null}"#);
+        assert_eq!(sample.name, Patch::Set("Thingie".to_owned()));
     }
 }

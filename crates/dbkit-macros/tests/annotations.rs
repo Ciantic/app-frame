@@ -1,6 +1,6 @@
 use chrono::DateTime;
 use chrono::Utc;
-use dbkit::DbModel;
+use dbkit_macros::DbModel;
 use uuid::Uuid;
 
 #[derive(DbModel)]
@@ -17,6 +17,7 @@ struct Widget {
     version: i64,
 }
 
+/// Proves the derive runs on a model shape and leaves the struct usable.
 #[test]
 fn derive_accepts_the_annotations() {
     let now = Utc::now();

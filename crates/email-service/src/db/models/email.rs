@@ -17,6 +17,7 @@ pub struct Email {
     pub to: String,
     pub subject: String,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
