@@ -1,8 +1,9 @@
 # dbkit annotations
 
 Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
-They describe the fixed columns of a table row: which field is the primary key,
-which one is the optimistic-locking token, and which ones are audit columns.
+They describe the fixed columns of a table row: which fields form the primary
+key, which one is the optimistic-locking token, and which ones are audit
+columns.
 
 The derive currently **only validates** the annotations and generates nothing.
 A struct that carries valid annotations compiles; the `Model`, `Patchable` and
@@ -17,7 +18,7 @@ here and only the emitted code is new.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, DbModel)]
 #[db(table = "email")]
 pub struct Email {
-    #[db(id)]
+    #[db(primary_key)]
     pub id: EmailId,
     pub from: String,
     pub to: String,
@@ -39,8 +40,8 @@ fields a generated patch would expose; annotated fields never are.
 ## Where annotations may appear
 
 - `#[db(table = "...")]` on the struct, exactly once.
-- `#[db(id)]`, `#[db(version)]`, `#[db(created_at)]`, `#[db(updated_at)]` on a
-  field.
+- `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
+  `#[db(updated_at)]` on a field.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
   collected across all of them.
 - All attributes in the accepted vocabulary are listed here. Anything else is a
@@ -57,14 +58,15 @@ Names the table the row belongs to.
 - The value is the plain identifier without quotes or a schema prefix;
   generated SQL quotes it as `"..."`.
 
-## `id`
+## `primary_key`
 
-Marks the primary key field.
+Marks a primary key column. Repeat it on every column of a composite key.
 
-- Legal on: exactly one field, required.
-- The field must not be `Option`.
-- Any type is accepted; it becomes the `Model::Id` associated type, so it must
-  encode to the database column by itself.
+- Legal on: one or more fields, required.
+- A field must not be `Option`.
+- Any type is accepted; it must encode to the database column by itself.
+- A single annotated field is the `Model::Id` associated type; with several, the
+  associated type is a tuple of the field types in declaration order.
 - Used for the `WHERE` clause of single-row operations and for `find`.
 
 ## `version`
@@ -110,11 +112,12 @@ Every rule below produces a compile error.
 - The struct must have named fields.
 - The struct must carry `#[db(table = "...")]`.
 - `table` must be a non-empty string literal and appear only once.
-- `id` must be present exactly once.
+- `primary_key` must be present at least once, and may mark several fields.
 - `version` must be present exactly once.
 - `created_at` and `updated_at` may each appear at most once.
 - A single field may carry at most one role, even if the roles are split across
-  several `#[db(...)]` attributes.
+  several `#[db(...)]` attributes; a primary key column therefore never also
+  takes `version`, `created_at` or `updated_at`.
 - A role must not be applied to an `Option` field.
 - `version` must be `i64`.
 - `created_at` and `updated_at` must be `DateTime`.
@@ -147,12 +150,13 @@ For reference when reading a compile failure:
 - ``unknown attribute; the struct only accepts `table` ``
 - `` `table` must not be empty ``
 - `` duplicate `table` ``
-- ``unknown attribute; expected `id`, `version`, `created_at` or `updated_at` ``
+- ``unknown attribute; expected `primary_key`, `version`, `created_at` or `updated_at` ``
 - ``empty `#[db]` attribute``
 - ``a field can carry at most one `#[db(...)]` role``
-- `` missing `#[db(id)]` `` and `` missing `#[db(version)]` ``
+- `` missing `#[db(primary_key)]` `` and `` missing `#[db(version)]` ``
 - ``duplicate `#[db(...)]` role``
-- `` `#[db(id)]` field must not be `Option` `` (and the same for each other role)
+- `` `#[db(primary_key)]` field must not be `Option` `` (and the same for each
+  other role)
 - `` `#[db(version)]` field must be `i64` ``
 - `` `#[db(created_at)]` field must be a `DateTime` ``
 
@@ -176,4 +180,3 @@ These are deliberately out of scope until a model needs them:
 - Column names that differ from field names.
 - Non-`i64` version types.
 - Tables without a version column.
-- Multi-column primary keys.

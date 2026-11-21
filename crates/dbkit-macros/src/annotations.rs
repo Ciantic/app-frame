@@ -12,7 +12,7 @@ use syn::spanned::Spanned;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
-    Id,
+    PrimaryKey,
     Version,
     CreatedAt,
     UpdatedAt,
@@ -23,14 +23,15 @@ pub enum Role {
 #[allow(dead_code, reason = "code generation lands later")]
 pub struct Annotations {
     pub table: String,
-    pub id: Ident,
+    /// Primary key columns in declaration order; never empty.
+    pub primary_key: Vec<Ident>,
     pub version: Ident,
     pub created_at: Option<Ident>,
     pub updated_at: Option<Ident>,
 }
 
 const ROLES: &[(&str, Role)] = &[
-    ("id", Role::Id),
+    ("primary_key", Role::PrimaryKey),
     ("version", Role::Version),
     ("created_at", Role::CreatedAt),
     ("updated_at", Role::UpdatedAt),
@@ -73,12 +74,19 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         }
     }
 
-    let id = unique(&roles, Role::Id, &mut errors);
+    let primary_key: Vec<Ident> = roles
+        .iter()
+        .filter(|(role, _, _)| *role == Role::PrimaryKey)
+        .map(|(_, name, _)| name.clone())
+        .collect();
     let version = unique(&roles, Role::Version, &mut errors);
     let created_at = unique(&roles, Role::CreatedAt, &mut errors);
     let updated_at = unique(&roles, Role::UpdatedAt, &mut errors);
 
-    for (role, name) in [(Role::Id, "id"), (Role::Version, "version")] {
+    for (role, name) in [
+        (Role::PrimaryKey, "primary_key"),
+        (Role::Version, "version"),
+    ] {
         if !roles.iter().any(|(found, _, _)| *found == role) {
             errors.push(syn::Error::new(
                 input.span(),
@@ -89,13 +97,13 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
 
     combine(errors)?;
 
-    let (Some(table), Some(id), Some(version)) = (table, id, version) else {
+    let (Some(table), Some(version)) = (table, version) else {
         unreachable!("missing required annotations are reported as errors");
     };
 
     Ok(Annotations {
         table,
-        id,
+        primary_key,
         version,
         created_at,
         updated_at,
@@ -147,7 +155,8 @@ fn roles_of(field: &Field, errors: &mut Vec<syn::Error>) -> Vec<Role> {
         let result = attr.parse_nested_meta(|meta| {
             let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name)) else {
                 return Err(meta.error(
-                    "unknown attribute; expected `id`, `version`, `created_at` or `updated_at`",
+                    "unknown attribute; expected `primary_key`, `version`, `created_at` or \
+                     `updated_at`",
                 ));
             };
 
@@ -171,7 +180,7 @@ fn roles_of(field: &Field, errors: &mut Vec<syn::Error>) -> Vec<Role> {
 
 fn check_field_type(role: Role, field: &Field, errors: &mut Vec<syn::Error>) {
     let name = match role {
-        Role::Id => "id",
+        Role::PrimaryKey => "primary_key",
         Role::Version => "version",
         Role::CreatedAt => "created_at",
         Role::UpdatedAt => "updated_at",
@@ -254,10 +263,14 @@ mod tests {
         parse_model(source).unwrap_err().to_string()
     }
 
+    fn names(idents: &[Ident]) -> Vec<String> {
+        idents.iter().map(ToString::to_string).collect()
+    }
+
     const VALID: &str = r#"
         #[db(table = "email")]
         struct Email {
-            #[db(id)]
+            #[db(primary_key)]
             id: EmailId,
             subject: String,
             #[db(created_at)]
@@ -274,10 +287,31 @@ mod tests {
         let model = parse_model(VALID).unwrap();
 
         assert_eq!(model.table, "email");
-        assert_eq!(model.id.to_string(), "id");
+        assert_eq!(names(&model.primary_key), ["id"]);
         assert_eq!(model.version.to_string(), "version");
         assert_eq!(model.created_at.unwrap().to_string(), "created_at");
         assert_eq!(model.updated_at.unwrap().to_string(), "updated_at");
+    }
+
+    #[test]
+    fn reads_composite_primary_key_in_declaration_order() {
+        let model = parse_model(
+            r#"
+            #[db(table = "membership")]
+            struct Membership {
+                #[db(primary_key)]
+                user_id: UserId,
+                team: String,
+                #[db(primary_key)]
+                team_id: TeamId,
+                #[db(version)]
+                version: i64,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(names(&model.primary_key), ["user_id", "team_id"]);
     }
 
     #[test]
@@ -286,7 +320,7 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(id)]
+                #[db(primary_key)]
                 id: WidgetId,
                 #[db(version)]
                 version: i64,
@@ -304,7 +338,7 @@ mod tests {
         let message = error(
             r#"
             struct Widget {
-                #[db(id)]
+                #[db(primary_key)]
                 id: WidgetId,
                 #[db(version)]
                 version: i64,
@@ -316,10 +350,36 @@ mod tests {
     }
 
     #[test]
-    fn requires_id_and_version() {
-        let message = error(r#"#[db(table = "widget")] struct Widget { id: WidgetId }"#);
+    fn requires_primary_key_and_version() {
+        let missing_key = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(version)]
+                version: i64,
+            }
+        "#,
+        );
 
-        assert!(message.contains("missing `#[db(id)]`"), "{message}");
+        assert!(
+            missing_key.contains("missing `#[db(primary_key)]`"),
+            "{missing_key}"
+        );
+
+        let missing_version = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key)]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(
+            missing_version.contains("missing `#[db(version)]`"),
+            "{missing_version}"
+        );
     }
 
     #[test]
@@ -328,12 +388,12 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(id)]
+                #[db(primary_key)]
                 id: WidgetId,
-                #[db(id)]
-                other: WidgetId,
                 #[db(version)]
                 version: i64,
+                #[db(version)]
+                other_version: i64,
             }
         "#,
         );
@@ -342,12 +402,30 @@ mod tests {
     }
 
     #[test]
+    fn reports_primary_key_repeated_on_one_field_as_multiple_roles() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key)]
+                #[db(primary_key)]
+                id: WidgetId,
+                #[db(version)]
+                version: i64,
+            }
+        "#,
+        );
+
+        assert!(message.contains("at most one"), "{message}");
+    }
+
+    #[test]
     fn rejects_unknown_attributes() {
         let message = error(
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(id)]
+                #[db(primary_key)]
                 id: WidgetId,
                 #[db(created)]
                 created_at: DateTime<Utc>,
@@ -366,7 +444,7 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(id)]
+                #[db(primary_key)]
                 id: WidgetId,
                 #[db(created_at)]
                 created_at: Option<DateTime<Utc>>,
@@ -380,12 +458,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_optional_primary_key_field() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key)]
+                id: Option<WidgetId>,
+                #[db(version)]
+                version: i64,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(primary_key)]` field must not be `Option`"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn rejects_wrong_role_types() {
         let message = error(
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(id)]
+                #[db(primary_key)]
                 id: WidgetId,
                 #[db(version)]
                 version: i32,
@@ -402,7 +500,7 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(id, version)]
+                #[db(primary_key, version)]
                 id: i64,
             }
         "#,
