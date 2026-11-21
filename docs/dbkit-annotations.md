@@ -18,23 +18,35 @@ syntax stays as documented here.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, DbModel)]
 #[db(table = "email")]
 pub struct Email {
-    #[db(primary_key, pgtype = "uuid")]
+    #[db(primary_key)]
+    #[db(pgtype = "uuid")]
     pub id: EmailId,
+
     #[db(pgtype = "text")]
     pub from: String,
+
     #[db(pgtype = "text")]
     pub to: String,
+
     #[db(pgtype = "text")]
     pub subject: String,
+
     #[db(pgtype = "text")]
     pub body: String,
+
     #[db(pgtype = "timestamptz")]
     pub sent_at: Option<DateTime<Utc>>,
-    #[db(created_at, pgtype = "timestamptz")]
+
+    #[db(created_at)]
+    #[db(pgtype = "timestamptz")]
     pub created_at: DateTime<Utc>,
-    #[db(updated_at, pgtype = "timestamptz")]
+
+    #[db(updated_at)]
+    #[db(pgtype = "timestamptz")]
     pub updated_at: DateTime<Utc>,
-    #[db(version, pgtype = "int8")]
+
+    #[db(version)]
+    #[db(pgtype = "int8")]
     pub version: i64,
 }
 ```
@@ -53,6 +65,21 @@ generated patch would expose; role-annotated fields never are.
 - All attributes in the accepted vocabulary are listed here. Anything else is a
   compile error rather than an ignored annotation, so a typo never silently
   changes behaviour.
+
+## Style
+
+The derive accepts a role and `pgtype` in one attribute, e.g.
+`#[db(primary_key, pgtype = "uuid")]`, but models do not use that form:
+
+- One annotation per line, each in its own `#[db(...)]` attribute.
+- Role first, then `pgtype`: `#[db(primary_key)]` above
+  `#[db(pgtype = "uuid")]`.
+- `#[serde(...)]` attributes follow the `#[db(...)]` block.
+- A blank line separates fields, so the annotation block reads as one unit per
+  column.
+
+The combined form stays supported and is still covered by the derive's tests,
+but new and edited models use the one-annotation-per-line layout.
 
 ## `table`
 
@@ -73,8 +100,8 @@ Names the column type, written the way it is written in `schema.sql`.
   `bigint`, `boolean`, `timestamptz`, `jsonb`, `varchar(255)`,
   `numeric(10,2)`, `text[]`, `text[][]`.
 - Missing, empty, or repeated `pgtype` is an error.
-- Combined with a role in one attribute, e.g.
-  `#[db(primary_key, pgtype = "uuid")]`.
+- Written in its own attribute, below the role attribute; the combined form is
+  accepted but not used in models (see [Style](#style)).
 - The value is DDL, not a `pg_type` catalog name, so it is what a generated
   `schema.sql` would emit. Include the length, precision and array brackets
   when the column has them.

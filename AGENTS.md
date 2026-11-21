@@ -43,3 +43,5 @@ Docs if needed: https://docs.rs/sqlx
 - Insert inputs are `Option<T>`: a missing nullable column is inserted as
   `NULL`, a missing defaulted column (`id`, timestamps, `version`) is filled in
   by the repository
+- `#[db(...)]` annotations go one per line and each field is separated by a
+  blank line; see [dbkit annotations](docs/dbkit-annotations.md#style)
