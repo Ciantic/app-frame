@@ -25,7 +25,7 @@ pub struct Annotations {
     pub table: String,
     /// Primary key columns in declaration order; never empty.
     pub primary_key: Vec<Ident>,
-    pub version: Ident,
+    pub version: Option<Ident>,
     pub created_at: Option<Ident>,
     pub updated_at: Option<Ident>,
 }
@@ -83,21 +83,16 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let created_at = unique(&roles, Role::CreatedAt, &mut errors);
     let updated_at = unique(&roles, Role::UpdatedAt, &mut errors);
 
-    for (role, name) in [
-        (Role::PrimaryKey, "primary_key"),
-        (Role::Version, "version"),
-    ] {
-        if !roles.iter().any(|(found, _, _)| *found == role) {
-            errors.push(syn::Error::new(
-                input.span(),
-                format!("missing `#[db({name})]`"),
-            ));
-        }
+    if !roles.iter().any(|(role, _, _)| *role == Role::PrimaryKey) {
+        errors.push(syn::Error::new(
+            input.span(),
+            "missing `#[db(primary_key)]`",
+        ));
     }
 
     combine(errors)?;
 
-    let (Some(table), Some(version)) = (table, version) else {
+    let Some(table) = table else {
         unreachable!("missing required annotations are reported as errors");
     };
 
@@ -288,7 +283,7 @@ mod tests {
 
         assert_eq!(model.table, "email");
         assert_eq!(names(&model.primary_key), ["id"]);
-        assert_eq!(model.version.to_string(), "version");
+        assert_eq!(model.version.unwrap().to_string(), "version");
         assert_eq!(model.created_at.unwrap().to_string(), "created_at");
         assert_eq!(model.updated_at.unwrap().to_string(), "updated_at");
     }
@@ -315,20 +310,19 @@ mod tests {
     }
 
     #[test]
-    fn audit_columns_are_optional() {
+    fn version_and_audit_columns_are_optional() {
         let model = parse_model(
             r#"
             #[db(table = "widget")]
             struct Widget {
                 #[db(primary_key)]
                 id: WidgetId,
-                #[db(version)]
-                version: i64,
             }
         "#,
         )
         .unwrap();
 
+        assert!(model.version.is_none());
         assert!(model.created_at.is_none());
         assert!(model.updated_at.is_none());
     }
@@ -340,8 +334,6 @@ mod tests {
             struct Widget {
                 #[db(primary_key)]
                 id: WidgetId,
-                #[db(version)]
-                version: i64,
             }
         "#,
         );
@@ -350,8 +342,8 @@ mod tests {
     }
 
     #[test]
-    fn requires_primary_key_and_version() {
-        let missing_key = error(
+    fn requires_primary_key() {
+        let message = error(
             r#"
             #[db(table = "widget")]
             struct Widget {
@@ -362,23 +354,8 @@ mod tests {
         );
 
         assert!(
-            missing_key.contains("missing `#[db(primary_key)]`"),
-            "{missing_key}"
-        );
-
-        let missing_version = error(
-            r#"
-            #[db(table = "widget")]
-            struct Widget {
-                #[db(primary_key)]
-                id: WidgetId,
-            }
-        "#,
-        );
-
-        assert!(
-            missing_version.contains("missing `#[db(version)]`"),
-            "{missing_version}"
+            message.contains("missing `#[db(primary_key)]`"),
+            "{message}"
         );
     }
 

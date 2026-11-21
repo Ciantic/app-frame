@@ -2,8 +2,8 @@
 
 Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
 They describe the fixed columns of a table row: which fields form the primary
-key, which one is the optimistic-locking token, and which ones are audit
-columns.
+key, which one carries the optimistic-locking token, and which ones are audit
+columns. Only the primary key is required; the other roles are opt-in.
 
 The derive currently **only validates** the annotations and generates nothing.
 A struct that carries valid annotations compiles; the `Model`, `Patchable` and
@@ -73,7 +73,9 @@ Marks a primary key column. Repeat it on every column of a composite key.
 
 Marks the optimistic-locking field.
 
-- Legal on: exactly one field, required.
+- Legal on: at most one field, optional. A model without it gets no concurrency
+  guard, so writes update unconditionally; use it for append-only rows and for
+  tables where the last writer may win.
 - The field must be `i64` and must not be `Option`.
 - Reads produce `Model::version()`, writes append the guard
   `"version" = "version" + 1` and the condition `WHERE "version" = $n`.
@@ -113,8 +115,7 @@ Every rule below produces a compile error.
 - The struct must carry `#[db(table = "...")]`.
 - `table` must be a non-empty string literal and appear only once.
 - `primary_key` must be present at least once, and may mark several fields.
-- `version` must be present exactly once.
-- `created_at` and `updated_at` may each appear at most once.
+- `version`, `created_at` and `updated_at` may each appear at most once.
 - A single field may carry at most one role, even if the roles are split across
   several `#[db(...)]` attributes; a primary key column therefore never also
   takes `version`, `created_at` or `updated_at`.
@@ -153,7 +154,7 @@ For reference when reading a compile failure:
 - ``unknown attribute; expected `primary_key`, `version`, `created_at` or `updated_at` ``
 - ``empty `#[db]` attribute``
 - ``a field can carry at most one `#[db(...)]` role``
-- `` missing `#[db(primary_key)]` `` and `` missing `#[db(version)]` ``
+- `` missing `#[db(primary_key)]` ``
 - ``duplicate `#[db(...)]` role``
 - `` `#[db(primary_key)]` field must not be `Option` `` (and the same for each
   other role)
@@ -179,4 +180,3 @@ These are deliberately out of scope until a model needs them:
   them.
 - Column names that differ from field names.
 - Non-`i64` version types.
-- Tables without a version column.
