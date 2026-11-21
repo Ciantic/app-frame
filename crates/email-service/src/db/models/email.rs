@@ -16,6 +16,7 @@ pub struct EmailId(pub Uuid);
 pub struct Email {
     #[db(primary_key)]
     #[db(pgtype = "uuid")]
+    #[db(pgdefault = "uuidv7()")]
     pub id: EmailId,
 
     #[db(pgtype = "text")]
@@ -36,13 +37,16 @@ pub struct Email {
 
     #[db(created_at)]
     #[db(pgtype = "timestamptz")]
+    #[db(pgdefault = "now()")]
     pub created_at: DateTime<Utc>,
 
     #[db(updated_at)]
     #[db(pgtype = "timestamptz")]
+    #[db(pgdefault = "now()")]
     pub updated_at: DateTime<Utc>,
 
     #[db(version)]
     #[db(pgtype = "bigint")]
+    #[db(pgdefault = "0")]
     pub version: i64,
 }

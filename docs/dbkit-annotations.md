@@ -2,9 +2,10 @@
 
 Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
 They describe the fixed columns of a table row: which fields form the primary
-key, which one carries the optimistic-locking token, and which ones are audit
-columns. Every field carries a `pgtype`, and a primary key is required; the
-other roles are opt-in.
+key, which one carries the optimistic-locking token, which ones are audit
+columns, and which columns the database fills in from a default. Every field
+carries a `pgtype`, and a primary key is required; the other annotations are
+opt-in.
 
 The derive validates the annotations and generates `impl dbkit::Model`, which
 carries them as the `Model::META` const at runtime. The `Patchable` and insert
@@ -20,6 +21,7 @@ syntax stays as documented here.
 pub struct Email {
     #[db(primary_key)]
     #[db(pgtype = "uuid")]
+    #[db(pgdefault = "uuidv7()")]
     pub id: EmailId,
 
     #[db(pgtype = "text")]
@@ -39,14 +41,17 @@ pub struct Email {
 
     #[db(created_at)]
     #[db(pgtype = "timestamptz")]
+    #[db(pgdefault = "now()")]
     pub created_at: DateTime<Utc>,
 
     #[db(updated_at)]
     #[db(pgtype = "timestamptz")]
+    #[db(pgdefault = "now()")]
     pub updated_at: DateTime<Utc>,
 
     #[db(version)]
     #[db(pgtype = "int8")]
+    #[db(pgdefault = "0")]
     pub version: i64,
 }
 ```
@@ -58,6 +63,7 @@ generated patch would expose; role-annotated fields never are.
 
 - `#[db(table = "...")]` on the struct, exactly once.
 - `#[db(pgtype = "...")]` on every field, exactly once.
+- `#[db(pgdefault = "...")]` on a field, at most once.
 - `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
   `#[db(updated_at)]` on a field.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
@@ -68,12 +74,13 @@ generated patch would expose; role-annotated fields never are.
 
 ## Style
 
-The derive accepts a role and `pgtype` in one attribute, e.g.
-`#[db(primary_key, pgtype = "uuid")]`, but models do not use that form:
+The derive accepts a role, `pgtype` and `pgdefault` in one attribute, e.g.
+`#[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]`, but models do
+not use that form:
 
 - One annotation per line, each in its own `#[db(...)]` attribute.
-- Role first, then `pgtype`: `#[db(primary_key)]` above
-  `#[db(pgtype = "uuid")]`.
+- Role first, then `pgtype`, then `pgdefault`: `#[db(primary_key)]` above
+  `#[db(pgtype = "uuid")]` above `#[db(pgdefault = "uuidv7()")]`.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
 - A blank line separates fields, so the annotation block reads as one unit per
   column.
@@ -115,6 +122,26 @@ Names the column type, written the way it is written in `schema.sql`.
 - The derive does not resolve the value; the schema test has PostgreSQL parse
   it and compares the resulting type and typmod with the real column. A typo or
   a `varchar(50)` against a `varchar(255)` column fails the test.
+
+## `pgdefault`
+
+Records the column default, written the way it is written in `schema.sql`.
+
+- Legal on: a field, optional and at most once.
+- Value: a non-empty string literal holding a default expression: `uuidv7()`,
+  `now()`, `0`, `'{}'::jsonb`.
+- Omitted when the column has no default. An empty or repeated `pgdefault` is
+  an error.
+- Meant to mirror the database rather than change it: the model does not emit
+  the default. It tells a generated insert that the column can be omitted and
+  lets the schema test detect drift.
+- A nullable column may carry a default.
+- The derive does not resolve the expression; the schema test puts it on a
+  probe column and compares PostgreSQL's normalized form (`current_timestamp`
+  compares equal to `now()`) with the real column's default. An expression the
+  database cannot parse fails the test.
+- A defaulted column is still a plain field on the row type: reads always see
+  the value the database stored.
 
 ## `primary_key`
 
@@ -185,8 +212,10 @@ Every rule below produces a compile error.
 - `pgtype` must be a non-empty string literal and appear only once per field.
   It is not validated at compile time; the schema test runs it through
   PostgreSQL.
+- `pgdefault` must be a non-empty string literal and appear at most once per
+  field. It is not validated at compile time either.
 - The struct-level attribute accepts only `table`; the field-level attribute
-  accepts only `pgtype` and the four roles.
+  accepts only `pgtype`, `pgdefault` and the four roles.
 
 ## How field types are matched
 
@@ -213,10 +242,12 @@ For reference when reading a compile failure:
 - ``unknown attribute; the struct only accepts `table` ``
 - `` `table` must not be empty ``
 - `` duplicate `table` ``
-- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at` or `pgtype` ``
+- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at`, `pgtype` or `pgdefault` ``
 - ``missing `#[db(pgtype = "...")]` on field `from` ``
 - `` `pgtype` must not be empty ``
 - ``duplicate `pgtype` ``
+- `` `pgdefault` must not be empty ``
+- ``duplicate `pgdefault` ``
 - ``empty `#[db]` attribute``
 - ``a field can carry at most one `#[db(...)]` role``
 - `` missing `#[db(primary_key)]` ``
@@ -238,8 +269,9 @@ type `dbkit::TableMeta`:
 - `primary_key`, `version`, `created_at`, `updated_at` — the annotated field
   names, or `None` for absent optional roles.
 - `columns` — every field in declaration order as
-  `ColumnMeta { name, nullable, pg_type }`, where `nullable` is true exactly
-  when the field type is `Option<_>` and `pg_type` is the `pgtype` annotation.
+  `ColumnMeta { name, nullable, pg_type, pg_default }`, where `nullable` is
+  true exactly when the field type is `Option<_>`, `pg_type` is the `pgtype`
+  annotation and `pg_default` is the `pgdefault` annotation or `None`.
 
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
@@ -280,11 +312,15 @@ assert!(
 
 Each problem is one line naming the table and column, so a failing test says
 what to fix. The check covers names and nullability from
-`information_schema.columns`, tables without a model, and types. Types are
-compared structurally: the helper creates a temporary table whose columns use
-the `pgtype` annotations and compares each column's `atttypid` and `atttypmod`
-with the real table's, so length and precision must match and any spelling
-PostgreSQL accepts works.
+`information_schema.columns`, tables without a model, and types and defaults.
+Types are compared structurally: the helper creates a temporary table whose
+columns use the `pgtype` annotations and compares each column's `atttypid` and
+`atttypmod` with the real table's, so length and precision must match and any
+spelling PostgreSQL accepts works. Defaults are compared from the same probe
+table: the helper adds each `pgdefault` as a `DEFAULT` clause and compares the
+normalized expression PostgreSQL reports for it with the real column's default,
+so `now()` and `current_timestamp` are equivalent and a missing or extra
+default is reported.
 
 The helper takes a single connection, not a pool, because its temporary table is
 session-local:

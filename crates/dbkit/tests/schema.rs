@@ -10,7 +10,7 @@ use uuid::Uuid;
     reason = "the fields exist only to derive the table metadata"
 )]
 struct Widget {
-    #[db(primary_key, pgtype = "uuid")]
+    #[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]
     id: Uuid,
     #[db(pgtype = "varchar(255)")]
     name: String,
@@ -31,6 +31,17 @@ struct Broken {
     name: String,
 }
 
+#[derive(DbModel)]
+#[db(table = "broken_default")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct BrokenDefault {
+    #[db(primary_key, pgtype = "uuid", pgdefault = "no_such_function()")]
+    id: Uuid,
+}
+
 /// Returns the problems `mismatches` reports for `schema`.
 async fn problems(schema: &str, meta: &[dbkit::TableMeta]) -> Vec<String> {
     let db = PgtestServer::start().await.database().await;
@@ -47,7 +58,7 @@ async fn problems(schema: &str, meta: &[dbkit::TableMeta]) -> Vec<String> {
 
 const MATCHING: &str = r#"
     create table "widget" (
-        "id" uuid not null,
+        "id" uuid not null default uuidv7(),
         "name" varchar(255) not null,
         "note" text
     )
@@ -77,6 +88,36 @@ async fn reports_nullability_mismatch() {
     assert_eq!(
         problems(&schema, &[Widget::META]).await,
         ["widget: column \"note\" is nullable = false, the model says true"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_default_mismatch() {
+    let schema = MATCHING.replace("default uuidv7()", "default gen_random_uuid()");
+
+    assert_eq!(
+        problems(&schema, &[Widget::META]).await,
+        ["widget: column \"id\" default is gen_random_uuid(), the model says uuidv7()"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_missing_default() {
+    let schema = MATCHING.replace(" default uuidv7()", "");
+
+    assert_eq!(
+        problems(&schema, &[Widget::META]).await,
+        ["widget: column \"id\" default is none, the model says uuidv7()"]
+    );
+}
+
+#[tokio::test]
+async fn reports_an_undeclared_default() {
+    let schema = MATCHING.replace("\"name\" varchar(255)", "\"name\" varchar(255) default ''");
+
+    assert_eq!(
+        problems(&schema, &[Widget::META]).await,
+        ["widget: column \"name\" default is ''::character varying, the model says none"]
     );
 }
 
@@ -121,7 +162,21 @@ async fn reports_an_invalid_pgtype() {
 
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
-        problems[0].starts_with("broken: `pgtype` is not a valid column type: "),
+        problems[0].starts_with("broken: `pgtype` is not valid in a column definition: "),
+        "{problems:?}"
+    );
+}
+
+#[tokio::test]
+async fn reports_an_invalid_pgdefault() {
+    let schema = r#"create table "broken_default" ("id" uuid not null)"#;
+
+    let problems = problems(schema, &[BrokenDefault::META]).await;
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0]
+            .starts_with("broken_default: `pgdefault` is not valid in a column definition: "),
         "{problems:?}"
     );
 }

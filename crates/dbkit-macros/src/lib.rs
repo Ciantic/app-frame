@@ -7,7 +7,6 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use syn::DeriveInput;
 use syn::Expr;
-use syn::Ident;
 
 mod annotations;
 
@@ -15,14 +14,18 @@ mod annotations;
 /// `impl dbkit::Model for ...`, carrying them as `Model::META`.
 ///
 /// Accepted on the struct: `#[db(table = "...")]`.
-/// Accepted on a field: `#[db(pgtype = "...")]`, `#[db(primary_key)]`,
-/// `#[db(version)]`, `#[db(created_at)]`, `#[db(updated_at)]`.
+/// Accepted on a field: `#[db(pgtype = "...")]`, `#[db(pgdefault = "...")]`,
+/// `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
+/// `#[db(updated_at)]`.
 ///
 /// `table`, `primary_key` and one `pgtype` per field are required; a table
 /// without a version or audit column omits those role annotations. `pgtype`
 /// is the column type as DDL spells it (`uuid`, `text`, `bigint`,
 /// `timestamptz`, `varchar(255)`, `numeric(10,2)`, `text[]`), so it can be
-/// checked against the database and later generate `schema.sql`.
+/// checked against the database and later generate `schema.sql`. `pgdefault`
+/// is the optional column default in the same notation (`now()`, `0`,
+/// `'{}'::jsonb`), which the schema test compares with the database and which
+/// marks the column as safe to omit on insert.
 #[proc_macro_derive(DbModel, attributes(db))]
 pub fn derive_db_model(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
@@ -51,8 +54,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let name = column.name.to_string();
             let nullable = column.nullable;
             let pg_type = &column.pg_type;
+            let pg_default = optional(column.pg_default.as_deref());
             syn::parse_quote!(
-                ::dbkit::ColumnMeta { name: #name, nullable: #nullable, pg_type: #pg_type }
+                ::dbkit::ColumnMeta {
+                    name: #name,
+                    nullable: #nullable,
+                    pg_type: #pg_type,
+                    pg_default: #pg_default,
+                }
             )
         })
         .collect();
@@ -75,7 +84,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
-fn optional(name: Option<&Ident>) -> Expr {
+fn optional<T: ToString>(name: Option<T>) -> Expr {
     match name {
         Some(name) => {
             let name = name.to_string();

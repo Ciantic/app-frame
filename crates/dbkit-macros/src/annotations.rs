@@ -36,6 +36,15 @@ pub struct Column {
     pub nullable: bool,
     /// Postgres type name, as `pg_type.typname` spells it.
     pub pg_type: String,
+    /// Column default as DDL spells it, e.g. `now()`, `0`, `'{}'::jsonb`.
+    pub pg_default: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct FieldAnnotations {
+    roles: Vec<Role>,
+    pg_type: Option<String>,
+    pg_default: Option<String>,
 }
 
 const ROLES: &[(&str, Role)] = &[
@@ -66,7 +75,8 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let mut columns = Vec::new();
     for field in &fields.named {
         let name = field.ident.clone().expect("named field");
-        let (field_roles, pg_type) = field_annotations(field, &mut errors);
+        let annotations = field_annotations(field, &mut errors);
+        let field_roles = annotations.roles;
         if field_roles.len() > 1 {
             errors.push(syn::Error::new(
                 field.span(),
@@ -79,7 +89,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             roles.push((role, name.clone(), field.ty.clone()));
         }
 
-        let Some(pg_type) = pg_type else {
+        let Some(pg_type) = annotations.pg_type else {
             errors.push(syn::Error::new(
                 field.span(),
                 format!("missing `#[db(pgtype = \"...\")]` on field `{name}`"),
@@ -91,6 +101,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             name,
             nullable: is(&field.ty, "Option"),
             pg_type,
+            pg_default: annotations.pg_default,
         });
     }
 
@@ -162,9 +173,8 @@ fn table(
     table
 }
 
-fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> (Vec<Role>, Option<String>) {
-    let mut roles = Vec::new();
-    let mut pg_type = None;
+fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnotations {
+    let mut annotations = FieldAnnotations::default();
 
     for attr in field.attrs.iter().filter(|attr| attr.path().is_ident("db")) {
         let mut seen = 0;
@@ -175,19 +185,27 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> (Vec<Role>,
                 if value.value().is_empty() {
                     return Err(meta.error("`pgtype` must not be empty"));
                 }
-                if pg_type.replace(value.value()).is_some() {
+                if annotations.pg_type.replace(value.value()).is_some() {
                     return Err(meta.error("duplicate `pgtype`"));
+                }
+            } else if meta.path.is_ident("pgdefault") {
+                let value: LitStr = meta.value()?.parse()?;
+                if value.value().is_empty() {
+                    return Err(meta.error("`pgdefault` must not be empty"));
+                }
+                if annotations.pg_default.replace(value.value()).is_some() {
+                    return Err(meta.error("duplicate `pgdefault`"));
                 }
             } else {
                 let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name))
                 else {
                     return Err(meta.error(
                         "unknown attribute; expected `primary_key`, `version`, `created_at`, \
-                         `updated_at` or `pgtype`",
+                         `updated_at`, `pgtype` or `pgdefault`",
                     ));
                 };
 
-                roles.push(*role);
+                annotations.roles.push(*role);
             }
 
             seen += 1;
@@ -204,7 +222,7 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> (Vec<Role>,
         }
     }
 
-    (roles, pg_type)
+    annotations
 }
 
 fn check_field_type(role: Role, field: &Field, errors: &mut Vec<syn::Error>) {
@@ -299,15 +317,15 @@ mod tests {
     const VALID: &str = r#"
         #[db(table = "email")]
         struct Email {
-            #[db(primary_key, pgtype = "uuid")]
+            #[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]
             id: EmailId,
             #[db(pgtype = "text")]
             subject: String,
-            #[db(created_at, pgtype = "timestamptz")]
+            #[db(created_at, pgtype = "timestamptz", pgdefault = "now()")]
             created_at: DateTime<Utc>,
-            #[db(updated_at, pgtype = "timestamptz")]
+            #[db(updated_at, pgtype = "timestamptz", pgdefault = "now()")]
             updated_at: DateTime<Utc>,
-            #[db(version, pgtype = "int8")]
+            #[db(version, pgtype = "int8", pgdefault = "0")]
             version: i64,
         }
     "#;
@@ -322,14 +340,20 @@ mod tests {
         assert_eq!(model.created_at.unwrap().to_string(), "created_at");
         assert_eq!(model.updated_at.unwrap().to_string(), "updated_at");
 
-        let pg_types: Vec<&str> = model
+        let definitions: Vec<(&str, Option<&str>)> = model
             .columns
             .iter()
-            .map(|column| column.pg_type.as_str())
+            .map(|column| (column.pg_type.as_str(), column.pg_default.as_deref()))
             .collect();
         assert_eq!(
-            pg_types,
-            ["uuid", "text", "timestamptz", "timestamptz", "int8"]
+            definitions,
+            [
+                ("uuid", Some("uuidv7()")),
+                ("text", None),
+                ("timestamptz", Some("now()")),
+                ("timestamptz", Some("now()")),
+                ("int8", Some("0")),
+            ]
         );
     }
 
@@ -490,6 +514,40 @@ mod tests {
         );
 
         assert!(message.contains("duplicate `pgtype`"), "{message}");
+    }
+
+    #[test]
+    fn rejects_empty_pgdefault() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid", pgdefault = "")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`pgdefault` must not be empty"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_pgdefault() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]
+                #[db(pgdefault = "gen_random_uuid()")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(message.contains("duplicate `pgdefault`"), "{message}");
     }
 
     #[test]

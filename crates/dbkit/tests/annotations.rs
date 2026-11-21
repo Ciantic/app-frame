@@ -8,15 +8,15 @@ use uuid::Uuid;
 #[derive(DbModel)]
 #[db(table = "widget")]
 struct Widget {
-    #[db(primary_key, pgtype = "uuid")]
+    #[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]
     id: Uuid,
     #[db(pgtype = "text")]
     name: String,
-    #[db(created_at, pgtype = "timestamptz")]
+    #[db(created_at, pgtype = "timestamptz", pgdefault = "now()")]
     created_at: DateTime<Utc>,
-    #[db(updated_at, pgtype = "timestamptz")]
+    #[db(updated_at, pgtype = "timestamptz", pgdefault = "now()")]
     updated_at: DateTime<Utc>,
-    #[db(version, pgtype = "int8")]
+    #[db(version, pgtype = "int8", pgdefault = "0")]
     version: i64,
 }
 
@@ -53,20 +53,27 @@ fn derive_generates_table_metadata() {
     assert_eq!(meta.created_at, Some("created_at"));
     assert_eq!(meta.updated_at, Some("updated_at"));
 
-    let columns: Vec<(&str, bool, &str)> = meta
+    let columns: Vec<(&str, bool, &str, Option<&str>)> = meta
         .columns
         .iter()
-        .map(|column| (column.name, column.nullable, column.pg_type))
+        .map(|column| {
+            (
+                column.name,
+                column.nullable,
+                column.pg_type,
+                column.pg_default,
+            )
+        })
         .collect();
 
     assert_eq!(
         columns,
         [
-            ("id", false, "uuid"),
-            ("name", false, "text"),
-            ("created_at", false, "timestamptz"),
-            ("updated_at", false, "timestamptz"),
-            ("version", false, "int8"),
+            ("id", false, "uuid", Some("uuidv7()")),
+            ("name", false, "text", None),
+            ("created_at", false, "timestamptz", Some("now()")),
+            ("updated_at", false, "timestamptz", Some("now()")),
+            ("version", false, "int8", Some("0")),
         ]
     );
 }
