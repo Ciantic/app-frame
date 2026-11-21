@@ -34,6 +34,8 @@ pub struct Annotations {
 pub struct Column {
     pub name: Ident,
     pub nullable: bool,
+    /// Postgres type name, as `pg_type.typname` spells it.
+    pub pg_type: String,
 }
 
 const ROLES: &[(&str, Role)] = &[
@@ -61,8 +63,10 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let table = table(&input.attrs, input.span(), &mut errors);
 
     let mut roles = Vec::new();
+    let mut columns = Vec::new();
     for field in &fields.named {
-        let field_roles = roles_of(field, &mut errors);
+        let name = field.ident.clone().expect("named field");
+        let (field_roles, pg_type) = field_annotations(field, &mut errors);
         if field_roles.len() > 1 {
             errors.push(syn::Error::new(
                 field.span(),
@@ -72,12 +76,22 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
 
         for role in field_roles {
             check_field_type(role, field, &mut errors);
-            roles.push((
-                role,
-                field.ident.clone().expect("named field"),
-                field.ty.clone(),
-            ));
+            roles.push((role, name.clone(), field.ty.clone()));
         }
+
+        let Some(pg_type) = pg_type else {
+            errors.push(syn::Error::new(
+                field.span(),
+                format!("missing `#[db(pgtype = \"...\")]` on field `{name}`"),
+            ));
+            continue;
+        };
+
+        columns.push(Column {
+            name,
+            nullable: is(&field.ty, "Option"),
+            pg_type,
+        });
     }
 
     let primary_key: Vec<Ident> = roles
@@ -108,14 +122,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         version,
         created_at,
         updated_at,
-        columns: fields
-            .named
-            .iter()
-            .map(|field| Column {
-                name: field.ident.clone().expect("named field"),
-                nullable: is(&field.ty, "Option"),
-            })
-            .collect(),
+        columns,
     })
 }
 
@@ -155,22 +162,35 @@ fn table(
     table
 }
 
-fn roles_of(field: &Field, errors: &mut Vec<syn::Error>) -> Vec<Role> {
+fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> (Vec<Role>, Option<String>) {
     let mut roles = Vec::new();
+    let mut pg_type = None;
 
     for attr in field.attrs.iter().filter(|attr| attr.path().is_ident("db")) {
         let mut seen = 0;
 
         let result = attr.parse_nested_meta(|meta| {
-            let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name)) else {
-                return Err(meta.error(
-                    "unknown attribute; expected `primary_key`, `version`, `created_at` or \
-                     `updated_at`",
-                ));
-            };
+            if meta.path.is_ident("pgtype") {
+                let value: LitStr = meta.value()?.parse()?;
+                if value.value().is_empty() {
+                    return Err(meta.error("`pgtype` must not be empty"));
+                }
+                if pg_type.replace(value.value()).is_some() {
+                    return Err(meta.error("duplicate `pgtype`"));
+                }
+            } else {
+                let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name))
+                else {
+                    return Err(meta.error(
+                        "unknown attribute; expected `primary_key`, `version`, `created_at`, \
+                         `updated_at` or `pgtype`",
+                    ));
+                };
+
+                roles.push(*role);
+            }
 
             seen += 1;
-            roles.push(*role);
 
             Ok(())
         });
@@ -184,7 +204,7 @@ fn roles_of(field: &Field, errors: &mut Vec<syn::Error>) -> Vec<Role> {
         }
     }
 
-    roles
+    (roles, pg_type)
 }
 
 fn check_field_type(role: Role, field: &Field, errors: &mut Vec<syn::Error>) {
@@ -279,14 +299,15 @@ mod tests {
     const VALID: &str = r#"
         #[db(table = "email")]
         struct Email {
-            #[db(primary_key)]
+            #[db(primary_key, pgtype = "uuid")]
             id: EmailId,
+            #[db(pgtype = "text")]
             subject: String,
-            #[db(created_at)]
+            #[db(created_at, pgtype = "timestamptz")]
             created_at: DateTime<Utc>,
-            #[db(updated_at)]
+            #[db(updated_at, pgtype = "timestamptz")]
             updated_at: DateTime<Utc>,
-            #[db(version)]
+            #[db(version, pgtype = "int8")]
             version: i64,
         }
     "#;
@@ -300,6 +321,16 @@ mod tests {
         assert_eq!(model.version.unwrap().to_string(), "version");
         assert_eq!(model.created_at.unwrap().to_string(), "created_at");
         assert_eq!(model.updated_at.unwrap().to_string(), "updated_at");
+
+        let pg_types: Vec<&str> = model
+            .columns
+            .iter()
+            .map(|column| column.pg_type.as_str())
+            .collect();
+        assert_eq!(
+            pg_types,
+            ["uuid", "text", "timestamptz", "timestamptz", "int8"]
+        );
     }
 
     #[test]
@@ -308,12 +339,13 @@ mod tests {
             r#"
             #[db(table = "membership")]
             struct Membership {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 user_id: UserId,
+                #[db(pgtype = "text")]
                 team: String,
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 team_id: TeamId,
-                #[db(version)]
+                #[db(version, pgtype = "int8")]
                 version: i64,
             }
         "#,
@@ -329,27 +361,35 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 id: WidgetId,
+                #[db(pgtype = "text")]
                 name: String,
+                #[db(pgtype = "text")]
                 note: Option<String>,
             }
         "#,
         )
         .unwrap();
 
-        let columns: Vec<(String, bool)> = model
+        let columns: Vec<(String, bool, &str)> = model
             .columns
             .iter()
-            .map(|column| (column.name.to_string(), column.nullable))
+            .map(|column| {
+                (
+                    column.name.to_string(),
+                    column.nullable,
+                    column.pg_type.as_str(),
+                )
+            })
             .collect();
 
         assert_eq!(
             columns,
             [
-                ("id".to_owned(), false),
-                ("name".to_owned(), false),
-                ("note".to_owned(), true),
+                ("id".to_owned(), false, "uuid"),
+                ("name".to_owned(), false, "text"),
+                ("note".to_owned(), true, "text"),
             ]
         );
     }
@@ -360,7 +400,7 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 id: WidgetId,
             }
         "#,
@@ -377,7 +417,7 @@ mod tests {
         let message = error(
             r#"
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 id: WidgetId,
             }
         "#,
@@ -392,7 +432,7 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(version)]
+                #[db(version, pgtype = "int8")]
                 version: i64,
             }
         "#,
@@ -405,16 +445,64 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_roles() {
+    fn requires_pgtype() {
         let message = error(
             r#"
             #[db(table = "widget")]
             struct Widget {
                 #[db(primary_key)]
                 id: WidgetId,
-                #[db(version)]
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("missing `#[db(pgtype = \"...\")]`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_pgtype() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(message.contains("`pgtype` must not be empty"), "{message}");
+    }
+
+    #[test]
+    fn rejects_duplicate_pgtype() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid", pgtype = "text")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(message.contains("duplicate `pgtype`"), "{message}");
+    }
+
+    #[test]
+    fn rejects_duplicate_roles() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(version, pgtype = "int8")]
                 version: i64,
-                #[db(version)]
+                #[db(version, pgtype = "int8")]
                 other_version: i64,
             }
         "#,
@@ -429,10 +517,10 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 #[db(primary_key)]
                 id: WidgetId,
-                #[db(version)]
+                #[db(version, pgtype = "int8")]
                 version: i64,
             }
         "#,
@@ -447,11 +535,11 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 id: WidgetId,
-                #[db(created)]
+                #[db(pgtype = "timestamptz", created)]
                 created_at: DateTime<Utc>,
-                #[db(version)]
+                #[db(version, pgtype = "int8")]
                 version: i64,
             }
         "#,
@@ -466,11 +554,11 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 id: WidgetId,
-                #[db(created_at)]
+                #[db(created_at, pgtype = "timestamptz")]
                 created_at: Option<DateTime<Utc>>,
-                #[db(version)]
+                #[db(version, pgtype = "int8")]
                 version: i64,
             }
         "#,
@@ -485,9 +573,9 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 id: Option<WidgetId>,
-                #[db(version)]
+                #[db(version, pgtype = "int8")]
                 version: i64,
             }
         "#,
@@ -505,9 +593,9 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key)]
+                #[db(primary_key, pgtype = "uuid")]
                 id: WidgetId,
-                #[db(version)]
+                #[db(version, pgtype = "int4")]
                 version: i32,
             }
         "#,
@@ -522,7 +610,7 @@ mod tests {
             r#"
             #[db(table = "widget")]
             struct Widget {
-                #[db(primary_key, version)]
+                #[db(primary_key, version, pgtype = "int8")]
                 id: i64,
             }
         "#,

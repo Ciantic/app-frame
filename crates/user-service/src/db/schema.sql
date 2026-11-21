@@ -5,7 +5,7 @@ create table "user" (
     "created_at" timestamptz not null default now(),
     "updated_at" timestamptz not null default now(),
     "deleted_at" timestamptz,
-    "version" int8 not null default 0,
+    "version" bigint not null default 0,
     constraint "user_pkey" primary key ("id")
 );
 
@@ -17,6 +17,6 @@ create table "user_session" (
     "revoked_at" timestamptz,
     "created_at" timestamptz not null default now(),
     "updated_at" timestamptz not null default now(),
-    "version" int8 not null default 0,
+    "version" bigint not null default 0,
     constraint "user_session_pkey" primary key ("id")
 );

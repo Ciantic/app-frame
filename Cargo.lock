@@ -196,8 +196,11 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dbkit-macros",
+ "pgtest-server",
  "serde",
  "serde_json",
+ "sqlx",
+ "tokio",
  "uuid",
 ]
 

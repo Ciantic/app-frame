@@ -1,10 +1,12 @@
 //! Database building blocks shared by the service crates.
 //!
 //! [`Patch`] is the update input that tells "not given" apart from "set to
-//! `NULL`". [`Model`] and its [`TableMeta`] describe a table at runtime.
+//! `NULL`". [`Model`] and its [`TableMeta`] describe a table at runtime, and
+//! [`schema::mismatches`] compares a list of them with a live database.
 
 mod model;
 mod patch;
+pub mod schema;
 
 pub use dbkit_macros::DbModel;
 pub use model::ColumnMeta;

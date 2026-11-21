@@ -8,23 +8,24 @@ use uuid::Uuid;
 #[derive(DbModel)]
 #[db(table = "widget")]
 struct Widget {
-    #[db(primary_key)]
+    #[db(primary_key, pgtype = "uuid")]
     id: Uuid,
+    #[db(pgtype = "text")]
     name: String,
-    #[db(created_at)]
+    #[db(created_at, pgtype = "timestamptz")]
     created_at: DateTime<Utc>,
-    #[db(updated_at)]
+    #[db(updated_at, pgtype = "timestamptz")]
     updated_at: DateTime<Utc>,
-    #[db(version)]
+    #[db(version, pgtype = "int8")]
     version: i64,
 }
 
 #[derive(DbModel)]
 #[db(table = "membership")]
 struct Membership {
-    #[db(primary_key)]
+    #[db(primary_key, pgtype = "uuid")]
     user_id: Uuid,
-    #[db(primary_key)]
+    #[db(primary_key, pgtype = "uuid")]
     team_id: Uuid,
 }
 
@@ -32,9 +33,11 @@ struct Membership {
 #[derive(DbModel)]
 #[db(table = "widget_log")]
 struct WidgetLog {
-    #[db(primary_key)]
+    #[db(primary_key, pgtype = "uuid")]
     id: Uuid,
+    #[db(pgtype = "text")]
     message: String,
+    #[db(pgtype = "text")]
     note: Option<String>,
 }
 
@@ -50,20 +53,20 @@ fn derive_generates_table_metadata() {
     assert_eq!(meta.created_at, Some("created_at"));
     assert_eq!(meta.updated_at, Some("updated_at"));
 
-    let columns: Vec<(&str, bool)> = meta
+    let columns: Vec<(&str, bool, &str)> = meta
         .columns
         .iter()
-        .map(|column| (column.name, column.nullable))
+        .map(|column| (column.name, column.nullable, column.pg_type))
         .collect();
 
     assert_eq!(
         columns,
         [
-            ("id", false),
-            ("name", false),
-            ("created_at", false),
-            ("updated_at", false),
-            ("version", false),
+            ("id", false, "uuid"),
+            ("name", false, "text"),
+            ("created_at", false, "timestamptz"),
+            ("updated_at", false, "timestamptz"),
+            ("version", false, "int8"),
         ]
     );
 }

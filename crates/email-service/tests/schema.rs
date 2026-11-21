@@ -10,7 +10,6 @@ use sqlx::Postgres;
 use sqlx::postgres::PgArguments;
 use sqlx::postgres::PgRow;
 use sqlx::query::Query;
-use std::collections::BTreeMap;
 use uuid::Uuid;
 
 type Decode = fn(&PgRow) -> Result<(), String>;
@@ -76,60 +75,11 @@ fn every_model_has_an_insert_fixture() {
 async fn models_and_schema_share_columns() {
     let db = PgtestServer::start().await.database().await;
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
-    let mut problems = Vec::new();
+    let mut connection = db.acquire().await.unwrap();
 
-    for meta in MODELS {
-        let model_columns: BTreeMap<&str, bool> = meta
-            .columns
-            .iter()
-            .map(|column| (column.name, column.nullable))
-            .collect();
-
-        let schema_columns: Vec<(String, String)> = sqlx::query_as(
-            "SELECT column_name, is_nullable FROM information_schema.columns
-             WHERE table_schema = current_schema() AND table_name = $1",
-        )
-        .bind(meta.table)
-        .fetch_all(&db)
+    let problems = dbkit::schema::mismatches(&mut connection, MODELS)
         .await
         .unwrap();
-        let schema_columns: BTreeMap<String, bool> = schema_columns
-            .into_iter()
-            .map(|(name, nullable)| (name, nullable == "YES"))
-            .collect();
-
-        for (column, nullable) in &schema_columns {
-            match model_columns.get(column.as_str()) {
-                None => problems.push(format!(
-                    "table \"{}\" has column \"{column}\" without a model field",
-                    meta.table
-                )),
-                Some(expected) if expected != nullable => problems.push(format!(
-                    "{}: column \"{column}\" is nullable = {nullable}, the model says {expected}",
-                    meta.table
-                )),
-                Some(_) => {}
-            }
-        }
-        for column in model_columns.keys() {
-            if !schema_columns.contains_key(*column) {
-                problems.push(format!("{}: field \"{column}\" has no column", meta.table));
-            }
-        }
-    }
-
-    let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT table_name FROM information_schema.tables
-         WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
-    )
-    .fetch_all(&db)
-    .await
-    .unwrap();
-    for table in tables {
-        if !MODELS.iter().any(|meta| meta.table == table) {
-            problems.push(format!("table \"{table}\" has no model"));
-        }
-    }
 
     assert!(
         problems.is_empty(),

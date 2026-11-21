@@ -3,7 +3,8 @@
 Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
 They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, and which ones are audit
-columns. Only the primary key is required; the other roles are opt-in.
+columns. Every field carries a `pgtype`, and a primary key is required; the
+other roles are opt-in.
 
 The derive validates the annotations and generates `impl dbkit::Model`, which
 carries them as the `Model::META` const at runtime. The `Patchable` and insert
@@ -17,28 +18,34 @@ syntax stays as documented here.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, DbModel)]
 #[db(table = "email")]
 pub struct Email {
-    #[db(primary_key)]
+    #[db(primary_key, pgtype = "uuid")]
     pub id: EmailId,
+    #[db(pgtype = "text")]
     pub from: String,
+    #[db(pgtype = "text")]
     pub to: String,
+    #[db(pgtype = "text")]
     pub subject: String,
+    #[db(pgtype = "text")]
     pub body: String,
+    #[db(pgtype = "timestamptz")]
     pub sent_at: Option<DateTime<Utc>>,
-    #[db(created_at)]
+    #[db(created_at, pgtype = "timestamptz")]
     pub created_at: DateTime<Utc>,
-    #[db(updated_at)]
+    #[db(updated_at, pgtype = "timestamptz")]
     pub updated_at: DateTime<Utc>,
-    #[db(version)]
+    #[db(version, pgtype = "int8")]
     pub version: i64,
 }
 ```
 
-Fields without an annotation are ordinary business columns. They are the
-fields a generated patch would expose; annotated fields never are.
+Fields without a role are ordinary business columns. They are the fields a
+generated patch would expose; role-annotated fields never are.
 
 ## Where annotations may appear
 
 - `#[db(table = "...")]` on the struct, exactly once.
+- `#[db(pgtype = "...")]` on every field, exactly once.
 - `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
   `#[db(updated_at)]` on a field.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
@@ -56,6 +63,31 @@ Names the table the row belongs to.
 - Missing, empty, or repeated `table` is an error.
 - The value is the plain identifier without quotes or a schema prefix;
   generated SQL quotes it as `"..."`.
+
+## `pgtype`
+
+Names the column type, written the way it is written in `schema.sql`.
+
+- Legal on: every field, required.
+- Value: a non-empty string literal holding a SQL type: `uuid`, `text`,
+  `bigint`, `boolean`, `timestamptz`, `jsonb`, `varchar(255)`,
+  `numeric(10,2)`, `text[]`, `text[][]`.
+- Missing, empty, or repeated `pgtype` is an error.
+- Combined with a role in one attribute, e.g.
+  `#[db(primary_key, pgtype = "uuid")]`.
+- The value is DDL, not a `pg_type` catalog name, so it is what a generated
+  `schema.sql` would emit. Include the length, precision and array brackets
+  when the column has them.
+- Spelling variants that PostgreSQL treats as the same type are equivalent:
+  `int8` and `bigint`, `varchar(255)` and `character varying(255)` both compare
+  equal. Short forms are the convention here.
+- Array dimensions are not part of the type: `text[][]` and `text[]` are the
+  same column type, so both annotations pass.
+- A domain column must be annotated with the domain name, not its base type,
+  because that is the column's type.
+- The derive does not resolve the value; the schema test has PostgreSQL parse
+  it and compares the resulting type and typmod with the real column. A typo or
+  a `varchar(50)` against a `varchar(255)` column fails the test.
 
 ## `primary_key`
 
@@ -112,6 +144,7 @@ Every rule below produces a compile error.
 - The target must be a struct, not an enum or a union.
 - The struct must have named fields.
 - The struct must carry `#[db(table = "...")]`.
+- Every field must carry `#[db(pgtype = "...")]`.
 - `table` must be a non-empty string literal and appear only once.
 - `primary_key` must be present at least once, and may mark several fields.
 - `version`, `created_at` and `updated_at` may each appear at most once.
@@ -122,8 +155,11 @@ Every rule below produces a compile error.
 - `version` must be `i64`.
 - `created_at` and `updated_at` must be `DateTime`.
 - An empty `#[db]` attribute is an error.
+- `pgtype` must be a non-empty string literal and appear only once per field.
+  It is not validated at compile time; the schema test runs it through
+  PostgreSQL.
 - The struct-level attribute accepts only `table`; the field-level attribute
-  accepts only the four roles.
+  accepts only `pgtype` and the four roles.
 
 ## How field types are matched
 
@@ -150,7 +186,10 @@ For reference when reading a compile failure:
 - ``unknown attribute; the struct only accepts `table` ``
 - `` `table` must not be empty ``
 - `` duplicate `table` ``
-- ``unknown attribute; expected `primary_key`, `version`, `created_at` or `updated_at` ``
+- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at` or `pgtype` ``
+- ``missing `#[db(pgtype = "...")]` on field `from` ``
+- `` `pgtype` must not be empty ``
+- ``duplicate `pgtype` ``
 - ``empty `#[db]` attribute``
 - ``a field can carry at most one `#[db(...)]` role``
 - `` missing `#[db(primary_key)]` ``
@@ -172,8 +211,8 @@ type `dbkit::TableMeta`:
 - `primary_key`, `version`, `created_at`, `updated_at` — the annotated field
   names, or `None` for absent optional roles.
 - `columns` — every field in declaration order as
-  `ColumnMeta { name, nullable }`, where `nullable` is true exactly when the
-  field type is `Option<_>`.
+  `ColumnMeta { name, nullable, pg_type }`, where `nullable` is true exactly
+  when the field type is `Option<_>` and `pg_type` is the `pgtype` annotation.
 
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
@@ -197,10 +236,40 @@ table without a model.
 
 ## Relation to the schema test
 
-The per-service `tests/schema.rs` iterates `MODELS` and compares
-`TableMeta::columns` — names and nullability — with `information_schema`, then
-checks that every table in the schema has a model. A model and `schema.sql`
-drifting apart is a test failure, not a runtime surprise.
+The per-service `tests/schema.rs` applies `schema.sql` and asks
+`dbkit::schema::mismatches` whether `MODELS` agrees with the database:
+
+```rust
+let problems = dbkit::schema::mismatches(&mut connection, MODELS)
+    .await
+    .unwrap();
+
+assert!(
+    problems.is_empty(),
+    "model/schema mismatch:\n{}",
+    problems.join("\n")
+);
+```
+
+Each problem is one line naming the table and column, so a failing test says
+what to fix. The check covers names and nullability from
+`information_schema.columns`, tables without a model, and types. Types are
+compared structurally: the helper creates a temporary table whose columns use
+the `pgtype` annotations and compares each column's `atttypid` and `atttypmod`
+with the real table's, so length and precision must match and any spelling
+PostgreSQL accepts works.
+
+The helper takes a single connection, not a pool, because its temporary table is
+session-local:
+
+```rust
+let db = PgtestServer::start().await.database().await;
+sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+let mut connection = db.acquire().await.unwrap();
+```
+
+A model and `schema.sql` drifting apart is a test failure, not a runtime
+surprise.
 
 ## Not yet supported
 

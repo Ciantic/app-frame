@@ -14,18 +14,23 @@ pub struct EmailId(pub Uuid);
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Facet, DbModel)]
 #[db(table = "email")]
 pub struct Email {
-    #[db(primary_key)]
+    #[db(primary_key, pgtype = "uuid")]
     pub id: EmailId,
+    #[db(pgtype = "text")]
     pub from: String,
+    #[db(pgtype = "text")]
     pub to: String,
+    #[db(pgtype = "text")]
     pub subject: String,
+    #[db(pgtype = "text")]
     pub body: String,
+    #[db(pgtype = "timestamptz")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
-    #[db(created_at)]
+    #[db(created_at, pgtype = "timestamptz")]
     pub created_at: DateTime<Utc>,
-    #[db(updated_at)]
+    #[db(updated_at, pgtype = "timestamptz")]
     pub updated_at: DateTime<Utc>,
-    #[db(version)]
+    #[db(version, pgtype = "bigint")]
     pub version: i64,
 }

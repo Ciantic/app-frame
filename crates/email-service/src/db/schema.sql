@@ -7,6 +7,6 @@ create table "email" (
     "sent_at" timestamptz,
     "created_at" timestamptz not null default now(),
     "updated_at" timestamptz not null default now(),
-    "version" int8 not null default 0,
+    "version" bigint not null default 0,
     constraint "email_pkey" primary key ("id")
 );
