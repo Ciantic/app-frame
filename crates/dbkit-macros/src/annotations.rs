@@ -19,8 +19,6 @@ pub enum Role {
 }
 
 #[derive(Debug)]
-// Read by code generation; the derive only validates the annotations for now.
-#[allow(dead_code, reason = "code generation lands later")]
 pub struct Annotations {
     pub table: String,
     /// Primary key columns in declaration order; never empty.
@@ -28,6 +26,14 @@ pub struct Annotations {
     pub version: Option<Ident>,
     pub created_at: Option<Ident>,
     pub updated_at: Option<Ident>,
+    /// Every field in declaration order.
+    pub columns: Vec<Column>,
+}
+
+#[derive(Debug)]
+pub struct Column {
+    pub name: Ident,
+    pub nullable: bool,
 }
 
 const ROLES: &[(&str, Role)] = &[
@@ -102,6 +108,14 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         version,
         created_at,
         updated_at,
+        columns: fields
+            .named
+            .iter()
+            .map(|field| Column {
+                name: field.ident.clone().expect("named field"),
+                nullable: is(&field.ty, "Option"),
+            })
+            .collect(),
     })
 }
 
@@ -307,6 +321,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(names(&model.primary_key), ["user_id", "team_id"]);
+    }
+
+    #[test]
+    fn reads_columns_in_declaration_order() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key)]
+                id: WidgetId,
+                name: String,
+                note: Option<String>,
+            }
+        "#,
+        )
+        .unwrap();
+
+        let columns: Vec<(String, bool)> = model
+            .columns
+            .iter()
+            .map(|column| (column.name.to_string(), column.nullable))
+            .collect();
+
+        assert_eq!(
+            columns,
+            [
+                ("id".to_owned(), false),
+                ("name".to_owned(), false),
+                ("note".to_owned(), true),
+            ]
+        );
     }
 
     #[test]

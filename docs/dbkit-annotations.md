@@ -5,12 +5,11 @@ They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, and which ones are audit
 columns. Only the primary key is required; the other roles are opt-in.
 
-The derive currently **only validates** the annotations and generates nothing.
-A struct that carries valid annotations compiles; the `Model`, `Patchable` and
-insert implementations do not exist yet, so later sections describe the
-contract the annotations are meant to feed rather than code you can call
-today. When code generation lands, the accepted syntax stays as documented
-here and only the emitted code is new.
+The derive validates the annotations and generates `impl dbkit::Model`, which
+carries them as the `Model::META` const at runtime. The `Patchable` and insert
+implementations do not exist yet, so later sections describe the contract the
+annotations are meant to feed rather than code you can call today. The accepted
+syntax stays as documented here.
 
 ## Example
 
@@ -164,13 +163,44 @@ For reference when reading a compile failure:
 All problems found in one struct are reported together, so a single compile
 fixes the whole annotation block.
 
+## Generated metadata
+
+`#[derive(DbModel)]` emits `impl dbkit::Model for Email` with a `META` const of
+type `dbkit::TableMeta`:
+
+- `table` — the value of `#[db(table = "...")]`.
+- `primary_key`, `version`, `created_at`, `updated_at` — the annotated field
+  names, or `None` for absent optional roles.
+- `columns` — every field in declaration order as
+  `ColumnMeta { name, nullable }`, where `nullable` is true exactly when the
+  field type is `Option<_>`.
+
+The emitted code names `::dbkit::...`, so the deriving crate depends on
+`dbkit` (which re-exports the derive).
+
+## Collecting models
+
+A derive sees one struct at a time and cannot discover its siblings, so the
+crate lists its models explicitly once:
+
+```rust
+use dbkit::Model;
+use dbkit::TableMeta;
+
+pub const MODELS: &[TableMeta] = &[email::Email::META];
+```
+
+The explicit `&[TableMeta]` type is required — a `const` never infers — and it
+is what unsizes the array to a slice. Tests and other crates iterate `MODELS`;
+omitting a model from the list is caught by the schema test, which fails on any
+table without a model.
+
 ## Relation to the schema test
 
-The `COLUMNS` constant of a `Model` and the annotated struct must stay in sync
-with `schema.sql`; the per-service `tests/schema.rs` compares the column set
-with `information_schema`. When code generation lands, that comparison moves
-from a hand-written `COLUMNS` to a generated one, and the test keeps its job:
-catching a table that the model does not describe.
+The per-service `tests/schema.rs` iterates `MODELS` and compares
+`TableMeta::columns` — names and nullability — with `information_schema`, then
+checks that every table in the schema has a model. A model and `schema.sql`
+drifting apart is a test failure, not a runtime surprise.
 
 ## Not yet supported
 

@@ -1,33 +1,29 @@
+use dbkit::Model;
+use dbkit::TableMeta;
+use email_service::db::models::MODELS;
 use email_service::db::models::email::Email;
 use email_service::db::models::email::EmailId;
 use email_service::db::schema::SCHEMA;
-use facet::Facet;
-use facet::FieldFlags;
-use facet::Shape;
-use facet::Type;
-use facet::UserType;
 use pgtest_server::PgtestServer;
 use sqlx::FromRow;
 use sqlx::Postgres;
 use sqlx::postgres::PgArguments;
 use sqlx::postgres::PgRow;
 use sqlx::query::Query;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 type Decode = fn(&PgRow) -> Result<(), String>;
 type Insert = fn() -> Query<'static, Postgres, PgArguments>;
 
-struct Model {
-    table: &'static str,
-    shape: &'static Shape,
+struct Fixture {
+    meta: TableMeta,
     insert: Insert,
     decode: Decode,
 }
 
-const MODELS: &[Model] = &[Model {
-    table: "email",
-    shape: Email::SHAPE,
+const FIXTURES: &[Fixture] = &[Fixture {
+    meta: Email::META,
     insert: || {
         let email = Email {
             id: EmailId(Uuid::from_u128(1)),
@@ -63,41 +59,62 @@ const MODELS: &[Model] = &[Model {
     },
 }];
 
+#[test]
+fn every_model_has_an_insert_fixture() {
+    for meta in MODELS {
+        assert!(
+            FIXTURES
+                .iter()
+                .any(|fixture| fixture.meta.table == meta.table),
+            "no insert fixture for table \"{}\"",
+            meta.table
+        );
+    }
+}
+
 #[tokio::test]
 async fn models_and_schema_share_columns() {
     let db = PgtestServer::start().await.database().await;
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
     let mut problems = Vec::new();
 
-    for model in MODELS {
-        let Type::User(UserType::Struct(struct_type)) = model.shape.ty else {
-            panic!("{} is not a struct", model.shape.type_identifier);
-        };
-        let model_columns: BTreeSet<&str> = struct_type
-            .fields
+    for meta in MODELS {
+        let model_columns: BTreeMap<&str, bool> = meta
+            .columns
             .iter()
-            .filter(|field| !field.flags.contains(FieldFlags::SKIP))
-            .map(|field| field.rename.unwrap_or(field.name))
+            .map(|column| (column.name, column.nullable))
             .collect();
 
-        let schema_columns: Vec<String> = sqlx::query_scalar(
-            "SELECT column_name FROM information_schema.columns
+        let schema_columns: Vec<(String, String)> = sqlx::query_as(
+            "SELECT column_name, is_nullable FROM information_schema.columns
              WHERE table_schema = current_schema() AND table_name = $1",
         )
-        .bind(model.table)
+        .bind(meta.table)
         .fetch_all(&db)
         .await
         .unwrap();
-        let schema_columns: BTreeSet<&str> = schema_columns.iter().map(String::as_str).collect();
+        let schema_columns: BTreeMap<String, bool> = schema_columns
+            .into_iter()
+            .map(|(name, nullable)| (name, nullable == "YES"))
+            .collect();
 
-        for column in &schema_columns - &model_columns {
-            problems.push(format!(
-                "table \"{}\" has column \"{column}\" without a model field",
-                model.table
-            ));
+        for (column, nullable) in &schema_columns {
+            match model_columns.get(column.as_str()) {
+                None => problems.push(format!(
+                    "table \"{}\" has column \"{column}\" without a model field",
+                    meta.table
+                )),
+                Some(expected) if expected != nullable => problems.push(format!(
+                    "{}: column \"{column}\" is nullable = {nullable}, the model says {expected}",
+                    meta.table
+                )),
+                Some(_) => {}
+            }
         }
-        for column in &model_columns - &schema_columns {
-            problems.push(format!("{}: field \"{column}\" has no column", model.table));
+        for column in model_columns.keys() {
+            if !schema_columns.contains_key(*column) {
+                problems.push(format!("{}: field \"{column}\" has no column", meta.table));
+            }
         }
     }
 
@@ -109,7 +126,7 @@ async fn models_and_schema_share_columns() {
     .await
     .unwrap();
     for table in tables {
-        if !MODELS.iter().any(|model| model.table == table) {
+        if !MODELS.iter().any(|meta| meta.table == table) {
             problems.push(format!("table \"{table}\" has no model"));
         }
     }
@@ -126,14 +143,17 @@ async fn models_insert() {
     let db = PgtestServer::start().await.database().await;
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
 
-    for model in MODELS {
-        let row = (model.insert)()
+    for fixture in FIXTURES {
+        let row = (fixture.insert)()
             .fetch_one(&db)
             .await
-            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", model.table));
+            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", fixture.meta.table));
 
-        (model.decode)(&row).unwrap_or_else(|error| {
-            panic!("{}: inserted row does not decode: {error}", model.table)
+        (fixture.decode)(&row).unwrap_or_else(|error| {
+            panic!(
+                "{}: inserted row does not decode: {error}",
+                fixture.meta.table
+            )
         });
     }
 }
@@ -143,20 +163,23 @@ async fn models_select() {
     let db = PgtestServer::start().await.database().await;
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
 
-    for model in MODELS {
-        (model.insert)()
+    for fixture in FIXTURES {
+        (fixture.insert)()
             .execute(&db)
             .await
-            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", model.table));
+            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", fixture.meta.table));
 
-        let sql = format!("SELECT * FROM \"{}\"", model.table);
+        let sql = format!("SELECT * FROM \"{}\"", fixture.meta.table);
         let row = sqlx::query(sqlx::AssertSqlSafe(sql))
             .fetch_one(&db)
             .await
-            .unwrap_or_else(|error| panic!("{}: select failed: {error}", model.table));
+            .unwrap_or_else(|error| panic!("{}: select failed: {error}", fixture.meta.table));
 
-        (model.decode)(&row).unwrap_or_else(|error| {
-            panic!("{}: selected row does not decode: {error}", model.table)
+        (fixture.decode)(&row).unwrap_or_else(|error| {
+            panic!(
+                "{}: selected row does not decode: {error}",
+                fixture.meta.table
+            )
         });
     }
 }

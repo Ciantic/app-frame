@@ -1,6 +1,8 @@
 use chrono::DateTime;
 use chrono::Utc;
-use dbkit_macros::DbModel;
+use dbkit::DbModel;
+use dbkit::Model;
+use dbkit::TableMeta;
 use uuid::Uuid;
 
 #[derive(DbModel)]
@@ -33,6 +35,59 @@ struct WidgetLog {
     #[db(primary_key)]
     id: Uuid,
     message: String,
+    note: Option<String>,
+}
+
+const MODELS: &[TableMeta] = &[Widget::META, WidgetLog::META];
+
+#[test]
+fn derive_generates_table_metadata() {
+    let meta = Widget::META;
+
+    assert_eq!(meta.table, "widget");
+    assert_eq!(meta.primary_key, ["id"]);
+    assert_eq!(meta.version, Some("version"));
+    assert_eq!(meta.created_at, Some("created_at"));
+    assert_eq!(meta.updated_at, Some("updated_at"));
+
+    let columns: Vec<(&str, bool)> = meta
+        .columns
+        .iter()
+        .map(|column| (column.name, column.nullable))
+        .collect();
+
+    assert_eq!(
+        columns,
+        [
+            ("id", false),
+            ("name", false),
+            ("created_at", false),
+            ("updated_at", false),
+            ("version", false),
+        ]
+    );
+}
+
+#[test]
+fn derive_omits_absent_roles_and_marks_optionals() {
+    let meta = <WidgetLog as Model>::META;
+
+    assert_eq!(meta.table, "widget_log");
+    assert_eq!(meta.version, None);
+    assert_eq!(meta.created_at, None);
+    assert_eq!(meta.updated_at, None);
+    assert!(
+        meta.columns
+            .iter()
+            .any(|column| column.name == "note" && column.nullable)
+    );
+}
+
+#[test]
+fn models_lists_every_model() {
+    let tables: Vec<&str> = MODELS.iter().map(|meta| meta.table).collect();
+
+    assert_eq!(tables, ["widget", "widget_log"]);
 }
 
 /// Proves the derive runs on a model shape and leaves the struct usable.
@@ -72,8 +127,10 @@ fn derive_accepts_a_model_without_version() {
     let log = WidgetLog {
         id: Uuid::from_u128(1),
         message: "created".to_owned(),
+        note: None,
     };
 
     assert_eq!(log.id, Uuid::from_u128(1));
     assert_eq!(log.message, "created");
+    assert!(log.note.is_none());
 }

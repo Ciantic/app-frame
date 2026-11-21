@@ -194,18 +194,19 @@ dependencies = [
 name = "dbkit"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "dbkit-macros",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
 name = "dbkit-macros"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "proc-macro2",
  "syn 2.0.119",
- "uuid",
 ]
 
 [[package]]
@@ -250,6 +251,7 @@ name = "email-service"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dbkit",
  "facet",
  "pgtest-server",
  "serde",
@@ -1550,6 +1552,7 @@ name = "user-service"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dbkit",
  "facet",
  "pgtest-server",
  "serde",

@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use chrono::Utc;
+use dbkit::DbModel;
 use facet::Facet;
 use serde::Deserialize;
 use serde::Serialize;
@@ -10,8 +11,10 @@ use uuid::Uuid;
 #[sqlx(transparent)]
 pub struct EmailId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Facet)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Facet, DbModel)]
+#[db(table = "email")]
 pub struct Email {
+    #[db(primary_key)]
     pub id: EmailId,
     pub from: String,
     pub to: String,
@@ -19,7 +22,10 @@ pub struct Email {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
+    #[db(created_at)]
     pub created_at: DateTime<Utc>,
+    #[db(updated_at)]
     pub updated_at: DateTime<Utc>,
+    #[db(version)]
     pub version: i64,
 }
