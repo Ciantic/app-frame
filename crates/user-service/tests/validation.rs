@@ -1,5 +1,5 @@
 use chrono::Utc;
-use garde::Validate;
+use serde_json::json;
 use user_service::db::models::user::User;
 use user_service::db::models::user::UserId;
 use user_service::db::models::user_session::UserSession;
@@ -35,33 +35,32 @@ fn session() -> UserSession {
 
 #[test]
 fn valid_rows_pass_validation() {
-    assert!(user().validate().is_ok());
-    assert!(session().validate().is_ok());
+    assert!(User::validate_and_parse(&serde_json::to_value(user()).unwrap()).is_ok());
+    assert!(UserSession::validate_and_parse(&serde_json::to_value(session()).unwrap()).is_ok());
 }
 
 #[test]
 fn empty_token_hash_fails_validation() {
-    let mut session = session();
-    session.token_hash = SessionToken(String::new());
+    let mut json = serde_json::to_value(session()).unwrap();
+    json["token_hash"] = json!("");
 
-    assert!(session.validate().is_err());
+    assert!(UserSession::validate_and_parse(&json).is_err());
 }
 
 #[test]
 fn invalid_email_fails_validation() {
-    let mut user = user();
-    user.email = Email("nope".to_owned());
+    let mut json = serde_json::to_value(user()).unwrap();
+    json["email"] = json!("nope");
 
-    assert!(user.validate().is_err());
+    assert!(User::validate_and_parse(&json).is_err());
 }
 
 #[test]
 fn deserialization_does_not_validate() {
     let mut json = serde_json::to_value(user()).unwrap();
-    json["email"] = serde_json::json!("nope");
+    json["email"] = json!("nope");
 
     let user: User = serde_json::from_value(json).unwrap();
 
     assert_eq!(user.email.0, "nope");
-    assert!(user.validate().is_err());
 }

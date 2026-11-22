@@ -7,12 +7,12 @@ edition.workspace = true
 chrono.workspace = true
 dbkit = { path = "../dbkit" }
 facet.workspace = true
-garde.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
+zod-rs.workspace = true
 
 [dev-dependencies]
 pgtest-server = { path = "../pgtest-server" }
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
