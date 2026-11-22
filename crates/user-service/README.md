@@ -33,6 +33,9 @@ Passwords, OAuth providers and authorization rules are out of scope for now.
   exposed as `user_service::db::schema::SCHEMA`.
 - [models](./src/db/models) — `User` and `UserSession` structs plus their id
   newtypes. They serialise to JSON and derive `sqlx::FromRow`.
+- [primitives](./src/db/primitives) — value types the models use, such as
+  `Email`. They only carry the field's meaning: sanitization and validation are
+  separate steps.
 - [lib.rs](./src/lib.rs) — library entry point for other services.
 
 Both tables keep soft delete (`deleted_at`) and optimistic locking (`version`)

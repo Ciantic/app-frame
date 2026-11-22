@@ -12,6 +12,7 @@ use user_service::db::models::user::User;
 use user_service::db::models::user::UserId;
 use user_service::db::models::user_session::UserSession;
 use user_service::db::models::user_session::UserSessionId;
+use user_service::db::primitives::email::Email;
 use user_service::db::schema::SCHEMA;
 use uuid::Uuid;
 
@@ -33,7 +34,7 @@ const FIXTURES: &[Fixture] = &[
         insert: || {
             let user = User {
                 id: UserId(USER_ID),
-                email: "sample@example.com".to_owned(),
+                email: Email("sample@example.com".to_owned()),
                 email_verified_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),

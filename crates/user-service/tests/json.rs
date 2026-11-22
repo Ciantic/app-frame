@@ -3,12 +3,13 @@ use user_service::db::models::user::User;
 use user_service::db::models::user::UserId;
 use user_service::db::models::user_session::UserSession;
 use user_service::db::models::user_session::UserSessionId;
+use user_service::db::primitives::email::Email;
 use uuid::Uuid;
 
 fn user() -> User {
     User {
         id: UserId(Uuid::from_u128(1)),
-        email: "sample@example.com".to_owned(),
+        email: Email("sample@example.com".to_owned()),
         email_verified_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
