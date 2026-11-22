@@ -1,4 +1,5 @@
 use super::user::UserId;
+use crate::db::primitives::session_token::SessionToken;
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
@@ -27,8 +28,8 @@ pub struct UserSession {
     pub user_id: UserId,
 
     #[db(pgtype = "text")]
-    #[garde(length(min = 1))]
-    pub token_hash: String,
+    #[garde(dive)]
+    pub token_hash: SessionToken,
 
     #[db(pgtype = "timestamptz")]
     #[garde(skip)]

@@ -4,6 +4,7 @@ use user_service::db::models::user::UserId;
 use user_service::db::models::user_session::UserSession;
 use user_service::db::models::user_session::UserSessionId;
 use user_service::db::primitives::email::Email;
+use user_service::db::primitives::session_token::SessionToken;
 use uuid::Uuid;
 
 fn user() -> User {
@@ -22,7 +23,7 @@ fn session() -> UserSession {
     UserSession {
         id: UserSessionId(Uuid::from_u128(2)),
         user_id: UserId(Uuid::from_u128(1)),
-        token_hash: "sample".to_owned(),
+        token_hash: SessionToken("sample".to_owned()),
         expires_at: chrono::Utc::now(),
         revoked_at: None,
         created_at: chrono::Utc::now(),

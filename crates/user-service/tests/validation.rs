@@ -5,6 +5,7 @@ use user_service::db::models::user::UserId;
 use user_service::db::models::user_session::UserSession;
 use user_service::db::models::user_session::UserSessionId;
 use user_service::db::primitives::email::Email;
+use user_service::db::primitives::session_token::SessionToken;
 use uuid::Uuid;
 
 fn user() -> User {
@@ -23,7 +24,7 @@ fn session() -> UserSession {
     UserSession {
         id: UserSessionId(Uuid::from_u128(2)),
         user_id: UserId(Uuid::from_u128(1)),
-        token_hash: "sample".to_owned(),
+        token_hash: SessionToken("sample".to_owned()),
         expires_at: Utc::now(),
         revoked_at: None,
         created_at: Utc::now(),
@@ -41,7 +42,7 @@ fn valid_rows_pass_validation() {
 #[test]
 fn empty_token_hash_fails_validation() {
     let mut session = session();
-    session.token_hash = String::new();
+    session.token_hash = SessionToken(String::new());
 
     assert!(session.validate().is_err());
 }
