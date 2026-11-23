@@ -4,15 +4,23 @@ Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
 They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, which ones are audit
 columns, which columns the database fills in from a default, and which
-comparisons each column may be queried with. Every field carries a `pgtype`,
-and a primary key is required; the other annotations are opt-in.
+comparisons each column may be queried with. Every field carries a `pgtype`
+unless it is flattened, and a table row needs a primary key; the other
+annotations are opt-in.
 
-The derive validates the annotations and generates `impl dbkit::Model`, which
-carries them as the `Model::META` const at runtime. `#[derive(DbPatch)]` reads
-the same annotations to generate the model's patch input type, which `garde`
-validates; insert implementations do not exist yet, so the insert sections
-describe a contract rather than code you can call today. The accepted syntax
-stays as documented here.
+A struct is one of two shapes:
+
+- A table row, `#[db(table = "...")]`, which generates `impl dbkit::Model`
+  with `Model::meta()`.
+- A fragment, `#[db(fragment)]`, which is a group of columns with no table of
+  its own. It generates `impl dbkit::Model` returning
+  `Meta::Fragment(&TableFragment { columns })`, and another model embeds it
+  with `#[db(flatten)]`.
+
+`#[derive(DbPatch)]` reads the same annotations to generate the model's patch
+input type, which `garde` validates; insert implementations do not exist yet,
+so the insert sections describe a contract rather than code you can call today.
+The accepted syntax stays as documented here.
 
 ## Example
 
@@ -63,13 +71,17 @@ generated patch would expose; role-annotated fields never are.
 
 ## Where annotations may appear
 
-- `#[db(table = "...")]` on the struct, exactly once.
-- `#[db(pgtype = "...")]` on every field, exactly once.
+- `#[db(table = "...")]` or `#[db(fragment)]` on the struct, exactly once.
+  They are mutually exclusive; `table` makes the struct a table row and
+  `fragment` makes it a column group.
+- `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`, exactly
+  once.
 - `#[db(pgdefault = "...")]` on a field, at most once.
 - `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
-  `#[db(updated_at)]` on a field.
+  `#[db(updated_at)]` on a field of a table row.
 - `#[db(query_ops(...))]` on a field, at most once; the parentheses hold a
   comma-separated operator list.
+- `#[db(flatten)]` on a field of a table row, at most once.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
   collected across all of them.
 - All attributes in the accepted vocabulary are listed here. Anything else is a
@@ -87,6 +99,7 @@ not use that form:
   `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
   `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, in))]`.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
+- A `#[db(flatten)]` field carries that annotation alone.
 - A blank line separates fields, so the annotation block reads as one unit per
   column.
 
@@ -102,12 +115,88 @@ Names the table the row belongs to.
 - Missing, empty, or repeated `table` is an error.
 - The value is the plain identifier without quotes or a schema prefix;
   generated SQL quotes it as `"..."`.
+- A table cannot have generic parameters, because the metadata cache is one
+  `static` per type.
+
+## `fragment`
+
+Makes the struct a group of columns instead of a table row.
+
+- Legal on: the struct, exactly once, as an alternative to `table`.
+- Value: none; it is a bare annotation.
+- A fragment has no table name, no primary key and no roles. `pgtype` is
+  required on every field, and `pgdefault` and `query_ops` work as usual.
+- The derive generates `impl dbkit::Model`, whose `meta()` is
+  `Meta::Fragment(&TableFragment { columns })`: no table name, no key, no
+  roles to fake. A model embeds it with [`flatten`](#flatten).
+- `Meta::Fragment` is what `flatten` matches on: splicing a fragment is fine,
+  splicing a table panics on the first `meta()` call with a message naming the
+  field.
+- A fragment is flat: it cannot itself `#[db(flatten)]` another struct.
+- `#[derive(DbPatch)]` on a fragment emits `<Fragment>Patch`, whose fields are
+  all `Patch<T>` because a fragment has no key or version to carry.
+- Fragments are not listed in the crate's `MODELS` list, because they are not
+  tables.
+
+```rust
+#[derive(DbModel)]
+#[db(fragment)]
+pub struct Size {
+    #[db(pgtype = "int4")]
+    pub width: i32,
+
+    #[db(pgtype = "int4")]
+    pub height: i32,
+}
+```
+
+## `flatten`
+
+Splices the columns of a fragment into the enclosing table.
+
+- Legal on: a field of a table row, at most once.
+- Value: none; it is a bare annotation.
+- The field type must derive `DbModel` with `#[db(fragment)]`. The derive
+  cannot inspect the type, so it matches on `<Type as dbkit::Model>::meta()`
+  and, on `Meta::Fragment`, extends the column list with its `columns`. A type
+  that does not derive `DbModel` fails to compile; a table panics on the first
+  `meta()` call, naming the field and the table it found.
+- The fragment's columns take the field's position in the table's column list,
+  so declaration order is preserved across plain and flattened fields.
+- A flattened field is not a column itself: it must not carry `pgtype`,
+  `pgdefault`, `query_ops` or a role, and it must not be `Option`. An optional
+  group is expressed by nullable columns inside the fragment.
+- The field stays an ordinary struct field on the row type, so reading the row
+  and serializing it are unaffected.
+- `#[derive(DbPatch)]` emits the field as a `#[serde(flatten)]` field of type
+  `<FieldType>Patch`, so the fragment's columns are top-level keys of the patch.
+  The fragment must derive `DbPatch` too.
+- Column name collisions across fragments are not detected by the derive;
+  `check_live_schema_against_models` reports a column declared more than once.
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, DbModel)]
+#[db(table = "frame")]
+pub struct Frame {
+    #[db(primary_key)]
+    #[db(pgtype = "uuid")]
+    pub id: FrameId,
+
+    #[db(flatten)]
+    pub size: Size,
+
+    #[db(pgtype = "text")]
+    pub label: String,
+}
+```
+
+The table has columns `id`, `width`, `height` and `label`, in that order.
 
 ## `pgtype`
 
 Names the column type, written the way it is written in `schema.sql`.
 
-- Legal on: every field, required.
+- Legal on: every field that is not `#[db(flatten)]`, required.
 - Value: a non-empty string literal holding a SQL type: `uuid`, `text`,
   `bigint`, `boolean`, `timestamptz`, `jsonb`, `varchar(255)`,
   `numeric(10,2)`, `text[]`, `text[][]`.
@@ -229,10 +318,17 @@ Every rule below produces a compile error.
 
 - The target must be a struct, not an enum or a union.
 - The struct must have named fields.
-- The struct must carry `#[db(table = "...")]`.
-- Every field must carry `#[db(pgtype = "...")]`.
-- `table` must be a non-empty string literal and appear only once.
-- `primary_key` must be present at least once, and may mark several fields.
+- The struct must carry `#[db(table = "...")]` or `#[db(fragment)]`, exactly
+  one of the two.
+- `table` must be a non-empty string literal, and `table` and `fragment` cannot
+  both be present.
+- A table must not have generic parameters.
+- A table row must declare `primary_key` at least once; a fragment must not
+  carry it or any other role.
+- Every field that is not `#[db(flatten)]` must carry `#[db(pgtype = "...")]`.
+- `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`
+  or a role, and its field must not be `Option`.
+- A fragment cannot `#[db(flatten)]` another struct.
 - `version`, `created_at` and `updated_at` may each appear at most once.
 - A single field may carry at most one role, even if the roles are split across
   several `#[db(...)]` attributes; a primary key column therefore never also
@@ -249,8 +345,9 @@ Every rule below produces a compile error.
 - `query_ops` appears at most once per field, holds at least one operator, and
   every operator must be in the accepted list; repeating an operator is an
   error.
-- The struct-level attribute accepts only `table`; the field-level attribute
-  accepts only `pgtype`, `pgdefault`, `query_ops` and the four roles.
+- The struct-level attribute accepts only `table` and `fragment`; the
+  field-level attribute accepts only `pgtype`, `pgdefault`, `query_ops`,
+  `flatten` and the four roles.
 
 ## How field types are matched
 
@@ -265,7 +362,10 @@ spellings behave the same:
 
 Annotations do not affect `sqlx::FromRow`, serde or the database mapping. A
 model still decodes every returned column, and the annotations only describe
-the role a field plays for the generated code.
+the role a field plays for the generated code. In particular, `#[db(flatten)]`
+splices columns into dbkit's metadata only: a `FromRow` model whose struct
+should decode flat columns needs `#[sqlx(flatten)]` on the same field, and its
+JSON stays nested unless the field also carries `#[serde(flatten)]`.
 
 ## Error messages
 
@@ -273,11 +373,19 @@ For reference when reading a compile failure:
 
 - `` `DbModel` can only be derived for structs ``
 - `` `DbModel` requires named fields ``
-- `` missing `#[db(table = "...")]` ``
-- ``unknown attribute; the struct only accepts `table` ``
+- `` missing `#[db(table = "...")]` or `#[db(fragment)]` ``
+- ``unknown attribute; the struct accepts `table` or `fragment` ``
 - `` `table` must not be empty ``
 - `` duplicate `table` ``
-- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at`, `pgtype` or `pgdefault` ``
+- `` duplicate `#[db(fragment)]` ``
+- `` `table` and `fragment` are mutually exclusive ``
+- `` `DbModel` on a table cannot have generic parameters; ... ``
+- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at`, `flatten`, `pgtype`, `pgdefault` or `query_ops` ``
+- `` a fragment cannot carry `#[db(...)]` roles ``
+- `` a fragment cannot `#[db(flatten)]` another struct ``
+- `` `#[db(flatten)]` cannot be combined with `pgtype` `` (and the same for
+  `pgdefault`, `query_ops` and a role)
+- `` `#[db(flatten)]` field must not be `Option` ``
 - ``missing `#[db(pgtype = "...")]` on field `from` ``
 - `` `pgtype` must not be empty ``
 - ``duplicate `pgtype` ``
@@ -297,20 +405,47 @@ For reference when reading a compile failure:
 All problems found in one struct are reported together, so a single compile
 fixes the whole annotation block.
 
+One check is not a compile error. `#[db(flatten)]` on a table type compiles,
+because a table and a fragment are both `dbkit::Model`; the generated `meta()`
+matches `Meta` and panics on the table variant:
+
+- `` `#[db(flatten)]` field `size` has type `<table>`, which is a table; flattened fields must be `#[db(fragment)]` structs ``
+
 ## Generated metadata
 
-`#[derive(DbModel)]` emits `impl dbkit::Model for Email` with a `META` const of
-type `dbkit::TableMeta`:
+`#[derive(DbModel)]` emits `impl dbkit::Model for Email` with
+`fn meta() -> dbkit::Meta`, whose `Meta::Table` variant carries a
+`dbkit::TableMeta`:
 
 - `table` — the value of `#[db(table = "...")]`.
 - `primary_key`, `version`, `created_at`, `updated_at` — the annotated field
   names, or `None` for absent optional roles.
-- `columns` — every field in declaration order as
+- `columns` — every column in declaration order as
   `ColumnMeta { name, nullable, pg_type, pg_default, query_ops }`, where
   `nullable` is true exactly when the field type is `Option<_>`, `pg_type` is
   the `pgtype` annotation, `pg_default` is the `pgdefault` annotation or
   `None`, and `query_ops` is the `query_ops` list in declaration order or an
   empty slice.
+
+A `#[db(fragment)]` struct emits `Meta::Fragment(&TableFragment { columns })`
+instead, where `columns` is the same `ColumnMeta` list and there are no table,
+key or role fields to fill in.
+
+`meta()` is a function rather than a const for one reason: a `const` array
+cannot splice another type's columns (`&[ColumnMeta { .. }, Size::meta().columns()]`
+does not compile, because a `const` item cannot spread a slice). The generated
+body builds a `Vec<ColumnMeta>`, pushes each plain column and extends the list
+from each flattened field's `Meta::Fragment` columns, then leaks the slice into
+a `static OnceLock<TableMeta>`. The first call does the allocation; every later
+call returns the same `Meta::Table`, pointing at the cached `TableMeta`.
+
+A `#[db(fragment)]` struct needs no splicing, so its `meta()` returns a
+promoted `static Meta = Meta::Fragment(&TableFragment { columns: &[..] })`; the
+whole value is a constant with no `OnceLock`. `Meta` is an enum, so a
+fragment's value has no table name or key to lie about. Both shapes implement
+`Model`, so the type system still cannot tell them apart at the trait level;
+`flatten` matches the `Meta` variant at runtime, and `Meta::into_table()`
+panics if a fragment is listed in `MODELS`.
 
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
@@ -364,6 +499,11 @@ pub struct UserPatch {
 - A nullable column's field is `Patch<T>`, not `Patch<Option<T>>`, so `null`
   means "clear" rather than "set to null".
 - `created_at` and `updated_at` are not patchable and are omitted.
+- A `#[db(flatten)]` field becomes a `#[serde(flatten)]` field of type
+  `<FieldType>Patch`, so the fragment's columns are top-level keys of the same
+  patch object. The fragment must therefore derive `DbPatch` too. On a
+  `#[db(fragment)]` struct the generated patch has no required key or version
+  field.
 - The struct derives `Debug`, `Clone`, `Serialize` and `Deserialize`; patch
   fields carry `skip_serializing_if = "Patch::is_absent"`, so an absent field
   stays off the wire in a response.
@@ -385,14 +525,22 @@ crate lists its models explicitly once:
 ```rust
 use dbkit::Model;
 use dbkit::TableMeta;
+use std::sync::LazyLock;
 
-pub const MODELS: &[TableMeta] = &[email::Email::META];
+pub static MODELS: LazyLock<Vec<TableMeta>> =
+    LazyLock::new(|| vec![email::Email::meta().into_table()]);
 ```
 
-The explicit `&[TableMeta]` type is required — a `const` never infers — and it
-is what unsizes the array to a slice. Tests and other crates iterate `MODELS`;
-omitting a model from the list is caught by the schema test, which fails on any
-table without a model.
+`Meta::into_table()` unwraps the `Meta::Table` variant into an owned
+`TableMeta` (`TableMeta` is `Copy`), and panics for a fragment. A `LazyLock`
+keeps the list a single shared value instead of rebuilding it per call.
+`&MODELS` coerces to `&[TableMeta]`, which is what the schema check and the
+tests take. Tests iterate `MODELS.iter()`; omitting a model from the list is
+caught by the schema test, which fails on any table without a model. Fragments
+are not tables, so they are not listed — and listing one panics instead of
+silently checking a table named `""`. A schema test that covers a model with
+`#[db(flatten)]` covers its fragment's columns through the model's
+`meta().columns()`.
 
 ## Relation to the schema test
 
@@ -414,7 +562,9 @@ assert!(
 
 Each problem is one line naming the table and column, so a failing test says
 what to fix. The check covers names and nullability from
-`information_schema.columns`, tables without a model, and types and defaults.
+`information_schema.columns`, tables without a model, types and defaults, and
+a column declared more than once — which is what two `#[db(flatten)]` fragments
+sharing a column name produce.
 Types are compared structurally: the helper creates a temporary table whose
 columns use the `pgtype` annotations and compares each column's `atttypid` and
 `atttypmod` with the real table's, so length and precision must match and any
@@ -446,3 +596,10 @@ These are deliberately out of scope until a model needs them:
 - Non-`i64` version types.
 - Building SQL from `query_ops`: the annotation only records which operators a
   column accepts.
+- Roles inside a fragment, such as an embedded `Audit` fragment carrying
+  `created_at`: the role would have to become the parent model's role, and
+  uniqueness would then be a cross-type check.
+- Nested fragments: a fragment cannot `#[db(flatten)]` another fragment. The
+  restriction is the macro's, not the type's: a fragment's `meta()` could
+  splice a sibling's columns at runtime, but fragments are meant to stay leaf
+  groups.

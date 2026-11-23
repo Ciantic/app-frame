@@ -4,32 +4,25 @@
 //! version as-is: an update always names its row and states the version it
 //! expects. Every other business column becomes a [`dbkit::Patch`] field, so a
 //! missing key leaves the column alone and `null` clears it. Audit columns are
-//! not inputs, so they are omitted.
+//! not inputs, so they are omitted. A flattened field is a `serde(flatten)`ed
+//! nested patch, so a fragment's columns share the parent patch object.
 //!
 //! The struct derives `garde::Validate`, and a patch field whose payload type
 //! can carry rules dives into it, so `Set` values are validated while `Absent`
 //! and `Null` pass.
 
 use crate::annotations;
+use crate::annotations::Column;
 use proc_macro2::TokenStream;
 use quote::format_ident;
 use quote::quote;
-use syn::Data;
 use syn::DeriveInput;
-use syn::Fields;
 use syn::Type;
 
 pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let annotations = annotations::parse(input)?;
     let name = &input.ident;
     let version = annotations.version.as_ref();
-
-    let Data::Struct(data) = &input.data else {
-        unreachable!("`annotations::parse` rejects non-structs");
-    };
-    let Fields::Named(fields) = &data.fields else {
-        unreachable!("`annotations::parse` rejects unnamed fields");
-    };
 
     let patch = format_ident!("{name}Patch");
     let doc = format!(
@@ -40,9 +33,19 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     let mut definitions = Vec::new();
 
-    for field in &fields.named {
-        let field_name = field.ident.as_ref().expect("named field");
-        let ty = &field.ty;
+    for column in &annotations.columns {
+        let (field_name, ty) = match column {
+            Column::Scalar { name, ty, .. } => (name, ty),
+            Column::Flattened { name, ty } => {
+                let nested = patch_type(ty);
+                definitions.push(quote! {
+                    #[serde(flatten)]
+                    #[garde(dive)]
+                    pub #name: #nested
+                });
+                continue;
+            }
+        };
 
         if annotations.created_at.as_ref() == Some(field_name)
             || annotations.updated_at.as_ref() == Some(field_name)
@@ -77,6 +80,21 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             #(#definitions),*
         }
     })
+}
+
+/// The patch type of a flattened field: the field type with `Patch` appended to
+/// its last path segment, so `size: Size` becomes `SizePatch`.
+fn patch_type(ty: &Type) -> Type {
+    let Type::Path(path) = ty else {
+        return ty.clone();
+    };
+
+    let mut path = path.clone();
+    if let Some(segment) = path.path.segments.last_mut() {
+        segment.ident = format_ident!("{}Patch", segment.ident);
+    }
+
+    Type::Path(path)
 }
 
 /// The type inside `Option<...>`, or the type itself.

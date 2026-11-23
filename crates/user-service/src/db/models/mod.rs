@@ -3,5 +3,11 @@ pub mod user_session;
 
 use dbkit::Model;
 use dbkit::TableMeta;
+use std::sync::LazyLock;
 
-pub const MODELS: &[TableMeta] = &[user::User::META, user_session::UserSession::META];
+pub static MODELS: LazyLock<Vec<TableMeta>> = LazyLock::new(|| {
+    vec![
+        user::User::meta().into_table(),
+        user_session::UserSession::meta().into_table(),
+    ]
+});

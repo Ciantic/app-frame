@@ -68,10 +68,18 @@ impl FilterOperator {
     }
 }
 
+/// What the struct describes: a table row, or a group of columns embedded in
+/// another model with `#[db(flatten)]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Table(String),
+    Fragment,
+}
+
 #[derive(Debug)]
 pub struct Annotations {
-    pub table: String,
-    /// Primary key columns in declaration order; never empty.
+    pub shape: Shape,
+    /// Primary key columns in declaration order; never empty for a table.
     pub primary_key: Vec<Ident>,
     pub version: Option<Ident>,
     pub created_at: Option<Ident>,
@@ -81,20 +89,26 @@ pub struct Annotations {
 }
 
 #[derive(Debug)]
-pub struct Column {
-    pub name: Ident,
-    pub nullable: bool,
-    /// Postgres type name, as `pg_type.typname` spells it.
-    pub pg_type: String,
-    /// Column default as DDL spells it, e.g. `now()`, `0`, `'{}'::jsonb`.
-    pub pg_default: Option<String>,
-    /// Operators the column may be filtered with, in declaration order.
-    pub query_ops: Vec<FilterOperator>,
+pub enum Column {
+    Scalar {
+        name: Ident,
+        ty: Type,
+        nullable: bool,
+        /// Postgres type name, as DDL spells it.
+        pg_type: String,
+        /// Column default as DDL spells it, e.g. `now()`, `0`, `'{}'::jsonb`.
+        pg_default: Option<String>,
+        /// Operators the column may be filtered with, in declaration order.
+        query_ops: Vec<FilterOperator>,
+    },
+    /// A `#[db(flatten)]` field, contributing the columns of its type.
+    Flattened { name: Ident, ty: Type },
 }
 
 #[derive(Debug, Default)]
 struct FieldAnnotations {
     roles: Vec<Role>,
+    flatten: bool,
     pg_type: Option<String>,
     pg_default: Option<String>,
     query_ops: Vec<FilterOperator>,
@@ -143,27 +157,88 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     };
 
     let mut errors = Vec::new();
-    let table = table(&input.attrs, input.span(), &mut errors);
+    let shape = shape(&input.attrs, input.span(), &mut errors);
+    let fragment = matches!(shape, Some(Shape::Fragment));
+
+    if !fragment && !input.generics.params.is_empty() {
+        errors.push(syn::Error::new(
+            input.generics.span(),
+            "`DbModel` on a table cannot have generic parameters; the metadata cache is one \
+             static per type",
+        ));
+    }
 
     let mut roles = Vec::new();
     let mut columns = Vec::new();
     for field in &fields.named {
         let name = field.ident.clone().expect("named field");
         let annotations = field_annotations(field, &mut errors);
-        let field_roles = annotations.roles;
+
+        if annotations.flatten {
+            if fragment {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "a fragment cannot `#[db(flatten)]` another struct",
+                ));
+            }
+            if !annotations.roles.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with a role",
+                ));
+            }
+            if annotations.pg_type.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `pgtype`",
+                ));
+            }
+            if annotations.pg_default.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `pgdefault`",
+                ));
+            }
+            if !annotations.query_ops.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `query_ops`",
+                ));
+            }
+            if is(&field.ty, "Option") {
+                errors.push(syn::Error::new(
+                    field.ty.span(),
+                    "`#[db(flatten)]` field must not be `Option`",
+                ));
+            }
+
+            columns.push(Column::Flattened {
+                name,
+                ty: field.ty.clone(),
+            });
+            continue;
+        }
+
+        let field_roles = &annotations.roles;
         if field_roles.len() > 1 {
             errors.push(syn::Error::new(
                 field.span(),
                 "a field can carry at most one `#[db(...)]` role",
             ));
         }
+        if fragment && !field_roles.is_empty() {
+            errors.push(syn::Error::new(
+                field.span(),
+                "a fragment cannot carry `#[db(...)]` roles",
+            ));
+        }
 
-        for role in field_roles {
+        for &role in field_roles {
             check_field_type(role, field, &mut errors);
             roles.push((role, name.clone(), field.ty.clone()));
         }
 
-        let Some(pg_type) = annotations.pg_type else {
+        let Some(pg_type) = &annotations.pg_type else {
             errors.push(syn::Error::new(
                 field.span(),
                 format!("missing `#[db(pgtype = \"...\")]` on field `{name}`"),
@@ -171,12 +246,13 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             continue;
         };
 
-        columns.push(Column {
+        columns.push(Column::Scalar {
             name,
+            ty: field.ty.clone(),
             nullable: is(&field.ty, "Option"),
-            pg_type,
-            pg_default: annotations.pg_default,
-            query_ops: annotations.query_ops,
+            pg_type: pg_type.clone(),
+            pg_default: annotations.pg_default.clone(),
+            query_ops: annotations.query_ops.clone(),
         });
     }
 
@@ -189,7 +265,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let created_at = unique(&roles, Role::CreatedAt, &mut errors);
     let updated_at = unique(&roles, Role::UpdatedAt, &mut errors);
 
-    if !roles.iter().any(|(role, _, _)| *role == Role::PrimaryKey) {
+    if !fragment && !roles.iter().any(|(role, _, _)| *role == Role::PrimaryKey) {
         errors.push(syn::Error::new(
             input.span(),
             "missing `#[db(primary_key)]`",
@@ -198,12 +274,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
 
     combine(errors)?;
 
-    let Some(table) = table else {
+    let Some(shape) = shape else {
         unreachable!("missing required annotations are reported as errors");
     };
 
     Ok(Annotations {
-        table,
+        shape,
         primary_key,
         version,
         created_at,
@@ -212,25 +288,41 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     })
 }
 
-fn table(
+fn shape(
     attrs: &[Attribute],
     span: proc_macro2::Span,
     errors: &mut Vec<syn::Error>,
-) -> Option<String> {
-    let mut table = None;
+) -> Option<Shape> {
+    let mut shape = None;
 
     for attr in attrs.iter().filter(|attr| attr.path().is_ident("db")) {
         let result = attr.parse_nested_meta(|meta| {
-            if !meta.path.is_ident("table") {
-                return Err(meta.error("unknown attribute; the struct only accepts `table`"));
-            }
-
-            let value: LitStr = meta.value()?.parse()?;
-            if value.value().is_empty() {
-                return Err(meta.error("`table` must not be empty"));
-            }
-            if table.replace(value.value()).is_some() {
-                return Err(meta.error("duplicate `table`"));
+            if meta.path.is_ident("table") {
+                let value: LitStr = meta.value()?.parse()?;
+                if value.value().is_empty() {
+                    return Err(meta.error("`table` must not be empty"));
+                }
+                match &shape {
+                    None => shape = Some(Shape::Table(value.value())),
+                    Some(Shape::Table(_)) => return Err(meta.error("duplicate `table`")),
+                    Some(Shape::Fragment) => {
+                        return Err(meta.error("`table` and `fragment` are mutually exclusive"));
+                    }
+                }
+            } else if meta.path.is_ident("fragment") {
+                match &shape {
+                    None => shape = Some(Shape::Fragment),
+                    Some(Shape::Table(_)) => {
+                        return Err(meta.error("`table` and `fragment` are mutually exclusive"));
+                    }
+                    Some(Shape::Fragment) => {
+                        return Err(meta.error("duplicate `#[db(fragment)]`"));
+                    }
+                }
+            } else {
+                return Err(
+                    meta.error("unknown attribute; the struct accepts `table` or `fragment`")
+                );
             }
 
             Ok(())
@@ -241,11 +333,14 @@ fn table(
         }
     }
 
-    if table.is_none() {
-        errors.push(syn::Error::new(span, "missing `#[db(table = \"...\")]`"));
+    if shape.is_none() {
+        errors.push(syn::Error::new(
+            span,
+            "missing `#[db(table = \"...\")]` or `#[db(fragment)]`",
+        ));
     }
 
-    table
+    shape
 }
 
 fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnotations {
@@ -293,12 +388,17 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
 
                     Ok(())
                 })?;
+            } else if meta.path.is_ident("flatten") {
+                if annotations.flatten {
+                    return Err(meta.error("duplicate `flatten`"));
+                }
+                annotations.flatten = true;
             } else {
                 let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name))
                 else {
                     return Err(meta.error(
                         "unknown attribute; expected `primary_key`, `version`, `created_at`, \
-                         `updated_at`, `pgtype`, `pgdefault` or `query_ops`",
+                         `updated_at`, `flatten`, `pgtype`, `pgdefault` or `query_ops`",
                     ));
                 };
 
@@ -411,6 +511,36 @@ mod tests {
         idents.iter().map(ToString::to_string).collect()
     }
 
+    struct Scalar<'a> {
+        name: &'a Ident,
+        nullable: bool,
+        pg_type: &'a str,
+        pg_default: Option<&'a str>,
+        query_ops: &'a [FilterOperator],
+    }
+
+    fn scalar(column: &Column) -> Scalar<'_> {
+        let Column::Scalar {
+            name,
+            nullable,
+            pg_type,
+            pg_default,
+            query_ops,
+            ..
+        } = column
+        else {
+            panic!("expected a scalar column");
+        };
+
+        Scalar {
+            name,
+            nullable: *nullable,
+            pg_type,
+            pg_default: pg_default.as_deref(),
+            query_ops,
+        }
+    }
+
     const VALID: &str = r#"
         #[db(table = "email")]
         struct Email {
@@ -431,7 +561,7 @@ mod tests {
     fn reads_annotations() {
         let model = parse_model(VALID).unwrap();
 
-        assert_eq!(model.table, "email");
+        assert_eq!(model.shape, Shape::Table("email".to_owned()));
         assert_eq!(names(&model.primary_key), ["id"]);
         assert_eq!(model.version.unwrap().to_string(), "version");
         assert_eq!(model.created_at.unwrap().to_string(), "created_at");
@@ -440,7 +570,10 @@ mod tests {
         let definitions: Vec<(&str, Option<&str>)> = model
             .columns
             .iter()
-            .map(|column| (column.pg_type.as_str(), column.pg_default.as_deref()))
+            .map(|column| {
+                let column = scalar(column);
+                (column.pg_type, column.pg_default)
+            })
             .collect();
         assert_eq!(
             definitions,
@@ -497,11 +630,8 @@ mod tests {
             .columns
             .iter()
             .map(|column| {
-                (
-                    column.name.to_string(),
-                    column.nullable,
-                    column.pg_type.as_str(),
-                )
+                let column = scalar(column);
+                (column.name.to_string(), column.nullable, column.pg_type)
             })
             .collect();
 
@@ -535,7 +665,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            model.columns[1].query_ops,
+            scalar(&model.columns[1]).query_ops,
             [
                 FilterOperator::Eq,
                 FilterOperator::Neq,
@@ -543,8 +673,11 @@ mod tests {
                 FilterOperator::In,
             ]
         );
-        assert_eq!(model.columns[2].query_ops, [FilterOperator::Between]);
-        assert!(model.columns[0].query_ops.is_empty());
+        assert_eq!(
+            scalar(&model.columns[2]).query_ops,
+            [FilterOperator::Between]
+        );
+        assert!(scalar(&model.columns[0]).query_ops.is_empty());
     }
 
     #[test]
@@ -567,7 +700,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            model.columns[1].query_ops,
+            scalar(&model.columns[1]).query_ops,
             [
                 FilterOperator::Eq,
                 FilterOperator::Neq,
@@ -664,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_table() {
+    fn requires_table_or_fragment() {
         let message = error(
             r#"
             struct Widget {
@@ -674,7 +807,177 @@ mod tests {
         "#,
         );
 
-        assert!(message.contains("missing `#[db(table"), "{message}");
+        assert!(
+            message.contains("missing `#[db(table = \"...\")]` or `#[db(fragment)]`"),
+            "{message}"
+        );
+    }
+
+    fn column_names(columns: &[Column]) -> Vec<String> {
+        columns
+            .iter()
+            .map(|column| match column {
+                Column::Scalar { name, .. } | Column::Flattened { name, .. } => name.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reads_a_fragment() {
+        let fragment = parse_model(
+            r#"
+            #[db(fragment)]
+            struct Address {
+                #[db(pgtype = "text")]
+                street: String,
+                #[db(pgtype = "text")]
+                city: Option<String>,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(fragment.shape, Shape::Fragment);
+        assert!(fragment.primary_key.is_empty());
+        assert!(fragment.version.is_none());
+        assert_eq!(column_names(&fragment.columns), ["street", "city"]);
+        assert!(scalar(&fragment.columns[1]).nullable);
+    }
+
+    #[test]
+    fn reads_flattened_fields_in_declaration_order() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(flatten)]
+                address: Address,
+                #[db(pgtype = "text")]
+                note: Option<String>,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(column_names(&model.columns), ["id", "address", "note"]);
+        assert!(matches!(model.columns[1], Column::Flattened { .. }));
+    }
+
+    #[test]
+    fn rejects_table_and_fragment_together() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            #[db(fragment)]
+            struct Widget {
+                #[db(pgtype = "text")]
+                note: String,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`table` and `fragment` are mutually exclusive"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_roles_in_a_fragment() {
+        let message = error(
+            r#"
+            #[db(fragment)]
+            struct Audit {
+                #[db(created_at, pgtype = "timestamptz")]
+                created_at: DateTime<Utc>,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("a fragment cannot carry `#[db(...)]` roles"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_flattened_field_with_a_column_annotation() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(flatten, pgtype = "text")]
+                address: Address,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(flatten)]` cannot be combined with `pgtype`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_optional_flattened_field() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(flatten)]
+                address: Option<Address>,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(flatten)]` field must not be `Option`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_flatten_in_a_fragment() {
+        let message = error(
+            r#"
+            #[db(fragment)]
+            struct Address {
+                #[db(flatten)]
+                location: Location,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("a fragment cannot `#[db(flatten)]` another struct"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_generic_tables() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget<T> {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "jsonb")]
+                payload: T,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("cannot have generic parameters"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ use dbkit::DbModel;
 use dbkit::FilterOperator;
 use dbkit::Model;
 use dbkit::TableMeta;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 #[derive(DbModel)]
@@ -43,11 +44,52 @@ struct WidgetLog {
     note: Option<String>,
 }
 
-const MODELS: &[TableMeta] = &[Widget::META, WidgetLog::META];
+/// A column group embedded in another model rather than a table of its own.
+#[derive(DbModel)]
+#[db(fragment)]
+struct Size {
+    #[db(pgtype = "int4")]
+    width: i32,
+    #[db(pgtype = "int4")]
+    height: i32,
+}
+
+#[derive(DbModel)]
+#[db(table = "frame")]
+struct Frame {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+    #[db(flatten)]
+    size: Size,
+    #[db(pgtype = "text")]
+    label: String,
+}
+
+/// Flattening a table is a mistake the derive cannot see; `meta()` rejects it.
+#[derive(DbModel)]
+#[db(table = "wrong_flatten")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct WrongFlatten {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+    #[db(flatten)]
+    widget: Widget,
+}
+
+static MODELS: LazyLock<Vec<TableMeta>> = LazyLock::new(|| {
+    vec![
+        Widget::meta().into_table(),
+        WidgetLog::meta().into_table(),
+        Frame::meta().into_table(),
+    ]
+});
 
 #[test]
 fn derive_generates_table_metadata() {
-    let meta = Widget::META;
+    let meta = Widget::meta().into_table();
 
     assert_eq!(meta.table, "widget");
     assert_eq!(meta.primary_key, ["id"]);
@@ -92,8 +134,40 @@ fn derive_generates_table_metadata() {
 }
 
 #[test]
+fn derive_splices_flattened_columns_in_place() {
+    let meta = Frame::meta();
+
+    let columns: Vec<&str> = meta.columns().iter().map(|column| column.name).collect();
+    assert_eq!(columns, ["id", "width", "height", "label"]);
+    assert_eq!(&meta.columns()[1..3], Size::meta().columns());
+}
+
+/// A fragment is a `Model` too, but describes no table.
+#[test]
+fn fragment_metadata_has_no_table() {
+    let meta = Size::meta();
+
+    assert_eq!(meta.table(), None);
+    assert_eq!(
+        meta.columns()
+            .iter()
+            .map(|column| column.name)
+            .collect::<Vec<_>>(),
+        ["width", "height"]
+    );
+}
+
+#[test]
+fn metadata_is_built_once() {
+    let first = Widget::meta().table().expect("a table");
+    let second = Widget::meta().table().expect("a table");
+
+    assert!(std::ptr::eq(first, second));
+}
+
+#[test]
 fn derive_omits_absent_roles_and_marks_optionals() {
-    let meta = <WidgetLog as Model>::META;
+    let meta = <WidgetLog as Model>::meta().into_table();
 
     assert_eq!(meta.table, "widget_log");
     assert_eq!(meta.version, None);
@@ -115,7 +189,7 @@ fn derive_omits_absent_roles_and_marks_optionals() {
 fn models_lists_every_model() {
     let tables: Vec<&str> = MODELS.iter().map(|meta| meta.table).collect();
 
-    assert_eq!(tables, ["widget", "widget_log"]);
+    assert_eq!(tables, ["widget", "widget_log", "frame"]);
 }
 
 /// Proves the derive runs on a model shape and leaves the struct usable.
@@ -161,4 +235,34 @@ fn derive_accepts_a_model_without_version() {
     assert_eq!(log.id, Uuid::from_u128(1));
     assert_eq!(log.message, "created");
     assert!(log.note.is_none());
+}
+
+/// Proves a flattened field stays an ordinary struct field on the row type.
+#[test]
+fn derive_accepts_a_flattened_field() {
+    let frame = Frame {
+        id: Uuid::from_u128(1),
+        size: Size {
+            width: 640,
+            height: 480,
+        },
+        label: "photo".to_owned(),
+    };
+
+    assert_eq!(frame.id, Uuid::from_u128(1));
+    assert_eq!(frame.size.width, 640);
+    assert_eq!(frame.size.height, 480);
+    assert_eq!(frame.label, "photo");
+}
+
+#[test]
+#[should_panic(expected = "flattened fields must be `#[db(fragment)]` structs")]
+fn flattening_a_table_panics() {
+    let _ = WrongFlatten::meta();
+}
+
+#[test]
+#[should_panic(expected = "is not a table and cannot be listed in `MODELS`")]
+fn listing_a_fragment_in_models_panics() {
+    let _ = Size::meta().into_table();
 }

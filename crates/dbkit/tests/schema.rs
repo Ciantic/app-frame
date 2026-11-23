@@ -42,6 +42,71 @@ struct BrokenDefault {
     id: Uuid,
 }
 
+#[derive(DbModel)]
+#[db(fragment)]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the column metadata"
+)]
+struct Size {
+    #[db(pgtype = "int4")]
+    width: i32,
+    #[db(pgtype = "int4")]
+    height: i32,
+}
+
+#[derive(DbModel)]
+#[db(table = "frame")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Frame {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+    #[db(flatten)]
+    size: Size,
+    #[db(pgtype = "text")]
+    label: String,
+}
+
+#[derive(DbModel)]
+#[db(fragment)]
+#[expect(
+    dead_code,
+    reason = "the field exists only to derive the column metadata"
+)]
+struct Left {
+    #[db(pgtype = "text")]
+    note: String,
+}
+
+#[derive(DbModel)]
+#[db(fragment)]
+#[expect(
+    dead_code,
+    reason = "the field exists only to derive the column metadata"
+)]
+struct Right {
+    #[db(pgtype = "text")]
+    note: String,
+}
+
+#[derive(DbModel)]
+#[db(table = "duplicated")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Duplicated {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+    #[db(flatten)]
+    left: Left,
+    #[db(flatten)]
+    right: Right,
+}
+
 /// Returns the problems `check_live_schema_against_models` reports for
 /// `schema`.
 async fn problems(schema: &str, meta: &[dbkit::TableMeta]) -> Vec<String> {
@@ -67,7 +132,7 @@ const MATCHING: &str = r#"
 
 #[tokio::test]
 async fn matching_schema_has_no_problems() {
-    let problems: Vec<String> = problems(MATCHING, &[Widget::META]).await;
+    let problems: Vec<String> = problems(MATCHING, &[Widget::meta().into_table()]).await;
 
     assert!(problems.is_empty(), "{problems:?}");
 }
@@ -77,7 +142,7 @@ async fn reports_type_mismatch() {
     let schema = MATCHING.replace("varchar(255)", "varchar(50)");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         ["widget: column \"name\" is character varying(50), the model says varchar(255)"]
     );
 }
@@ -87,7 +152,7 @@ async fn reports_nullability_mismatch() {
     let schema = MATCHING.replace("\"note\" text", "\"note\" text not null");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         ["widget: column \"note\" is nullable = false, the model says true"]
     );
 }
@@ -97,7 +162,7 @@ async fn reports_a_default_mismatch() {
     let schema = MATCHING.replace("default uuidv7()", "default gen_random_uuid()");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         ["widget: column \"id\" default is gen_random_uuid(), the model says uuidv7()"]
     );
 }
@@ -107,7 +172,7 @@ async fn reports_a_missing_default() {
     let schema = MATCHING.replace(" default uuidv7()", "");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         ["widget: column \"id\" default is none, the model says uuidv7()"]
     );
 }
@@ -117,7 +182,7 @@ async fn reports_an_undeclared_default() {
     let schema = MATCHING.replace("\"name\" varchar(255)", "\"name\" varchar(255) default ''");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         ["widget: column \"name\" default is ''::character varying, the model says none"]
     );
 }
@@ -127,7 +192,7 @@ async fn reports_columns_without_a_model_field() {
     let schema = MATCHING.replace("\"note\" text", "\"note\" text, \"extra\" int4");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         ["table \"widget\" has column \"extra\" without a model field"]
     );
 }
@@ -137,7 +202,7 @@ async fn reports_model_fields_without_a_column() {
     let schema = MATCHING.replace("\"note\" text", "\"other\" text");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         [
             "table \"widget\" has column \"other\" without a model field",
             "widget: field \"note\" has no column",
@@ -150,7 +215,7 @@ async fn reports_tables_without_a_model() {
     let schema = format!("{MATCHING}; create table \"gadget\" (\"id\" uuid not null)");
 
     assert_eq!(
-        problems(&schema, &[Widget::META]).await,
+        problems(&schema, &[Widget::meta().into_table()]).await,
         ["table \"gadget\" has no model"]
     );
 }
@@ -159,7 +224,7 @@ async fn reports_tables_without_a_model() {
 async fn reports_an_invalid_pgtype() {
     let schema = r#"create table "broken" ("id" uuid not null, "name" text not null)"#;
 
-    let problems = problems(schema, &[Broken::META]).await;
+    let problems = problems(schema, &[Broken::meta().into_table()]).await;
 
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
@@ -172,12 +237,48 @@ async fn reports_an_invalid_pgtype() {
 async fn reports_an_invalid_pgdefault() {
     let schema = r#"create table "broken_default" ("id" uuid not null)"#;
 
-    let problems = problems(schema, &[BrokenDefault::META]).await;
+    let problems = problems(schema, &[BrokenDefault::meta().into_table()]).await;
 
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
         problems[0]
             .starts_with("broken_default: `pgdefault` is not valid in a column definition: "),
         "{problems:?}"
+    );
+}
+
+const FRAME: &str = r#"
+    create table "frame" (
+        "id" uuid not null,
+        "width" int4 not null,
+        "height" int4 not null,
+        "label" text not null
+    )
+"#;
+
+#[tokio::test]
+async fn flattened_columns_match_the_schema() {
+    let problems: Vec<String> = problems(FRAME, &[Frame::meta().into_table()]).await;
+
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[tokio::test]
+async fn reports_a_mismatch_in_a_flattened_column() {
+    let schema = FRAME.replace("\"width\" int4", "\"width\" int8");
+
+    assert_eq!(
+        problems(&schema, &[Frame::meta().into_table()]).await,
+        ["frame: column \"width\" is bigint, the model says int4"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_column_declared_twice() {
+    let schema = r#"create table "duplicated" ("id" uuid not null, "note" text not null)"#;
+
+    assert_eq!(
+        problems(schema, &[Duplicated::meta().into_table()]).await,
+        ["duplicated: column \"note\" is declared more than once"]
     );
 }

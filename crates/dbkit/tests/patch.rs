@@ -230,3 +230,62 @@ fn model_without_version_has_no_version_field() {
     assert_eq!(serde_json::to_value(&patch).unwrap(), json!({ "id": id() }));
     assert!(patch.validate().is_ok());
 }
+
+/// A column group embedded in `Frame`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, DbModel, DbPatch)]
+#[db(fragment)]
+pub struct Size {
+    #[db(pgtype = "int4")]
+    pub width: i32,
+
+    #[db(pgtype = "text")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, DbModel, DbPatch)]
+#[db(table = "frame")]
+pub struct Frame {
+    #[db(primary_key)]
+    #[db(pgtype = "uuid")]
+    pub id: WidgetId,
+
+    #[db(flatten)]
+    pub size: Size,
+
+    #[db(pgtype = "text")]
+    pub label: String,
+
+    #[db(version)]
+    #[db(pgtype = "bigint")]
+    pub version: i64,
+}
+
+#[test]
+fn flattened_patch_fields_are_part_of_the_parent_object() {
+    let patch: FramePatch = serde_json::from_value(json!({
+        "id": id(),
+        "version": 1,
+        "width": 640,
+        "note": null,
+        "label": "photo",
+    }))
+    .unwrap();
+
+    assert_eq!(patch.size.width, Patch::Set(640));
+    assert_eq!(patch.size.note, Patch::Null);
+    assert_eq!(patch.label, Patch::Set("photo".to_owned()));
+    assert!(patch.validate().is_ok());
+}
+
+#[test]
+fn absent_flattened_fields_are_omitted_from_responses() {
+    let patch: FramePatch = serde_json::from_value(json!({ "id": id(), "version": 1 })).unwrap();
+    assert_eq!(patch.size.width, Patch::Absent);
+    assert_eq!(patch.size.note, Patch::Absent);
+    assert_eq!(patch.label, Patch::Absent);
+
+    assert_eq!(
+        serde_json::to_value(&patch).unwrap(),
+        json!({ "id": id(), "version": 1 })
+    );
+}

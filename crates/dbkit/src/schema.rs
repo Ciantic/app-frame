@@ -4,6 +4,7 @@ use crate::TableMeta;
 use sqlx::AssertSqlSafe;
 use sqlx::PgConnection;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// Compares `models` with the tables of the connection's current schema.
 ///
@@ -30,6 +31,18 @@ pub async fn check_live_schema_against_models(
     .await?;
 
     for meta in models {
+        let mut declared = BTreeSet::new();
+        let mut duplicates = false;
+        for column in meta.columns {
+            if !declared.insert(column.name) {
+                duplicates = true;
+                problems.push(format!(
+                    "{}: column \"{}\" is declared more than once",
+                    meta.table, column.name
+                ));
+            }
+        }
+
         let schema_columns: Vec<(String, String)> = sqlx::query_as(
             "SELECT column_name, is_nullable FROM information_schema.columns
              WHERE table_schema = current_schema() AND table_name = $1",
@@ -64,7 +77,9 @@ pub async fn check_live_schema_against_models(
             }
         }
 
-        problems.extend(column_mismatches(connection, meta).await?);
+        if !duplicates {
+            problems.extend(column_mismatches(connection, meta).await?);
+        }
     }
 
     for table in tables {

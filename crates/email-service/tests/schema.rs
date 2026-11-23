@@ -1,5 +1,4 @@
 use dbkit::Model;
-use dbkit::TableMeta;
 use email_service::db::models::MODELS;
 use email_service::db::models::email::Email;
 use email_service::db::models::email::EmailId;
@@ -16,13 +15,13 @@ type Decode = fn(&PgRow) -> Result<(), String>;
 type Insert = fn() -> Query<'static, Postgres, PgArguments>;
 
 struct Fixture {
-    meta: TableMeta,
+    meta: fn() -> dbkit::Meta,
     insert: Insert,
     decode: Decode,
 }
 
 const FIXTURES: &[Fixture] = &[Fixture {
-    meta: Email::META,
+    meta: Email::meta,
     insert: || {
         let email = Email {
             id: EmailId(Uuid::from_u128(1)),
@@ -60,11 +59,11 @@ const FIXTURES: &[Fixture] = &[Fixture {
 
 #[test]
 fn every_model_has_an_insert_fixture() {
-    for meta in MODELS {
+    for meta in MODELS.iter() {
         assert!(
             FIXTURES
                 .iter()
-                .any(|fixture| fixture.meta.table == meta.table),
+                .any(|fixture| (fixture.meta)().into_table().table == meta.table),
             "no insert fixture for table \"{}\"",
             meta.table
         );
@@ -77,7 +76,7 @@ async fn models_and_schema_share_columns() {
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
     let mut connection = db.acquire().await.unwrap();
 
-    let problems = dbkit::schema::check_live_schema_against_models(&mut connection, MODELS)
+    let problems = dbkit::schema::check_live_schema_against_models(&mut connection, &MODELS)
         .await
         .unwrap();
 
@@ -94,16 +93,14 @@ async fn models_insert() {
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
 
     for fixture in FIXTURES {
+        let meta = (fixture.meta)().into_table();
         let row = (fixture.insert)()
             .fetch_one(&db)
             .await
-            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", fixture.meta.table));
+            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", meta.table));
 
         (fixture.decode)(&row).unwrap_or_else(|error| {
-            panic!(
-                "{}: inserted row does not decode: {error}",
-                fixture.meta.table
-            )
+            panic!("{}: inserted row does not decode: {error}", meta.table)
         });
     }
 }
@@ -114,22 +111,20 @@ async fn models_select() {
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
 
     for fixture in FIXTURES {
+        let meta = (fixture.meta)().into_table();
         (fixture.insert)()
             .execute(&db)
             .await
-            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", fixture.meta.table));
+            .unwrap_or_else(|error| panic!("{}: insert failed: {error}", meta.table));
 
-        let sql = format!("SELECT * FROM \"{}\"", fixture.meta.table);
+        let sql = format!("SELECT * FROM \"{}\"", meta.table);
         let row = sqlx::query(sqlx::AssertSqlSafe(sql))
             .fetch_one(&db)
             .await
-            .unwrap_or_else(|error| panic!("{}: select failed: {error}", fixture.meta.table));
+            .unwrap_or_else(|error| panic!("{}: select failed: {error}", meta.table));
 
         (fixture.decode)(&row).unwrap_or_else(|error| {
-            panic!(
-                "{}: selected row does not decode: {error}",
-                fixture.meta.table
-            )
+            panic!("{}: selected row does not decode: {error}", meta.table)
         });
     }
 }
