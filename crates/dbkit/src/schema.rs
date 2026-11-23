@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 /// column, so any DDL spelling is accepted and length and precision must match.
 /// The temporary table is session-local, hence the connection rather than a
 /// pool.
-pub async fn mismatches(
+pub async fn check_live_schema_against_models(
     connection: &mut PgConnection,
     models: &[TableMeta],
 ) -> sqlx::Result<Vec<String>> {

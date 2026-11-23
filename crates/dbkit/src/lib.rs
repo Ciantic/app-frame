@@ -2,7 +2,8 @@
 //!
 //! [`Patch`] is the update input that tells "not given" apart from "set to
 //! `NULL`". [`Model`] and its [`TableMeta`] describe a table at runtime, and
-//! [`schema::mismatches`] compares a list of them with a live database.
+//! [`schema::check_live_schema_against_models`] compares a list of them with a
+//! live database.
 
 mod model;
 mod patch;

@@ -117,7 +117,7 @@ async fn models_and_schema_share_columns() {
     sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
     let mut connection = db.acquire().await.unwrap();
 
-    let problems = dbkit::schema::mismatches(&mut connection, MODELS)
+    let problems = dbkit::schema::check_live_schema_against_models(&mut connection, MODELS)
         .await
         .unwrap();
 

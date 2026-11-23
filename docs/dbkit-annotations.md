@@ -296,10 +296,11 @@ table without a model.
 ## Relation to the schema test
 
 The per-service `tests/schema.rs` applies `schema.sql` and asks
-`dbkit::schema::mismatches` whether `MODELS` agrees with the database:
+`dbkit::schema::check_live_schema_against_models` whether `MODELS` agrees with
+the database:
 
 ```rust
-let problems = dbkit::schema::mismatches(&mut connection, MODELS)
+let problems = dbkit::schema::check_live_schema_against_models(&mut connection, MODELS)
     .await
     .unwrap();
 

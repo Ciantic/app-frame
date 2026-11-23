@@ -42,7 +42,7 @@ struct BrokenDefault {
     id: Uuid,
 }
 
-/// Returns the problems `mismatches` reports for `schema`.
+/// Returns the problems `check_live_schema_against_models` reports for `schema`.
 async fn problems(schema: &str, meta: &[dbkit::TableMeta]) -> Vec<String> {
     let db = PgtestServer::start().await.database().await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(schema.to_owned()))
@@ -51,7 +51,7 @@ async fn problems(schema: &str, meta: &[dbkit::TableMeta]) -> Vec<String> {
         .unwrap();
     let mut connection = db.acquire().await.unwrap();
 
-    dbkit::schema::mismatches(&mut connection, meta)
+    dbkit::schema::check_live_schema_against_models(&mut connection, meta)
         .await
         .unwrap()
 }
