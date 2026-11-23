@@ -8,10 +8,11 @@ carries a `pgtype`, and a primary key is required; the other annotations are
 opt-in.
 
 The derive validates the annotations and generates `impl dbkit::Model`, which
-carries them as the `Model::META` const at runtime. The `Patchable` and insert
-implementations do not exist yet, so later sections describe the contract the
-annotations are meant to feed rather than code you can call today. The accepted
-syntax stays as documented here.
+carries them as the `Model::META` const at runtime. `#[derive(DbPatch)]` reads
+the same annotations to generate the model's patch input type; insert
+implementations do not exist yet, so the insert sections describe a contract
+rather than code you can call today. The accepted syntax stays as documented
+here.
 
 ## Example
 
@@ -153,6 +154,7 @@ Marks a primary key column. Repeat it on every column of a composite key.
 - A single annotated field is the `Model::Id` associated type; with several, the
   associated type is a tuple of the field types in declaration order.
 - Used for the `WHERE` clause of single-row operations and for `find`.
+- A required field of the generated patch.
 
 ## `version`
 
@@ -166,6 +168,7 @@ Marks the optimistic-locking field.
   `"version" = "version" + 1` and the condition `WHERE "version" = $n`.
 - A guard miss surfaces as `RepoError::Conflict`, not as a generic database
   error.
+- A required field of the generated patch, which makes `DbPatch` require it.
 
 ## `created_at`
 
@@ -275,6 +278,54 @@ type `dbkit::TableMeta`:
 
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
+
+## Generated patch
+
+`#[derive(DbPatch)]` on a model emits a `<Model>Patch` struct next to it:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, DbModel, DbPatch)]
+#[db(table = "user")]
+pub struct User {
+    #[db(primary_key)]
+    #[db(pgtype = "uuid")]
+    pub id: UserId,
+    #[db(pgtype = "text")]
+    pub email: Email,
+    #[db(pgtype = "timestamptz")]
+    pub email_verified_at: Option<DateTime<Utc>>,
+    #[db(version)]
+    #[db(pgtype = "bigint")]
+    pub version: i64,
+}
+
+// generated
+pub struct UserPatch {
+    pub id: UserId,
+    pub version: i64,
+    pub email: Patch<Email>,
+    pub email_verified_at: Patch<DateTime<Utc>>,
+}
+```
+
+- The primary key and the `version` are required fields, spelled exactly as in
+  the model. A patch names its row and its expected version; a missing key is a
+  deserialization error.
+- `DbPatch` requires a `#[db(version)]` field, unlike `DbModel`, because every
+  update is guarded by optimistic locking.
+- Every other column becomes a `dbkit::Patch<T>` field: a missing key is
+  `Patch::Absent` (leave the column alone), an explicit `null` is `Patch::Null`
+  (clear a nullable column) and any other value is `Patch::Set`.
+- A nullable column's field is `Patch<T>`, not `Patch<Option<T>>`, so `null`
+  means "clear" rather than "set to null".
+- `created_at` and `updated_at` are not patchable and are omitted.
+- The struct derives `Debug`, `Clone`, `Serialize` and `Deserialize`; patch
+  fields carry `skip_serializing_if = "Patch::is_absent"`, so an absent field
+  stays off the wire in a response.
+- `Patch::schema(inner)` gives zod-rs a schema for one patch field, and the
+  generated `schema()` / `validate_and_parse()` mirror the `ZodSchema` model:
+  `Patch::Set` values are validated with the column's own schema, `Patch::Null`
+  passes, and `Patch::Absent` is an optional object field.
 
 ## Collecting models
 

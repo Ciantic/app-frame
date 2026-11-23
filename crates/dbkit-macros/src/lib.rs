@@ -2,6 +2,8 @@
 //!
 //! `DbModel` parses the `#[db(...)]` annotations and emits
 //! `impl dbkit::Model`, whose `META` const describes the table at runtime.
+//! `DbPatch` reads the same annotations and emits the model's patch input
+//! type.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -9,6 +11,7 @@ use syn::DeriveInput;
 use syn::Expr;
 
 mod annotations;
+mod derive_patch;
 
 /// Reads the `#[db(...)]` annotations of a model struct and generates
 /// `impl dbkit::Model for ...`, carrying them as `Model::META`.
@@ -31,6 +34,29 @@ pub fn derive_db_model(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
 
     match expand(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Generates the patch input type of a model, `<Model>Patch`.
+///
+/// Reads the same `#[db(...)]` annotations as `DbModel`. The primary key and
+/// the version are required fields of the patch, taken as they are; every
+/// other business column becomes a `dbkit::Patch<T>` field, so a missing key
+/// leaves the column unchanged and an explicit `null` clears a nullable one.
+/// Audit columns (`created_at`, `updated_at`) are not patchable and are
+/// omitted. A version is required, because every patch carries the
+/// optimistic-locking token.
+///
+/// The generated struct is `Serialize + Deserialize`, and it has `schema()`
+/// and `validate_and_parse()` like a `ZodSchema` model: `Patch::Set` values are
+/// validated by the column's own schema.
+#[proc_macro_derive(DbPatch, attributes(db))]
+pub fn derive_db_patch(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+
+    match derive_patch::expand(&input) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }

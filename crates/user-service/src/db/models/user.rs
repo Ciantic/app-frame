@@ -3,6 +3,7 @@ use crate::db::primitives::email::Email;
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
+use dbkit::DbPatch;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -21,7 +22,7 @@ impl UserId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, ZodSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, DbPatch, ZodSchema)]
 #[db(table = "user")]
 pub struct User {
     #[db(primary_key)]

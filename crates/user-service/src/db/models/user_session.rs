@@ -4,6 +4,7 @@ use crate::db::primitives::session_token::SessionToken;
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
+use dbkit::DbPatch;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -22,7 +23,7 @@ impl UserSessionId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, ZodSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, DbPatch, ZodSchema)]
 #[db(table = "user_session")]
 pub struct UserSession {
     #[db(primary_key)]
