@@ -1,17 +1,15 @@
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
-use facet::Facet;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, Facet)]
-#[facet(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(transparent)]
 pub struct EmailId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Facet, DbModel)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel)]
 #[db(table = "email")]
 pub struct Email {
     #[db(primary_key)]

@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 chrono.workspace = true
 dbkit = { path = "../dbkit" }
-facet.workspace = true
 serde.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
