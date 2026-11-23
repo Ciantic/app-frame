@@ -5,8 +5,8 @@ They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, which ones are audit
 columns, which columns the database fills in from a default, and which
 comparisons each column may be queried with. Every field carries a `pgtype`
-unless it is flattened, and a table row needs a primary key; the other
-annotations are opt-in.
+unless it is flattened or its type declares one with `#[derive(DbType)]`, and
+a table row needs a primary key; the other annotations are opt-in.
 
 A struct is one of two shapes:
 
@@ -74,9 +74,11 @@ generated patch would expose; role-annotated fields never are.
 - `#[db(table = "...")]` or `#[db(fragment)]` on the struct, exactly once.
   They are mutually exclusive; `table` makes the struct a table row and
   `fragment` makes it a column group.
-- `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`, exactly
-  once.
+- `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`, unless
+  the field type implements `dbkit::DbType`, exactly once.
 - `#[db(pgdefault = "...")]` on a field, at most once.
+- `#[db(pgtype = "...")]` and `#[db(pgdefault = "...")]` on the struct of a
+  value type that derives `DbType`, instead of on a field.
 - `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
   `#[db(updated_at)]` on a field of a table row.
 - `#[db(query_ops(...))]` on a field, at most once; the parentheses hold a
@@ -100,6 +102,9 @@ not use that form:
   `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, in))]`.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
 - A `#[db(flatten)]` field carries that annotation alone.
+- On a `DbType` struct, `#[db(pgtype = "...")]` sits above
+  `#[db(pgdefault = "...")]`, after the `#[derive(...)]` line and before the
+  serde and sqlx attributes.
 - A blank line separates fields, so the annotation block reads as one unit per
   column.
 
@@ -192,15 +197,61 @@ pub struct Frame {
 
 The table has columns `id`, `width`, `height` and `label`, in that order.
 
+## `DbType`
+
+Moves the column type and its default to the value type, so a model field of
+that type repeats neither.
+
+```rust
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type, DbType)]
+#[db(pgtype = "uuid")]
+#[db(pgdefault = "uuidv7()")]
+#[sqlx(transparent)]
+pub struct UserSessionId(pub Uuid);
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, DbModel)]
+#[db(table = "user_session")]
+pub struct UserSession {
+    #[db(primary_key)]
+    pub id: UserSessionId,
+
+    // `UserId` declares a default too, but this column has none.
+    #[db(pgdefault)]
+    pub user_id: UserId,
+
+    // ...
+}
+```
+
+- `#[db(pgtype = "...")]` on the struct is required and takes the same values
+  as a field's `pgtype`; `#[db(pgdefault = "...")]` is optional.
+- Generates `impl dbkit::DbType`, whose `PG_TYPE` and `PG_DEFAULT` constants the
+  model derive reads. A field that omits `pgtype` takes both from the type;
+  `Option<T>` inherits from `T` and stays nullable.
+- A field that declares its own `pgtype` keeps only the `pgdefault` it declares
+  itself. This is why plain types such as `DateTime<Utc>` and `String` need no
+  `DbType` implementation: their fields spell out `pgtype` and declare no
+  default.
+- The type-level default is a suggestion: the same value type is used for
+  foreign keys, whose columns have no default. A bare `#[db(pgdefault)]` on the
+  field states that the column has none.
+- Field annotations are not accepted on a `DbType` struct; a missing `pgtype`
+  is an error.
+- A field whose type does not implement `DbType` and has no `pgtype` fails to
+  compile with a trait-bound error naming the type.
+
 ## `pgtype`
 
 Names the column type, written the way it is written in `schema.sql`.
 
-- Legal on: every field that is not `#[db(flatten)]`, required.
+- Legal on: a field that is not `#[db(flatten)]`, or the struct of a `DbType`
+  type. Required on a field unless the field type implements `dbkit::DbType`.
 - Value: a non-empty string literal holding a SQL type: `uuid`, `text`,
   `bigint`, `boolean`, `timestamptz`, `jsonb`, `varchar(255)`,
   `numeric(10,2)`, `text[]`, `text[][]`.
-- Missing, empty, or repeated `pgtype` is an error.
+- An empty or repeated `pgtype` is an error. A field that omits it takes one
+  from its type (see [`DbType`](#dbtype)); a `DbType` struct that omits it is
+  an error.
 - Written in its own attribute, below the role attribute; the combined form is
   accepted but not used in models (see [Style](#style)).
 - The value is DDL, not a `pg_type` catalog name, so it is what a generated
@@ -221,11 +272,13 @@ Names the column type, written the way it is written in `schema.sql`.
 
 Records the column default, written the way it is written in `schema.sql`.
 
-- Legal on: a field, optional and at most once.
+- Legal on: a field or a `DbType` struct, optional and at most once.
 - Value: a non-empty string literal holding a default expression: `uuidv7()`,
-  `now()`, `0`, `'{}'::jsonb`.
+  `now()`, `0`, `'{}'::jsonb`. A bare `#[db(pgdefault)]` on a field declares
+  that the column has no default.
 - Omitted when the column has no default. An empty or repeated `pgdefault` is
-  an error.
+  an error. A field that declares no `pgtype` inherits the type's default
+  unless it carries the bare form.
 - Meant to mirror the database rather than change it: the model does not emit
   the default. It tells a generated insert that the column can be omitted and
   lets the schema test detect drift.
@@ -325,7 +378,8 @@ Every rule below produces a compile error.
 - A table must not have generic parameters.
 - A table row must declare `primary_key` at least once; a fragment must not
   carry it or any other role.
-- Every field that is not `#[db(flatten)]` must carry `#[db(pgtype = "...")]`.
+- Every field that is not `#[db(flatten)]` must carry `#[db(pgtype = "...")]`
+  or have a type that implements `dbkit::DbType`.
 - `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`
   or a role, and its field must not be `Option`.
 - A fragment cannot `#[db(flatten)]` another struct.
@@ -337,17 +391,21 @@ Every rule below produces a compile error.
 - `version` must be `i64`.
 - `created_at` and `updated_at` must be `DateTime`.
 - An empty `#[db]` attribute is an error.
-- `pgtype` must be a non-empty string literal and appear only once per field.
-  It is not validated at compile time; the schema test runs it through
-  PostgreSQL.
-- `pgdefault` must be a non-empty string literal and appear at most once per
-  field. It is not validated at compile time either.
+- `pgtype` must be a non-empty string literal and appear only once per field or
+  `DbType` struct. It is not validated at compile time; the schema test runs it
+  through PostgreSQL.
+- `pgdefault` must be a non-empty string literal when it has a value, and must
+  appear at most once per field or `DbType` struct. A bare `#[db(pgdefault)]`
+  is accepted on a field only and means "no default". It is not validated at
+  compile time either.
 - `query_ops` appears at most once per field, holds at least one operator, and
   every operator must be in the accepted list; repeating an operator is an
   error.
-- The struct-level attribute accepts only `table` and `fragment`; the
+- The `DbModel` struct attribute accepts only `table` and `fragment`; the
   field-level attribute accepts only `pgtype`, `pgdefault`, `query_ops`,
-  `flatten` and the four roles.
+  `flatten` and the four roles. The `DbType` struct attribute accepts only
+  `pgtype` and `pgdefault`.
+- A `DbType` struct must not annotate its fields, and it must carry `pgtype`.
 
 ## How field types are matched
 
@@ -357,6 +415,8 @@ spellings behave the same:
 - `DateTime<Utc>`, `chrono::DateTime<Utc>` and `sqlx::types::chrono::DateTime<Utc>`
   all count as `DateTime`.
 - `Option<String>` and `std::option::Option<String>` both count as `Option`.
+- An `Option<T>` field takes `DbType` metadata from `T`, so the column keeps
+  the type's `pg_type` and `pg_default` while `nullable` becomes true.
 - Type aliases are not resolved. `type Timestamp = DateTime<Utc>;` on an audit
   column fails the `DateTime` check even though it is the same type.
 
@@ -386,11 +446,14 @@ For reference when reading a compile failure:
 - `` `#[db(flatten)]` cannot be combined with `pgtype` `` (and the same for
   `pgdefault`, `query_ops` and a role)
 - `` `#[db(flatten)]` field must not be `Option` ``
-- ``missing `#[db(pgtype = "...")]` on field `from` ``
 - `` `pgtype` must not be empty ``
 - ``duplicate `pgtype` ``
 - `` `pgdefault` must not be empty ``
 - ``duplicate `pgdefault` ``
+- `` `DbType` can only be derived for structs ``
+- `` `DbType` takes its annotations on the struct, not on a field ``
+- ``unknown attribute; the struct accepts `pgtype` or `pgdefault` ``
+- `` missing `#[db(pgtype = "...")]` `` (on a `DbType` struct)
 - ``empty `#[db]` attribute``
 - ``a field can carry at most one `#[db(...)]` role``
 - `` missing `#[db(primary_key)]` ``
@@ -404,6 +467,10 @@ For reference when reading a compile failure:
 
 All problems found in one struct are reported together, so a single compile
 fixes the whole annotation block.
+
+A field with neither `pgtype` nor a type that implements `DbType` is not caught
+by the derive, because it cannot resolve types; rustc reports the unsatisfied
+`dbkit::DbType` bound on the field type instead.
 
 One check is not a compile error. `#[db(flatten)]` on a table type compiles,
 because a table and a fragment are both `dbkit::Model`; the generated `meta()`
@@ -423,9 +490,10 @@ matches `Meta` and panics on the table variant:
 - `columns` — every column in declaration order as
   `ColumnMeta { name, nullable, pg_type, pg_default, query_ops }`, where
   `nullable` is true exactly when the field type is `Option<_>`, `pg_type` is
-  the `pgtype` annotation, `pg_default` is the `pgdefault` annotation or
-  `None`, and `query_ops` is the `query_ops` list in declaration order or an
-  empty slice.
+  the field's `pgtype` annotation or its `DbType` type's `PG_TYPE`,
+  `pg_default` is its `pgdefault` annotation, its `DbType` type's
+  `PG_DEFAULT`, or `None`, and `query_ops` is the `query_ops` list in
+  declaration order or an empty slice.
 
 A `#[db(fragment)]` struct emits `Meta::Fragment(&TableFragment { columns })`
 instead, where `columns` is the same `ColumnMeta` list and there are no table,

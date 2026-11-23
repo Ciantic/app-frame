@@ -111,6 +111,19 @@ impl Meta {
     }
 }
 
+/// The database column type of a value type, as declared by
+/// `#[derive(DbType)]` on its definition.
+///
+/// A model field whose type implements this trait may omit `pgtype` and
+/// `pgdefault`, taking both from the type definition instead.
+pub trait DbType {
+    /// Column type as DDL spells it: `uuid`, `text`, `varchar(255)`.
+    const PG_TYPE: &'static str;
+
+    /// Column default as DDL spells it, or `None` when the type has none.
+    const PG_DEFAULT: Option<&'static str> = None;
+}
+
 /// A row type of one table, or a group of columns embedded in one.
 pub trait Model {
     /// What the model describes, built on first use and cached.

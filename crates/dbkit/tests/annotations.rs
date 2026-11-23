@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
+use dbkit::DbType;
 use dbkit::FilterOperator;
 use dbkit::Model;
 use dbkit::TableMeta;
@@ -52,6 +53,30 @@ struct Size {
     width: i32,
     #[db(pgtype = "int4")]
     height: i32,
+}
+
+/// A value type that carries its column type and default.
+#[derive(DbType)]
+#[db(pgtype = "uuid")]
+#[db(pgdefault = "uuidv7()")]
+#[expect(dead_code, reason = "the type exists only to derive column metadata")]
+struct GadgetId(Uuid);
+
+#[derive(DbModel)]
+#[db(table = "gadget")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Gadget {
+    #[db(primary_key)]
+    id: GadgetId,
+    /// The type's default is not this column's default.
+    #[db(pgdefault)]
+    parent_id: GadgetId,
+    #[db(pgtype = "text")]
+    label: String,
+    deleted_id: Option<GadgetId>,
 }
 
 #[derive(DbModel)]
@@ -131,6 +156,34 @@ fn derive_generates_table_metadata() {
         ]
     );
     assert!(meta.columns[0].query_ops.is_empty());
+}
+
+#[test]
+fn derive_inherits_pgtype_and_pgdefault_from_the_field_type() {
+    let meta = Gadget::meta().into_table();
+
+    let columns: Vec<(&str, bool, &str, Option<&str>)> = meta
+        .columns
+        .iter()
+        .map(|column| {
+            (
+                column.name,
+                column.nullable,
+                column.pg_type,
+                column.pg_default,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        columns,
+        [
+            ("id", false, "uuid", Some("uuidv7()")),
+            ("parent_id", false, "uuid", None),
+            ("label", false, "text", None),
+            ("deleted_id", true, "uuid", Some("uuidv7()")),
+        ]
+    );
 }
 
 #[test]

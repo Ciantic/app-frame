@@ -3,13 +3,26 @@ use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
 use dbkit::DbPatch;
+use dbkit::DbType;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, garde::Validate,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    garde::Validate,
+    DbType,
 )]
+#[db(pgtype = "uuid")]
+#[db(pgdefault = "uuidv7()")]
 #[sqlx(transparent)]
 pub struct UserId(#[garde(skip)] pub Uuid);
 
@@ -17,8 +30,6 @@ pub struct UserId(#[garde(skip)] pub Uuid);
 #[db(table = "user")]
 pub struct User {
     #[db(primary_key)]
-    #[db(pgtype = "uuid")]
-    #[db(pgdefault = "uuidv7()")]
     pub id: UserId,
 
     #[db(pgtype = "text")]

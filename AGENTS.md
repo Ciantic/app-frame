@@ -46,5 +46,6 @@ Docs if needed: https://docs.rs/sqlx
 - `#[db(...)]` annotations go one per line and each field is separated by a
   blank line; see [dbkit annotations](docs/dbkit-annotations.md#style)
 - A column with a database default carries `#[db(pgdefault = "...")]` that
-  repeats the `schema.sql` default (`uuidv7()`, `now()`, `0`); the schema test
-  fails when the two disagree
+  repeats the `schema.sql` default (`uuidv7()`, `now()`, `0`); a value type may
+  carry it with `#[derive(DbType)]` instead; the schema test fails when the two
+  disagree

@@ -1,11 +1,14 @@
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
+use dbkit::DbType;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, DbType)]
+#[db(pgtype = "uuid")]
+#[db(pgdefault = "uuidv7()")]
 #[sqlx(transparent)]
 pub struct EmailId(pub Uuid);
 
@@ -13,8 +16,6 @@ pub struct EmailId(pub Uuid);
 #[db(table = "email")]
 pub struct Email {
     #[db(primary_key)]
-    #[db(pgtype = "uuid")]
-    #[db(pgdefault = "uuidv7()")]
     pub id: EmailId,
 
     #[db(pgtype = "text")]

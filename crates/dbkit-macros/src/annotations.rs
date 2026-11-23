@@ -94,15 +94,35 @@ pub enum Column {
         name: Ident,
         ty: Type,
         nullable: bool,
-        /// Postgres type name, as DDL spells it.
-        pg_type: String,
+        pg_type: PgType,
         /// Column default as DDL spells it, e.g. `now()`, `0`, `'{}'::jsonb`.
-        pg_default: Option<String>,
+        pg_default: PgDefault,
         /// Operators the column may be filtered with, in declaration order.
         query_ops: Vec<FilterOperator>,
     },
     /// A `#[db(flatten)]` field, contributing the columns of its type.
     Flattened { name: Ident, ty: Type },
+}
+
+/// Where a column type comes from.
+#[derive(Debug)]
+pub enum PgType {
+    /// Declared on the field with `#[db(pgtype = "...")]`.
+    Declared(String),
+    /// Taken from the field type's `dbkit::DbType` implementation.
+    Inherited,
+}
+
+/// Where a column default comes from.
+#[derive(Debug)]
+pub enum PgDefault {
+    /// Declared on the field with `#[db(pgdefault = "...")]`.
+    Declared(String),
+    /// The field declares no default; a bare `#[db(pgdefault)]` guarantees
+    /// this even when the type has one.
+    None,
+    /// Taken from the field type's `dbkit::DbType` implementation.
+    Inherited,
 }
 
 #[derive(Debug, Default)]
@@ -111,6 +131,8 @@ struct FieldAnnotations {
     flatten: bool,
     pg_type: Option<String>,
     pg_default: Option<String>,
+    /// A bare `#[db(pgdefault)]`, meaning "no default".
+    pg_default_none: bool,
     query_ops: Vec<FilterOperator>,
 }
 
@@ -199,6 +221,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                     "`#[db(flatten)]` cannot be combined with `pgdefault`",
                 ));
             }
+            if annotations.pg_default_none {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `pgdefault`",
+                ));
+            }
             if !annotations.query_ops.is_empty() {
                 errors.push(syn::Error::new(
                     field.span(),
@@ -238,20 +266,26 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             roles.push((role, name.clone(), field.ty.clone()));
         }
 
-        let Some(pg_type) = &annotations.pg_type else {
-            errors.push(syn::Error::new(
-                field.span(),
-                format!("missing `#[db(pgtype = \"...\")]` on field `{name}`"),
-            ));
-            continue;
+        let pg_type = match &annotations.pg_type {
+            Some(pg_type) => PgType::Declared(pg_type.clone()),
+            None => PgType::Inherited,
+        };
+        // Only a field that inherits its type inherits the default: a field
+        // spelling out `pgtype` keeps the default it declares itself.
+        let pg_default = match &annotations.pg_default {
+            Some(default) => PgDefault::Declared(default.clone()),
+            None if annotations.pg_default_none || matches!(&pg_type, PgType::Declared(_)) => {
+                PgDefault::None
+            }
+            None => PgDefault::Inherited,
         };
 
         columns.push(Column::Scalar {
             name,
             ty: field.ty.clone(),
             nullable: is(&field.ty, "Option"),
-            pg_type: pg_type.clone(),
-            pg_default: annotations.pg_default.clone(),
+            pg_type,
+            pg_default,
             query_ops: annotations.query_ops.clone(),
         });
     }
@@ -285,6 +319,83 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         created_at,
         updated_at,
         columns,
+    })
+}
+
+/// Metadata declared by `#[derive(DbType)]` on a value type.
+#[derive(Debug)]
+pub struct TypeAnnotations {
+    pub pg_type: String,
+    pub pg_default: Option<String>,
+}
+
+/// Parses the struct annotations of a `#[derive(DbType)]` type definition.
+pub fn parse_type(input: &DeriveInput) -> syn::Result<TypeAnnotations> {
+    let mut errors = Vec::new();
+
+    if !matches!(&input.data, Data::Struct(_)) {
+        errors.push(syn::Error::new(
+            input.span(),
+            "`DbType` can only be derived for structs",
+        ));
+    }
+    if let Data::Struct(data) = &input.data {
+        for field in &data.fields {
+            for attr in field.attrs.iter().filter(|attr| attr.path().is_ident("db")) {
+                errors.push(syn::Error::new(
+                    attr.span(),
+                    "`DbType` takes its annotations on the struct, not on a field",
+                ));
+            }
+        }
+    }
+
+    let mut pg_type = None;
+    let mut pg_default = None;
+    for attr in input.attrs.iter().filter(|attr| attr.path().is_ident("db")) {
+        let result = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("pgtype") {
+                let value: LitStr = meta.value()?.parse()?;
+                if value.value().is_empty() {
+                    return Err(meta.error("`pgtype` must not be empty"));
+                }
+                if pg_type.replace(value.value()).is_some() {
+                    return Err(meta.error("duplicate `pgtype`"));
+                }
+            } else if meta.path.is_ident("pgdefault") {
+                let value: LitStr = meta.value()?.parse()?;
+                if value.value().is_empty() {
+                    return Err(meta.error("`pgdefault` must not be empty"));
+                }
+                if pg_default.replace(value.value()).is_some() {
+                    return Err(meta.error("duplicate `pgdefault`"));
+                }
+            } else {
+                return Err(
+                    meta.error("unknown attribute; the struct accepts `pgtype` or `pgdefault`")
+                );
+            }
+
+            Ok(())
+        });
+
+        if let Err(error) = result {
+            errors.push(error);
+        }
+    }
+
+    if pg_type.is_none() {
+        errors.push(syn::Error::new(
+            input.span(),
+            "missing `#[db(pgtype = \"...\")]`",
+        ));
+    }
+
+    combine(errors)?;
+
+    Ok(TypeAnnotations {
+        pg_type: pg_type.expect("a missing `pgtype` is reported as an error"),
+        pg_default,
     })
 }
 
@@ -359,12 +470,21 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                     return Err(meta.error("duplicate `pgtype`"));
                 }
             } else if meta.path.is_ident("pgdefault") {
-                let value: LitStr = meta.value()?.parse()?;
-                if value.value().is_empty() {
-                    return Err(meta.error("`pgdefault` must not be empty"));
-                }
-                if annotations.pg_default.replace(value.value()).is_some() {
-                    return Err(meta.error("duplicate `pgdefault`"));
+                let duplicate = annotations.pg_default.is_some() || annotations.pg_default_none;
+                if !meta.input.peek(syn::Token![=]) {
+                    if duplicate {
+                        return Err(meta.error("duplicate `pgdefault`"));
+                    }
+                    annotations.pg_default_none = true;
+                } else {
+                    let value: LitStr = meta.value()?.parse()?;
+                    if value.value().is_empty() {
+                        return Err(meta.error("`pgdefault` must not be empty"));
+                    }
+                    if duplicate {
+                        return Err(meta.error("duplicate `pgdefault`"));
+                    }
+                    annotations.pg_default = Some(value.value());
                 }
             } else if meta.path.is_ident("query_ops") {
                 meta.parse_nested_meta(|operator| {
@@ -482,6 +602,31 @@ fn is(ty: &Type, name: &str) -> bool {
     segment.ident == name
 }
 
+/// The type inside an `Option`, or the type itself.
+pub fn underlying(ty: &Type) -> &Type {
+    let Type::Path(path) = ty else {
+        return ty;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return ty;
+    };
+    if segment.ident != "Option" {
+        return ty;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return ty;
+    };
+
+    arguments
+        .args
+        .iter()
+        .find_map(|argument| match argument {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .unwrap_or(ty)
+}
+
 fn combine(errors: Vec<syn::Error>) -> syn::Result<()> {
     let mut errors = errors.into_iter();
     let Some(mut combined) = errors.next() else {
@@ -514,9 +659,31 @@ mod tests {
     struct Scalar<'a> {
         name: &'a Ident,
         nullable: bool,
-        pg_type: &'a str,
-        pg_default: Option<&'a str>,
+        pg_type: &'a PgType,
+        pg_default: &'a PgDefault,
         query_ops: &'a [FilterOperator],
+    }
+
+    impl PgType {
+        /// The declared type, or `None` when inherited from the field type.
+        fn declared(&self) -> Option<&str> {
+            match self {
+                PgType::Declared(pg_type) => Some(pg_type),
+                PgType::Inherited => None,
+            }
+        }
+    }
+
+    impl PgDefault {
+        /// The field's own default, `Some(None)` when it declares none, or
+        /// `None` when the default is inherited from the field type.
+        fn declared(&self) -> Option<Option<&str>> {
+            match self {
+                PgDefault::Declared(pg_default) => Some(Some(pg_default)),
+                PgDefault::None => Some(None),
+                PgDefault::Inherited => None,
+            }
+        }
     }
 
     fn scalar(column: &Column) -> Scalar<'_> {
@@ -536,7 +703,7 @@ mod tests {
             name,
             nullable: *nullable,
             pg_type,
-            pg_default: pg_default.as_deref(),
+            pg_default,
             query_ops,
         }
     }
@@ -572,7 +739,10 @@ mod tests {
             .iter()
             .map(|column| {
                 let column = scalar(column);
-                (column.pg_type, column.pg_default)
+                (
+                    column.pg_type.declared().unwrap(),
+                    column.pg_default.declared().unwrap(),
+                )
             })
             .collect();
         assert_eq!(
@@ -631,7 +801,11 @@ mod tests {
             .iter()
             .map(|column| {
                 let column = scalar(column);
-                (column.name.to_string(), column.nullable, column.pg_type)
+                (
+                    column.name.to_string(),
+                    column.nullable,
+                    column.pg_type.declared().unwrap(),
+                )
             })
             .collect();
 
@@ -999,20 +1173,41 @@ mod tests {
     }
 
     #[test]
-    fn requires_pgtype() {
-        let message = error(
+    fn inherits_pgtype_and_pgdefault_from_the_field_type() {
+        let model = parse_model(
             r#"
             #[db(table = "widget")]
             struct Widget {
                 #[db(primary_key)]
                 id: WidgetId,
+                #[db(pgdefault)]
+                cleared_id: WidgetId,
+                #[db(pgtype = "uuid")]
+                own_type: WidgetId,
+                #[db(pgtype = "uuid", pgdefault = "gen_random_uuid()")]
+                own_type_and_default: WidgetId,
             }
         "#,
-        );
+        )
+        .unwrap();
 
-        assert!(
-            message.contains("missing `#[db(pgtype = \"...\")]`"),
-            "{message}"
+        let columns: Vec<(Option<&str>, Option<Option<&str>>)> = model
+            .columns
+            .iter()
+            .map(|column| {
+                let column = scalar(column);
+                (column.pg_type.declared(), column.pg_default.declared())
+            })
+            .collect();
+
+        assert_eq!(
+            columns,
+            [
+                (None, None),
+                (None, Some(None)),
+                (Some("uuid"), Some(None)),
+                (Some("uuid"), Some(Some("gen_random_uuid()"))),
+            ]
         );
     }
 
@@ -1072,6 +1267,23 @@ mod tests {
             struct Widget {
                 #[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]
                 #[db(pgdefault = "gen_random_uuid()")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(message.contains("duplicate `pgdefault`"), "{message}");
+    }
+
+    #[test]
+    fn rejects_bare_and_declared_pgdefault() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                #[db(pgdefault)]
+                #[db(pgdefault = "uuidv7()")]
                 id: WidgetId,
             }
         "#,
@@ -1212,5 +1424,73 @@ mod tests {
         let message = error(r#"#[db(table = "widget")] enum Widget { A }"#);
 
         assert!(message.contains("only be derived for structs"), "{message}");
+    }
+
+    fn parse_type_error(source: &str) -> String {
+        parse_type(&syn::parse_str::<DeriveInput>(source).unwrap())
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn reads_type_annotations() {
+        let annotations = parse_type(
+            &syn::parse_str::<DeriveInput>(
+                r#"
+                #[db(pgtype = "uuid")]
+                #[db(pgdefault = "uuidv7()")]
+                struct WidgetId(uuid::Uuid);
+            "#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(annotations.pg_type, "uuid");
+        assert_eq!(annotations.pg_default.as_deref(), Some("uuidv7()"));
+    }
+
+    #[test]
+    fn type_requires_pgtype() {
+        let message = parse_type_error(
+            r#"
+            struct WidgetId(uuid::Uuid);
+        "#,
+        );
+
+        assert!(
+            message.contains("missing `#[db(pgtype = \"...\")]`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn type_rejects_field_annotations() {
+        let message = parse_type_error(
+            r#"
+            #[db(pgtype = "uuid")]
+            struct WidgetId(#[db(pgtype = "text")] uuid::Uuid);
+        "#,
+        );
+
+        assert!(
+            message.contains("takes its annotations on the struct"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn type_rejects_model_annotations() {
+        let message = parse_type_error(
+            r#"
+            #[db(table = "widget")]
+            struct WidgetId(uuid::Uuid);
+        "#,
+        );
+
+        assert!(
+            message.contains("the struct accepts `pgtype` or `pgdefault`"),
+            "{message}"
+        );
     }
 }
