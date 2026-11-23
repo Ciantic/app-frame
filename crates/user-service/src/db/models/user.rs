@@ -1,4 +1,3 @@
-use crate::db::primitives::TimestampSchema;
 use crate::db::primitives::email::Email;
 use chrono::DateTime;
 use chrono::Utc;
@@ -7,22 +6,14 @@ use dbkit::DbPatch;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
-use zod_rs::prelude::Schema;
-use zod_rs::prelude::StringSchema;
-use zod_rs::prelude::ZodSchema;
-use zod_rs::prelude::string;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, garde::Validate,
+)]
 #[sqlx(transparent)]
-pub struct UserId(pub Uuid);
+pub struct UserId(#[garde(skip)] pub Uuid);
 
-impl UserId {
-    pub fn schema() -> StringSchema {
-        string()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, DbPatch, ZodSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, DbPatch)]
 #[db(table = "user")]
 pub struct User {
     #[db(primary_key)]

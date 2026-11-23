@@ -1,10 +1,10 @@
 //! Database building blocks shared by the service crates.
 //!
 //! [`Patch`] is the update input that tells "not given" apart from "set to
-//! `NULL`"; `#[derive(DbPatch)]` generates the patch of a model. [`Model`] and
-//! its [`TableMeta`] describe a table at runtime, and
-//! [`schema::check_live_schema_against_models`] compares a list of them with a
-//! live database.
+//! `NULL`"; `#[derive(DbPatch)]` generates the patch of a model and validates
+//! it with `garde`. [`Model`] and its [`TableMeta`] describe a table at
+//! runtime, and [`schema::check_live_schema_against_models`] compares a list of
+//! them with a live database.
 
 mod model;
 mod patch;
@@ -16,4 +16,3 @@ pub use model::ColumnMeta;
 pub use model::Model;
 pub use model::TableMeta;
 pub use patch::Patch;
-pub use patch::PatchSchema;

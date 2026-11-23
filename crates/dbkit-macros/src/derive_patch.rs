@@ -5,6 +5,10 @@
 //! expects. Every other business column becomes a [`dbkit::Patch`] field, so a
 //! missing key leaves the column alone and `null` clears it. Audit columns are
 //! not inputs, so they are omitted.
+//!
+//! The struct derives `garde::Validate`, and a patch field whose payload type
+//! can carry rules dives into it, so `Set` values are validated while `Absent`
+//! and `Null` pass.
 
 use crate::annotations;
 use proc_macro2::TokenStream;
@@ -33,14 +37,11 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
          has one; every other column is a [`dbkit::Patch`] field."
     );
     let generics = &input.generics;
-    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
     let mut definitions = Vec::new();
-    let mut schema_fields = Vec::new();
 
     for field in &fields.named {
         let field_name = field.ident.as_ref().expect("named field");
-        let key = field_name.to_string();
         let ty = &field.ty;
 
         if annotations.created_at.as_ref() == Some(field_name)
@@ -50,60 +51,30 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
 
         if annotations.primary_key.contains(field_name) || version == Some(field_name) {
-            // The version is the optimistic-locking token, so it is always an
-            // integer; the primary key may be any type with its own schema.
-            let schema = if version == Some(field_name) {
-                quote!(::zod_rs::number().int())
-            } else {
-                type_schema(ty)
-            };
-            definitions.push(quote!(pub #field_name: #ty));
-            schema_fields.push(quote!(.field(#key, #schema)));
+            definitions.push(quote! {
+                #[garde(skip)]
+                pub #field_name: #ty
+            });
         } else {
             let inner = non_optional(ty);
+            let garde = if carries_rules(inner) {
+                quote!(#[garde(dive)])
+            } else {
+                quote!(#[garde(skip)])
+            };
             definitions.push(quote! {
                 #[serde(default, skip_serializing_if = "::dbkit::Patch::is_absent")]
+                #garde
                 pub #field_name: ::dbkit::Patch<#inner>
-            });
-            let schema = type_schema(inner);
-            schema_fields.push(quote! {
-                .optional_field(#key, ::dbkit::Patch::schema(#schema))
             });
         }
     }
 
     Ok(quote! {
         #[doc = #doc]
-        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
+        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize, ::garde::Validate)]
         pub struct #patch #generics {
             #(#definitions),*
-        }
-
-        impl #impl_generics #patch #type_generics #where_clause {
-            /// Validates a patch body: required fields must be present and
-            /// every `Patch::Set` value must satisfy its column's schema.
-            pub fn schema() -> impl ::zod_rs::Schema<::zod_rs::prelude::Value> {
-                ::zod_rs::object()
-                    #(#schema_fields)*
-            }
-
-            /// Validates `value` against [`Self::schema`] and deserializes it.
-            pub fn validate_and_parse(
-                value: &::zod_rs::prelude::Value,
-            ) -> ::core::result::Result<
-                Self,
-                ::zod_rs::__private::ValidationResult,
-            > {
-                match ::zod_rs::Schema::validate(&Self::schema(), value) {
-                    Ok(_) => ::serde_json::from_value(value.clone()).map_err(|error| {
-                        ::zod_rs::__private::ValidationError::custom(format!(
-                            "Deserialization failed: {error}"
-                        ))
-                        .into()
-                    }),
-                    Err(errors) => Err(errors),
-                }
-            }
         }
     })
 }
@@ -131,40 +102,36 @@ fn non_optional(ty: &Type) -> &Type {
     }
 }
 
-/// The schema a model field is validated with.
+/// Whether a payload type can carry validation rules.
 ///
-/// Mirrors `#[derive(ZodSchema)]`: primitives get a built-in schema and every
-/// other type is expected to have a `schema()` constructor.
-fn type_schema(ty: &Type) -> TokenStream {
+/// Only a local type can implement `garde::Validate`, so a primitive or a
+/// foreign type is skipped; `Patch<T>` then validates nothing, which matches a
+/// type that has no rules.
+fn carries_rules(ty: &Type) -> bool {
     let Type::Path(path) = ty else {
-        return quote!(::zod_rs::string());
+        return true;
     };
     let Some(segment) = path.path.segments.last() else {
-        return quote!(::zod_rs::string());
+        return true;
     };
 
-    match segment.ident.to_string().as_str() {
-        "String" => quote!(::zod_rs::string()),
-        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" => {
-            quote!(::zod_rs::number().int())
-        }
-        "f32" | "f64" => quote!(::zod_rs::number()),
-        "bool" => quote!(::zod_rs::boolean()),
-        "Vec" => {
-            let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-                return quote!(::zod_rs::array(::zod_rs::string()));
-            };
-            match arguments.args.first() {
-                Some(syn::GenericArgument::Type(element)) => {
-                    let element = type_schema(element);
-                    quote!(::zod_rs::array(#element))
-                }
-                _ => quote!(::zod_rs::array(::zod_rs::string())),
-            }
-        }
-        _ => {
-            let name = &segment.ident;
-            quote!(#name::schema())
-        }
-    }
+    !matches!(
+        segment.ident.to_string().as_str(),
+        "String"
+            | "bool"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "isize"
+            | "usize"
+            | "f32"
+            | "f64"
+            | "Uuid"
+            | "DateTime"
+    )
 }

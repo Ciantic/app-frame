@@ -9,10 +9,10 @@ opt-in.
 
 The derive validates the annotations and generates `impl dbkit::Model`, which
 carries them as the `Model::META` const at runtime. `#[derive(DbPatch)]` reads
-the same annotations to generate the model's patch input type; insert
-implementations do not exist yet, so the insert sections describe a contract
-rather than code you can call today. The accepted syntax stays as documented
-here.
+the same annotations to generate the model's patch input type, which `garde`
+validates; insert implementations do not exist yet, so the insert sections
+describe a contract rather than code you can call today. The accepted syntax
+stays as documented here.
 
 ## Example
 
@@ -301,10 +301,17 @@ pub struct User {
 }
 
 // generated
+#[derive(Debug, Clone, Serialize, Deserialize, garde::Validate)]
 pub struct UserPatch {
+    #[garde(skip)]
     pub id: UserId,
+    #[garde(skip)]
     pub version: i64,
+    #[serde(default, skip_serializing_if = "Patch::is_absent")]
+    #[garde(dive)]
     pub email: Patch<Email>,
+    #[serde(default, skip_serializing_if = "Patch::is_absent")]
+    #[garde(skip)]
     pub email_verified_at: Patch<DateTime<Utc>>,
 }
 ```
@@ -325,10 +332,15 @@ pub struct UserPatch {
 - The struct derives `Debug`, `Clone`, `Serialize` and `Deserialize`; patch
   fields carry `skip_serializing_if = "Patch::is_absent"`, so an absent field
   stays off the wire in a response.
-- `Patch::schema(inner)` gives zod-rs a schema for one patch field, and the
-  generated `schema()` / `validate_and_parse()` mirror the `ZodSchema` model:
-  `Patch::Set` values are validated with the column's own schema, `Patch::Null`
-  passes, and `Patch::Absent` is an optional object field.
+- The struct derives `garde::Validate`. A field whose payload type can carry
+  rules, such as a newtype like `Email`, is marked `#[garde(dive)]`, so a
+  `Patch::Set` value is validated and `Patch::Absent` or `Patch::Null` passes.
+  Primitive payloads and identifiers are `#[garde(skip)]`, because only a local
+  type can implement `garde::Validate`.
+- `dbkit` implements `garde::Validate for Patch<T>` for every `T: Validate`, so
+  one attribute covers all three states.
+- `garde` is not tied to a web framework: a handler deserializes the patch and
+  calls `patch.validate()`, mapping an error to `422 Unprocessable Entity`.
 
 ## Collecting models
 

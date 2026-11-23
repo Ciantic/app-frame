@@ -1,5 +1,6 @@
 use chrono::Utc;
 use dbkit::Patch;
+use garde::Validate;
 use serde_json::json;
 use user_service::db::models::user::UserPatch;
 use user_service::db::models::user_session::UserSessionPatch;
@@ -37,32 +38,50 @@ fn user_patch_requires_id_and_version() {
 
 #[test]
 fn user_patch_validates_set_values() {
-    let valid = json!({ "id": user_id(), "version": 4, "email": "sample@example.com" });
-    assert!(UserPatch::validate_and_parse(&valid).is_ok());
+    let valid: UserPatch = serde_json::from_value(
+        json!({ "id": user_id(), "version": 4, "email": "sample@example.com" }),
+    )
+    .unwrap();
+    assert!(valid.validate().is_ok());
 
-    let invalid_email = json!({ "id": user_id(), "version": 4, "email": "nope" });
-    assert!(UserPatch::validate_and_parse(&invalid_email).is_err());
+    let invalid_email: UserPatch =
+        serde_json::from_value(json!({ "id": user_id(), "version": 4, "email": "nope" })).unwrap();
+    let report = invalid_email.validate().unwrap_err();
+    assert!(report.to_string().starts_with("email"), "{report}");
+}
+
+#[test]
+fn user_patch_skips_absent_and_cleared_email() {
+    let absent: UserPatch =
+        serde_json::from_value(json!({ "id": user_id(), "version": 4 })).unwrap();
+    assert!(absent.validate().is_ok());
+
+    let cleared: UserPatch =
+        serde_json::from_value(json!({ "id": user_id(), "version": 4, "email": null })).unwrap();
+    assert!(cleared.validate().is_ok());
 }
 
 #[test]
 fn user_session_patch_validates_token() {
-    let valid = json!({
+    let valid: UserSessionPatch = serde_json::from_value(json!({
         "id": Uuid::from_u128(2),
         "version": 1,
         "token_hash": "hash",
         "expires_at": Utc::now(),
-    });
-    let patch: UserSessionPatch = UserSessionPatch::validate_and_parse(&valid).unwrap();
-
+    }))
+    .unwrap();
+    assert!(valid.validate().is_ok());
     assert_eq!(
-        patch.token_hash,
+        valid.token_hash,
         Patch::Set(SessionToken("hash".to_owned()))
     );
 
-    let empty_token = json!({
+    let empty_token: UserSessionPatch = serde_json::from_value(json!({
         "id": Uuid::from_u128(2),
         "version": 1,
         "token_hash": "",
-    });
-    assert!(UserSessionPatch::validate_and_parse(&empty_token).is_err());
+    }))
+    .unwrap();
+    let report = empty_token.validate().unwrap_err();
+    assert!(report.to_string().starts_with("token_hash"), "{report}");
 }

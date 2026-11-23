@@ -1,37 +1,31 @@
 use serde::Deserialize;
 use serde::Serialize;
-use zod_rs::prelude::StringSchema;
-use zod_rs::prelude::string;
 
 /// A session or magic link token, stored only as its hash.
 ///
 /// The type carries no construction logic: sanitization and validation are
-/// separate steps run before or after a value is built. `zod-rs` validates the
+/// separate steps run before or after a value is built. `garde` validates the
 /// field when the struct that owns it is validated.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, garde::Validate,
+)]
 #[serde(transparent)]
 #[sqlx(transparent)]
-pub struct SessionToken(pub String);
-
-impl SessionToken {
-    pub fn schema() -> StringSchema {
-        string().min(1)
-    }
-}
+#[garde(transparent)]
+pub struct SessionToken(#[garde(length(min = 1))] pub String);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use zod_rs::prelude::Schema;
+    use garde::Validate;
 
     #[test]
-    fn schema_rejects_empty() {
-        assert!(SessionToken::schema().validate(&json!("")).is_err());
+    fn rejects_empty() {
+        assert!(SessionToken(String::new()).validate().is_err());
     }
 
     #[test]
-    fn schema_accepts_non_empty() {
-        assert!(SessionToken::schema().validate(&json!("hash")).is_ok());
+    fn accepts_non_empty() {
+        assert!(SessionToken("hash".to_owned()).validate().is_ok());
     }
 }

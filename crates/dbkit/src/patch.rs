@@ -2,11 +2,6 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use std::fmt::Debug;
-use std::marker::PhantomData;
-use zod_rs::__private::ValidationResult;
-use zod_rs::prelude::Schema;
-use zod_rs::prelude::Value;
 
 /// One field of an update, distinguishing "not given" from "set to `NULL`".
 ///
@@ -19,10 +14,9 @@ use zod_rs::prelude::Value;
 /// `skip_serializing_if = "Patch::is_absent"` to keep an absent field off the
 /// wire.
 ///
-/// [`Patch::schema`] validates one patch value: `null` is [`Patch::Null`] and
-/// any other value is validated by the inner schema and becomes
-/// [`Patch::Set`]. A missing key has no value to validate, so a patch field in
-/// an object schema is an `optional_field`.
+/// The `garde::Validate` implementation validates only `Set` values, so an
+/// absent or cleared column never fails validation. A patch struct derives
+/// `garde::Validate` and marks its patch fields `#[garde(dive)]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Patch<T> {
     #[default]
@@ -65,36 +59,20 @@ impl<T> Patch<T> {
             Patch::Null => Patch::Null,
         }
     }
-
-    pub fn schema<S>(inner: S) -> PatchSchema<S, T>
-    where
-        S: Schema<T>,
-        T: Debug,
-    {
-        PatchSchema {
-            inner,
-            _value: PhantomData,
-        }
-    }
 }
 
-/// Schema of one [`Patch`] value.
-#[derive(Debug)]
-pub struct PatchSchema<S, T> {
-    inner: S,
-    _value: PhantomData<fn() -> T>,
-}
+impl<T: garde::Validate> garde::Validate for Patch<T> {
+    type Context = T::Context;
 
-impl<S, T> Schema<Patch<T>> for PatchSchema<S, T>
-where
-    S: Schema<T>,
-    T: Debug,
-{
-    fn validate(&self, value: &Value) -> Result<Patch<T>, ValidationResult> {
-        if value.is_null() {
-            return Ok(Patch::Null);
+    fn validate_into(
+        &self,
+        context: &Self::Context,
+        parent: &mut dyn FnMut() -> garde::Path,
+        report: &mut garde::Report,
+    ) {
+        if let Patch::Set(value) = self {
+            value.validate_into(context, parent, report);
         }
-        self.inner.validate(value).map(Patch::Set)
     }
 }
 
@@ -116,19 +94,27 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
     }
 }
 
-/// Restates the rules at the type level: a patch writes `null` for both
-/// `Absent` and `Null` unless the field skips absent values, and its schema
-/// accepts `null` as `Null` and validates everything else.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use zod_rs::prelude::string;
+    use garde::Validate;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Sample {
         #[serde(default, skip_serializing_if = "Patch::is_absent")]
         name: Patch<String>,
+    }
+
+    /// A newtype whose rule is stricter than any primitive's.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, garde::Validate)]
+    #[serde(transparent)]
+    #[garde(transparent)]
+    struct Name(#[garde(length(min = 3))] String);
+
+    #[derive(Debug, Serialize, Deserialize, garde::Validate)]
+    struct PatchOfName {
+        #[garde(dive)]
+        name: Patch<Name>,
     }
 
     #[test]
@@ -181,31 +167,25 @@ mod tests {
     }
 
     #[test]
-    fn schema_accepts_null_as_null() {
-        let schema = Patch::<String>::schema(string());
+    fn absent_and_null_pass_validation() {
+        for name in [Patch::Absent, Patch::Null] {
+            let patch = PatchOfName { name };
 
-        assert_eq!(schema.validate(&json!(null)).unwrap(), Patch::Null);
+            assert!(patch.validate().is_ok());
+        }
     }
 
     #[test]
-    fn schema_validates_set_value() {
-        let schema = Patch::<String>::schema(string().min(3));
+    fn set_is_validated_by_the_payload_type() {
+        let valid = PatchOfName {
+            name: Patch::Set(Name("Thingie".to_owned())),
+        };
+        assert!(valid.validate().is_ok());
 
-        assert_eq!(
-            schema.validate(&json!("Thingie")).unwrap(),
-            Patch::Set("Thingie".to_owned())
-        );
-        assert!(schema.validate(&json!("no")).is_err());
-    }
-
-    #[test]
-    fn schema_fits_an_optional_object_field() {
-        let schema =
-            zod_rs::object().optional_field("name", Patch::<String>::schema(string().min(3)));
-
-        assert!(schema.validate(&json!({})).is_ok());
-        assert!(schema.validate(&json!({"name": null})).is_ok());
-        assert!(schema.validate(&json!({"name": "Thingie"})).is_ok());
-        assert!(schema.validate(&json!({"name": "no"})).is_err());
+        let invalid = PatchOfName {
+            name: Patch::Set(Name("no".to_owned())),
+        };
+        let report = invalid.validate().unwrap_err();
+        assert!(report.to_string().starts_with("name"), "{report}");
     }
 }

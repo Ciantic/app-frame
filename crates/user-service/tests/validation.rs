@@ -1,66 +1,24 @@
-use chrono::Utc;
-use serde_json::json;
-use user_service::db::models::user::User;
-use user_service::db::models::user::UserId;
-use user_service::db::models::user_session::UserSession;
-use user_service::db::models::user_session::UserSessionId;
+use garde::Validate;
 use user_service::db::primitives::email::Email;
 use user_service::db::primitives::session_token::SessionToken;
-use uuid::Uuid;
 
-fn user() -> User {
-    User {
-        id: UserId(Uuid::from_u128(1)),
-        email: Email("sample@example.com".to_owned()),
-        email_verified_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        deleted_at: None,
-        version: 0,
-    }
-}
+#[test]
+fn email_rule_rejects_missing_at_sign() {
+    assert!(Email("sample@example.com".to_owned()).validate().is_ok());
 
-fn session() -> UserSession {
-    UserSession {
-        id: UserSessionId(Uuid::from_u128(2)),
-        user_id: UserId(Uuid::from_u128(1)),
-        token_hash: SessionToken("sample".to_owned()),
-        expires_at: Utc::now(),
-        revoked_at: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        version: 0,
-    }
+    let report = Email("nope".to_owned()).validate().unwrap_err();
+    assert!(report.to_string().contains("email"), "{report}");
 }
 
 #[test]
-fn valid_rows_pass_validation() {
-    assert!(User::validate_and_parse(&serde_json::to_value(user()).unwrap()).is_ok());
-    assert!(UserSession::validate_and_parse(&serde_json::to_value(session()).unwrap()).is_ok());
-}
-
-#[test]
-fn empty_token_hash_fails_validation() {
-    let mut json = serde_json::to_value(session()).unwrap();
-    json["token_hash"] = json!("");
-
-    assert!(UserSession::validate_and_parse(&json).is_err());
-}
-
-#[test]
-fn invalid_email_fails_validation() {
-    let mut json = serde_json::to_value(user()).unwrap();
-    json["email"] = json!("nope");
-
-    assert!(User::validate_and_parse(&json).is_err());
+fn token_rule_rejects_empty() {
+    assert!(SessionToken("hash".to_owned()).validate().is_ok());
+    assert!(SessionToken(String::new()).validate().is_err());
 }
 
 #[test]
 fn deserialization_does_not_validate() {
-    let mut json = serde_json::to_value(user()).unwrap();
-    json["email"] = json!("nope");
+    let email: Email = serde_json::from_value(serde_json::json!("nope")).unwrap();
 
-    let user: User = serde_json::from_value(json).unwrap();
-
-    assert_eq!(user.email.0, "nope");
+    assert_eq!(email.0, "nope");
 }

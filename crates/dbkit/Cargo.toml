@@ -5,9 +5,9 @@ edition.workspace = true
 
 [dependencies]
 dbkit-macros = { path = "../dbkit-macros" }
+garde.workspace = true
 serde.workspace = true
 sqlx.workspace = true
-zod-rs.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

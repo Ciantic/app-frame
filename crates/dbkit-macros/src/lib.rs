@@ -48,9 +48,10 @@ pub fn derive_db_model(input: TokenStream) -> TokenStream {
 /// clears a nullable one. Audit columns (`created_at`, `updated_at`) are not
 /// patchable and are omitted.
 ///
-/// The generated struct is `Serialize + Deserialize`, and it has `schema()`
-/// and `validate_and_parse()` like a `ZodSchema` model: `Patch::Set` values are
-/// validated by the column's own schema.
+/// The generated struct is `Serialize + Deserialize + garde::Validate`. A
+/// patch field whose payload type can carry rules derives a `#[garde(dive)]`,
+/// so `Patch::Set` values are validated while `Patch::Absent` and
+/// `Patch::Null` pass.
 #[proc_macro_derive(DbPatch, attributes(db))]
 pub fn derive_db_patch(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);

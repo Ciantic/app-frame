@@ -1,5 +1,4 @@
 use super::user::UserId;
-use crate::db::primitives::TimestampSchema;
 use crate::db::primitives::session_token::SessionToken;
 use chrono::DateTime;
 use chrono::Utc;
@@ -8,22 +7,14 @@ use dbkit::DbPatch;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
-use zod_rs::prelude::Schema;
-use zod_rs::prelude::StringSchema;
-use zod_rs::prelude::ZodSchema;
-use zod_rs::prelude::string;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, garde::Validate,
+)]
 #[sqlx(transparent)]
-pub struct UserSessionId(pub Uuid);
+pub struct UserSessionId(#[garde(skip)] pub Uuid);
 
-impl UserSessionId {
-    pub fn schema() -> StringSchema {
-        string()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, DbPatch, ZodSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, DbModel, DbPatch)]
 #[db(table = "user_session")]
 pub struct UserSession {
     #[db(primary_key)]
