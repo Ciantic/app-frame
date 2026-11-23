@@ -41,13 +41,12 @@ pub fn derive_db_model(input: TokenStream) -> TokenStream {
 
 /// Generates the patch input type of a model, `<Model>Patch`.
 ///
-/// Reads the same `#[db(...)]` annotations as `DbModel`. The primary key and
-/// the version are required fields of the patch, taken as they are; every
-/// other business column becomes a `dbkit::Patch<T>` field, so a missing key
-/// leaves the column unchanged and an explicit `null` clears a nullable one.
-/// Audit columns (`created_at`, `updated_at`) are not patchable and are
-/// omitted. A version is required, because every patch carries the
-/// optimistic-locking token.
+/// Reads the same `#[db(...)]` annotations as `DbModel`. The primary key is a
+/// required field of the patch, taken as it is, and so is the version when the
+/// model has one; every other business column becomes a `dbkit::Patch<T>`
+/// field, so a missing key leaves the column unchanged and an explicit `null`
+/// clears a nullable one. Audit columns (`created_at`, `updated_at`) are not
+/// patchable and are omitted.
 ///
 /// The generated struct is `Serialize + Deserialize`, and it has `schema()`
 /// and `validate_and_parse()` like a `ZodSchema` model: `Patch::Set` values are

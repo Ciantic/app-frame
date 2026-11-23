@@ -168,7 +168,8 @@ Marks the optimistic-locking field.
   `"version" = "version" + 1` and the condition `WHERE "version" = $n`.
 - A guard miss surfaces as `RepoError::Conflict`, not as a generic database
   error.
-- A required field of the generated patch, which makes `DbPatch` require it.
+- A required field of the generated patch, where the update carries it as the
+  optimistic-locking token. A model without it gets a patch without a version.
 
 ## `created_at`
 
@@ -308,11 +309,13 @@ pub struct UserPatch {
 }
 ```
 
-- The primary key and the `version` are required fields, spelled exactly as in
-  the model. A patch names its row and its expected version; a missing key is a
-  deserialization error.
-- `DbPatch` requires a `#[db(version)]` field, unlike `DbModel`, because every
-  update is guarded by optimistic locking.
+- The primary key is a required field, spelled exactly as in the model; a
+  composite key contributes one required field per key column. A missing key is
+  a deserialization error. Key columns identify the row and are therefore never
+  patchable themselves.
+- When the model has a `#[db(version)]` field, the patch carries it as a
+  required field too, so an update states the version it expects. A model
+  without one, such as an append-only table, gets a patch without a version.
 - Every other column becomes a `dbkit::Patch<T>` field: a missing key is
   `Patch::Absent` (leave the column alone), an explicit `null` is `Patch::Null`
   (clear a nullable column) and any other value is `Patch::Set`.

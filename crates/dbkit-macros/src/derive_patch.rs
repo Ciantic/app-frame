@@ -1,10 +1,10 @@
 //! Derive of a model's patch input type.
 //!
-//! The generated struct holds the primary key and version as-is, so an update
-//! always names its row and its expected version, and turns every other
-//! business column into a [`dbkit::Patch`] field: a missing key leaves the
-//! column alone and `null` clears it. Audit columns are not inputs, so they are
-//! omitted.
+//! The generated struct holds the primary key and, when the model has one, the
+//! version as-is: an update always names its row and states the version it
+//! expects. Every other business column becomes a [`dbkit::Patch`] field, so a
+//! missing key leaves the column alone and `null` clears it. Audit columns are
+//! not inputs, so they are omitted.
 
 use crate::annotations;
 use proc_macro2::TokenStream;
@@ -18,13 +18,7 @@ use syn::Type;
 pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let annotations = annotations::parse(input)?;
     let name = &input.ident;
-
-    let Some(version) = &annotations.version else {
-        return Err(syn::Error::new(
-            input.ident.span(),
-            "`DbPatch` requires a `#[db(version)]` field for optimistic locking",
-        ));
-    };
+    let version = annotations.version.as_ref();
 
     let Data::Struct(data) = &input.data else {
         unreachable!("`annotations::parse` rejects non-structs");
@@ -35,8 +29,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     let patch = format_ident!("{name}Patch");
     let doc = format!(
-        "Patch input of [`{name}`]. The primary key and `version` are required; every other \
-         column is a [`dbkit::Patch`] field."
+        "Patch input of [`{name}`]. The primary key is required, as is `version` when the model \
+         has one; every other column is a [`dbkit::Patch`] field."
     );
     let generics = &input.generics;
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
@@ -55,10 +49,10 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             continue;
         }
 
-        if annotations.primary_key.contains(field_name) || version == field_name {
+        if annotations.primary_key.contains(field_name) || version == Some(field_name) {
             // The version is the optimistic-locking token, so it is always an
             // integer; the primary key may be any type with its own schema.
-            let schema = if version == field_name {
+            let schema = if version == Some(field_name) {
                 quote!(::zod_rs::number().int())
             } else {
                 type_schema(ty)
