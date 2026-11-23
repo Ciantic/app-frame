@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
+use dbkit::FilterOperator;
 use dbkit::Model;
 use dbkit::TableMeta;
 use uuid::Uuid;
@@ -11,6 +12,7 @@ struct Widget {
     #[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]
     id: Uuid,
     #[db(pgtype = "text")]
+    #[db(query_ops(eq, neq, like, in))]
     name: String,
     #[db(created_at, pgtype = "timestamptz", pgdefault = "now()")]
     created_at: DateTime<Utc>,
@@ -76,6 +78,17 @@ fn derive_generates_table_metadata() {
             ("version", false, "int8", Some("0")),
         ]
     );
+
+    assert_eq!(
+        meta.columns[1].query_ops,
+        [
+            FilterOperator::Eq,
+            FilterOperator::Neq,
+            FilterOperator::Like,
+            FilterOperator::In,
+        ]
+    );
+    assert!(meta.columns[0].query_ops.is_empty());
 }
 
 #[test]
@@ -90,6 +103,11 @@ fn derive_omits_absent_roles_and_marks_optionals() {
         meta.columns
             .iter()
             .any(|column| column.name == "note" && column.nullable)
+    );
+    assert!(
+        meta.columns
+            .iter()
+            .all(|column| column.query_ops.is_empty())
     );
 }
 

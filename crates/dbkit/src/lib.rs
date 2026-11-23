@@ -13,6 +13,7 @@ pub mod schema;
 pub use dbkit_macros::DbModel;
 pub use dbkit_macros::DbPatch;
 pub use model::ColumnMeta;
+pub use model::FilterOperator;
 pub use model::Model;
 pub use model::TableMeta;
 pub use patch::Patch;

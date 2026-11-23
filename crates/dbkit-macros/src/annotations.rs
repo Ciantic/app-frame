@@ -18,6 +18,56 @@ pub enum Role {
     UpdatedAt,
 }
 
+/// A `dbkit::FilterOperator` variant, known to the macro by its annotation
+/// name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterOperator {
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Like,
+    ILike,
+    NotLike,
+    NotILike,
+    In,
+    NotIn,
+    Any,
+    NotAny,
+    IsNull,
+    IsNotNull,
+    Between,
+    NotBetween,
+}
+
+impl FilterOperator {
+    /// The `dbkit::FilterOperator` variant this operator emits.
+    pub fn variant(self) -> &'static str {
+        match self {
+            FilterOperator::Eq => "Eq",
+            FilterOperator::Neq => "Neq",
+            FilterOperator::Gt => "Gt",
+            FilterOperator::Gte => "Gte",
+            FilterOperator::Lt => "Lt",
+            FilterOperator::Lte => "Lte",
+            FilterOperator::Like => "Like",
+            FilterOperator::ILike => "ILike",
+            FilterOperator::NotLike => "NotLike",
+            FilterOperator::NotILike => "NotILike",
+            FilterOperator::In => "In",
+            FilterOperator::NotIn => "NotIn",
+            FilterOperator::Any => "Any",
+            FilterOperator::NotAny => "NotAny",
+            FilterOperator::IsNull => "IsNull",
+            FilterOperator::IsNotNull => "IsNotNull",
+            FilterOperator::Between => "Between",
+            FilterOperator::NotBetween => "NotBetween",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Annotations {
     pub table: String,
@@ -38,6 +88,8 @@ pub struct Column {
     pub pg_type: String,
     /// Column default as DDL spells it, e.g. `now()`, `0`, `'{}'::jsonb`.
     pub pg_default: Option<String>,
+    /// Operators the column may be filtered with, in declaration order.
+    pub query_ops: Vec<FilterOperator>,
 }
 
 #[derive(Debug, Default)]
@@ -45,6 +97,7 @@ struct FieldAnnotations {
     roles: Vec<Role>,
     pg_type: Option<String>,
     pg_default: Option<String>,
+    query_ops: Vec<FilterOperator>,
 }
 
 const ROLES: &[(&str, Role)] = &[
@@ -52,6 +105,27 @@ const ROLES: &[(&str, Role)] = &[
     ("version", Role::Version),
     ("created_at", Role::CreatedAt),
     ("updated_at", Role::UpdatedAt),
+];
+
+const FILTER_OPERATORS: &[(&str, FilterOperator)] = &[
+    ("eq", FilterOperator::Eq),
+    ("neq", FilterOperator::Neq),
+    ("gt", FilterOperator::Gt),
+    ("gte", FilterOperator::Gte),
+    ("lt", FilterOperator::Lt),
+    ("lte", FilterOperator::Lte),
+    ("like", FilterOperator::Like),
+    ("ilike", FilterOperator::ILike),
+    ("not_like", FilterOperator::NotLike),
+    ("not_ilike", FilterOperator::NotILike),
+    ("in", FilterOperator::In),
+    ("not_in", FilterOperator::NotIn),
+    ("any", FilterOperator::Any),
+    ("not_any", FilterOperator::NotAny),
+    ("is_null", FilterOperator::IsNull),
+    ("is_not_null", FilterOperator::IsNotNull),
+    ("between", FilterOperator::Between),
+    ("not_between", FilterOperator::NotBetween),
 ];
 
 pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
@@ -102,6 +176,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             nullable: is(&field.ty, "Option"),
             pg_type,
             pg_default: annotations.pg_default,
+            query_ops: annotations.query_ops,
         });
     }
 
@@ -196,12 +271,34 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                 if annotations.pg_default.replace(value.value()).is_some() {
                     return Err(meta.error("duplicate `pgdefault`"));
                 }
+            } else if meta.path.is_ident("query_ops") {
+                meta.parse_nested_meta(|operator| {
+                    let Some((_, filter)) = FILTER_OPERATORS
+                        .iter()
+                        .find(|(name, _)| operator.path.is_ident(name))
+                    else {
+                        return Err(operator.error(
+                            "unknown query operator; expected `eq`, `neq`, `gt`, `gte`, `lt`, \
+                             `lte`, `like`, `ilike`, `not_like`, `not_ilike`, `in`, `not_in`, \
+                             `any`, `not_any`, `is_null`, `is_not_null`, `between` or \
+                             `not_between`",
+                        ));
+                    };
+
+                    if annotations.query_ops.contains(filter) {
+                        return Err(operator.error("duplicate query operator"));
+                    }
+
+                    annotations.query_ops.push(*filter);
+
+                    Ok(())
+                })?;
             } else {
                 let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name))
                 else {
                     return Err(meta.error(
                         "unknown attribute; expected `primary_key`, `version`, `created_at`, \
-                         `updated_at`, `pgtype` or `pgdefault`",
+                         `updated_at`, `pgtype`, `pgdefault` or `query_ops`",
                     ));
                 };
 
@@ -416,6 +513,136 @@ mod tests {
                 ("note".to_owned(), true, "text"),
             ]
         );
+    }
+
+    #[test]
+    fn reads_query_ops_in_declaration_order() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text")]
+                #[db(query_ops(eq, neq, like, in))]
+                name: String,
+                #[db(pgtype = "text")]
+                #[db(query_ops(between))]
+                note: Option<String>,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.columns[1].query_ops,
+            [
+                FilterOperator::Eq,
+                FilterOperator::Neq,
+                FilterOperator::Like,
+                FilterOperator::In,
+            ]
+        );
+        assert_eq!(model.columns[2].query_ops, [FilterOperator::Between]);
+        assert!(model.columns[0].query_ops.is_empty());
+    }
+
+    #[test]
+    fn reads_every_query_operator() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text")]
+                #[db(query_ops(
+                    eq, neq, gt, gte, lt, lte, like, ilike, not_like, not_ilike, in, not_in,
+                    any, not_any, is_null, is_not_null, between, not_between
+                ))]
+                name: String,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.columns[1].query_ops,
+            [
+                FilterOperator::Eq,
+                FilterOperator::Neq,
+                FilterOperator::Gt,
+                FilterOperator::Gte,
+                FilterOperator::Lt,
+                FilterOperator::Lte,
+                FilterOperator::Like,
+                FilterOperator::ILike,
+                FilterOperator::NotLike,
+                FilterOperator::NotILike,
+                FilterOperator::In,
+                FilterOperator::NotIn,
+                FilterOperator::Any,
+                FilterOperator::NotAny,
+                FilterOperator::IsNull,
+                FilterOperator::IsNotNull,
+                FilterOperator::Between,
+                FilterOperator::NotBetween,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_query_operators() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text")]
+                #[db(query_ops(eq, eq))]
+                name: String,
+            }
+        "#,
+        );
+
+        assert!(message.contains("duplicate query operator"), "{message}");
+    }
+
+    #[test]
+    fn rejects_empty_query_ops() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text")]
+                #[db(query_ops())]
+                name: String,
+            }
+        "#,
+        );
+
+        assert!(message.contains("expected nested attribute"), "{message}");
+    }
+
+    #[test]
+    fn rejects_unknown_query_operator() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text")]
+                #[db(query_ops(eq, approximately))]
+                name: String,
+            }
+        "#,
+        );
+
+        assert!(message.contains("unknown query operator"), "{message}");
     }
 
     #[test]

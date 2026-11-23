@@ -19,7 +19,10 @@ mod derive_patch;
 /// Accepted on the struct: `#[db(table = "...")]`.
 /// Accepted on a field: `#[db(pgtype = "...")]`, `#[db(pgdefault = "...")]`,
 /// `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
-/// `#[db(updated_at)]`.
+/// `#[db(updated_at)]`, and `#[db(query_ops(eq, neq, ...))]`.
+///
+/// `query_ops` records which comparisons a column supports in
+/// `ColumnMeta::query_ops`; it is metadata, not query code.
 ///
 /// `table`, `primary_key` and one `pgtype` per field are required; a table
 /// without a version or audit column omits those role annotations. `pgtype`
@@ -81,12 +84,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let nullable = column.nullable;
             let pg_type = &column.pg_type;
             let pg_default = optional(column.pg_default.as_deref());
+            let query_ops: Vec<Expr> = column
+                .query_ops
+                .iter()
+                .map(|filter| {
+                    let variant = syn::Ident::new(filter.variant(), proc_macro2::Span::call_site());
+                    syn::parse_quote!(::dbkit::FilterOperator::#variant)
+                })
+                .collect();
             syn::parse_quote!(
                 ::dbkit::ColumnMeta {
                     name: #name,
                     nullable: #nullable,
                     pg_type: #pg_type,
                     pg_default: #pg_default,
+                    query_ops: &[#(#query_ops),*],
                 }
             )
         })

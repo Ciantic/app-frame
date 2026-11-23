@@ -3,9 +3,9 @@
 Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
 They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, which ones are audit
-columns, and which columns the database fills in from a default. Every field
-carries a `pgtype`, and a primary key is required; the other annotations are
-opt-in.
+columns, which columns the database fills in from a default, and which
+comparisons each column may be queried with. Every field carries a `pgtype`,
+and a primary key is required; the other annotations are opt-in.
 
 The derive validates the annotations and generates `impl dbkit::Model`, which
 carries them as the `Model::META` const at runtime. `#[derive(DbPatch)]` reads
@@ -32,6 +32,7 @@ pub struct Email {
     pub to: String,
 
     #[db(pgtype = "text")]
+    #[db(query_ops(eq, neq, like, ilike, in))]
     pub subject: String,
 
     #[db(pgtype = "text")]
@@ -67,6 +68,8 @@ generated patch would expose; role-annotated fields never are.
 - `#[db(pgdefault = "...")]` on a field, at most once.
 - `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
   `#[db(updated_at)]` on a field.
+- `#[db(query_ops(...))]` on a field, at most once; the parentheses hold a
+  comma-separated operator list.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
   collected across all of them.
 - All attributes in the accepted vocabulary are listed here. Anything else is a
@@ -80,8 +83,9 @@ The derive accepts a role, `pgtype` and `pgdefault` in one attribute, e.g.
 not use that form:
 
 - One annotation per line, each in its own `#[db(...)]` attribute.
-- Role first, then `pgtype`, then `pgdefault`: `#[db(primary_key)]` above
-  `#[db(pgtype = "uuid")]` above `#[db(pgdefault = "uuidv7()")]`.
+- Role first, then `pgtype`, then `pgdefault`, then `query_ops`:
+  `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
+  `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, in))]`.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
 - A blank line separates fields, so the annotation block reads as one unit per
   column.
@@ -143,6 +147,30 @@ Records the column default, written the way it is written in `schema.sql`.
   database cannot parse fails the test.
 - A defaulted column is still a plain field on the row type: reads always see
   the value the database stored.
+
+## `query_ops`
+
+Declares which comparisons a column may be queried with.
+
+- Legal on: a field, optional and at most once.
+- Value: one or more operators inside parentheses, comma-separated:
+  `#[db(query_ops(eq, neq, like, in))]`. A bare `#[db(eq)]` is not accepted,
+  and an empty `query_ops()` is an error.
+- Operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `not_like`,
+  `not_ilike`, `in`, `not_in`, `any`, `not_any`, `is_null`, `is_not_null`,
+  `between`, `not_between`. They map one-to-one onto
+  `dbkit::FilterOperator`.
+- Order is preserved and duplicates are an error.
+- Metadata only: the derive records the operators in
+  `ColumnMeta::query_ops` and nothing else. No SQL is generated, no operator is
+  validated against the column type, and the annotation does not change how a
+  row is read or written. A query layer is expected to look the list up to
+  reject an operator a column does not support.
+- Columns without the annotation get an empty list, meaning "not queryable"
+  rather than "every operator allowed".
+- Nothing stops `is_null` on a non-nullable column or `like` on a `uuid`; those
+  are semantic mistakes a future query layer would have to reject, not the
+  derive.
 
 ## `primary_key`
 
@@ -218,8 +246,11 @@ Every rule below produces a compile error.
   PostgreSQL.
 - `pgdefault` must be a non-empty string literal and appear at most once per
   field. It is not validated at compile time either.
+- `query_ops` appears at most once per field, holds at least one operator, and
+  every operator must be in the accepted list; repeating an operator is an
+  error.
 - The struct-level attribute accepts only `table`; the field-level attribute
-  accepts only `pgtype`, `pgdefault` and the four roles.
+  accepts only `pgtype`, `pgdefault`, `query_ops` and the four roles.
 
 ## How field types are matched
 
@@ -260,6 +291,8 @@ For reference when reading a compile failure:
   other role)
 - `` `#[db(version)]` field must be `i64` ``
 - `` `#[db(created_at)]` field must be a `DateTime` ``
+- ``unknown query operator; expected `eq`, `neq`, ...``
+- ``duplicate query operator``
 
 All problems found in one struct are reported together, so a single compile
 fixes the whole annotation block.
@@ -273,9 +306,11 @@ type `dbkit::TableMeta`:
 - `primary_key`, `version`, `created_at`, `updated_at` — the annotated field
   names, or `None` for absent optional roles.
 - `columns` — every field in declaration order as
-  `ColumnMeta { name, nullable, pg_type, pg_default }`, where `nullable` is
-  true exactly when the field type is `Option<_>`, `pg_type` is the `pgtype`
-  annotation and `pg_default` is the `pgdefault` annotation or `None`.
+  `ColumnMeta { name, nullable, pg_type, pg_default, query_ops }`, where
+  `nullable` is true exactly when the field type is `Option<_>`, `pg_type` is
+  the `pgtype` annotation, `pg_default` is the `pgdefault` annotation or
+  `None`, and `query_ops` is the `query_ops` list in declaration order or an
+  empty slice.
 
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
@@ -409,3 +444,5 @@ These are deliberately out of scope until a model needs them:
   them.
 - Column names that differ from field names.
 - Non-`i64` version types.
+- Building SQL from `query_ops`: the annotation only records which operators a
+  column accepts.
