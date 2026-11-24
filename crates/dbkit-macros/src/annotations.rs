@@ -34,8 +34,12 @@ pub enum FilterOperator {
     NotILike,
     In,
     NotIn,
-    Any,
-    NotAny,
+    Contains,
+    NotContains,
+    Overlaps,
+    NotOverlaps,
+    ContainsAll,
+    NotContainsAll,
     IsNull,
     IsNotNull,
     Between,
@@ -58,8 +62,12 @@ impl FilterOperator {
             FilterOperator::NotILike => "NotILike",
             FilterOperator::In => "In",
             FilterOperator::NotIn => "NotIn",
-            FilterOperator::Any => "Any",
-            FilterOperator::NotAny => "NotAny",
+            FilterOperator::Contains => "Contains",
+            FilterOperator::NotContains => "NotContains",
+            FilterOperator::Overlaps => "Overlaps",
+            FilterOperator::NotOverlaps => "NotOverlaps",
+            FilterOperator::ContainsAll => "ContainsAll",
+            FilterOperator::NotContainsAll => "NotContainsAll",
             FilterOperator::IsNull => "IsNull",
             FilterOperator::IsNotNull => "IsNotNull",
             FilterOperator::Between => "Between",
@@ -156,8 +164,12 @@ const FILTER_OPERATORS: &[(&str, FilterOperator)] = &[
     ("not_ilike", FilterOperator::NotILike),
     ("in", FilterOperator::In),
     ("not_in", FilterOperator::NotIn),
-    ("any", FilterOperator::Any),
-    ("not_any", FilterOperator::NotAny),
+    ("contains", FilterOperator::Contains),
+    ("not_contains", FilterOperator::NotContains),
+    ("overlaps", FilterOperator::Overlaps),
+    ("not_overlaps", FilterOperator::NotOverlaps),
+    ("contains_all", FilterOperator::ContainsAll),
+    ("not_contains_all", FilterOperator::NotContainsAll),
     ("is_null", FilterOperator::IsNull),
     ("is_not_null", FilterOperator::IsNotNull),
     ("between", FilterOperator::Between),
@@ -495,8 +507,9 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                         return Err(operator.error(
                             "unknown query operator; expected `eq`, `neq`, `gt`, `gte`, `lt`, \
                              `lte`, `like`, `ilike`, `not_like`, `not_ilike`, `in`, `not_in`, \
-                             `any`, `not_any`, `is_null`, `is_not_null`, `between` or \
-                             `not_between`",
+                             `contains`, `not_contains`, `overlaps`, `not_overlaps`, \
+                             `contains_all`, `not_contains_all`, `is_null`, `is_not_null`, \
+                             `between` or `not_between`",
                         ));
                     };
 
@@ -865,7 +878,8 @@ mod tests {
                 #[db(pgtype = "text")]
                 #[db(query_ops(
                     eq, neq, gt, gte, lt, lte, like, ilike, not_like, not_ilike, in, not_in,
-                    any, not_any, is_null, is_not_null, between, not_between
+                    contains, not_contains, overlaps, not_overlaps, contains_all,
+                    not_contains_all, is_null, is_not_null, between, not_between
                 ))]
                 name: String,
             }
@@ -888,8 +902,12 @@ mod tests {
                 FilterOperator::NotILike,
                 FilterOperator::In,
                 FilterOperator::NotIn,
-                FilterOperator::Any,
-                FilterOperator::NotAny,
+                FilterOperator::Contains,
+                FilterOperator::NotContains,
+                FilterOperator::Overlaps,
+                FilterOperator::NotOverlaps,
+                FilterOperator::ContainsAll,
+                FilterOperator::NotContainsAll,
                 FilterOperator::IsNull,
                 FilterOperator::IsNotNull,
                 FilterOperator::Between,

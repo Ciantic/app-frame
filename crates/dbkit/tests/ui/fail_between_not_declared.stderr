@@ -1,0 +1,28 @@
+error[E0599]: the method `between` exists for struct `ColumnRef<OrderTotalTag, OrderColumn, i64>`, but its trait bounds were not satisfied
+ --> tests/ui/fail_between_not_declared.rs:9:45
+  |
+9 |     let _ = Order::query().filters([c.total.between(1, 2)]);
+  |                                             ^^^^^^^ method cannot be called on `ColumnRef<OrderTotalTag, OrderColumn, i64>` due to unsatisfied trait bounds
+  |
+ ::: tests/ui/support.rs
+  |
+  | #[derive(DbModel)]
+  |          ------- doesn't satisfy `OrderTotalTag: HasBetween<OrderColumn>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `OrderTotalTag: HasBetween<OrderColumn>`
+note: the trait `HasBetween` must be implemented
+ --> src/query/capability.rs
+  |
+  |               pub trait $name<C: Column> {}
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  | / capability! {
+  | |     HasEq => "eq",
+  | |     HasNeq => "neq",
+  | |     HasGt => "gt",
+... |
+  | |     HasNotBetween => "not_between",
+  | | }
+  | |_- in this macro invocation
+  = note: this error originates in the macro `capability` (in Nightly builds, run with -Z macro-backtrace for more info)

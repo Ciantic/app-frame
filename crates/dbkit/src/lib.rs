@@ -8,11 +8,14 @@
 //! a value type, so a model field of that type needs no `pgtype` of its own.
 //! [`Column`] and [`Columns`] name the selectable columns of a model;
 //! `#[derive(DbModel)]` generates the enum and [`ErasedColumn`] is the erased
-//! view a [`TableMeta`] holds.
+//! view a [`TableMeta`] holds. [`Query`] is the filter of one table, built from
+//! the typed [`ColumnRef`] handles or parsed from JSON, and
+//! [`Query::build`] renders it to the statement `sqlx` executes.
 
 mod columns;
 mod model;
 mod patch;
+pub mod query;
 pub mod schema;
 
 pub use columns::Column;
@@ -20,6 +23,7 @@ pub use columns::Columns;
 pub use dbkit_macros::DbModel;
 pub use dbkit_macros::DbPatch;
 pub use dbkit_macros::DbType;
+pub use dbkit_macros::DbValue;
 pub use model::DbType;
 pub use model::ErasedColumn;
 pub use model::FilterOperator;
@@ -28,3 +32,13 @@ pub use model::Model;
 pub use model::TableFragment;
 pub use model::TableMeta;
 pub use patch::Patch;
+pub use query::Bind;
+pub use query::Built;
+pub use query::ColumnRef;
+pub use query::Combinator;
+pub use query::Filter;
+pub use query::Group;
+pub use query::Leaf;
+pub use query::Operand;
+pub use query::Query;
+pub use query::capability::*;

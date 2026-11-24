@@ -47,6 +47,8 @@ pub(crate) fn expand(
     let mut operators = Vec::new();
     let mut literals = Vec::new();
     let mut flattened = Vec::new();
+    let mut tags = Vec::new();
+    let mut handles = Vec::new();
 
     for column in &annotations.columns {
         match column {
@@ -61,6 +63,7 @@ pub(crate) fn expand(
                 let variant = variant(field);
                 let literal = column_name(field);
                 let ty = annotations::underlying(ty);
+                let declared = query_ops;
                 let pg_type = match pg_type {
                     annotations::PgType::Declared(pg_type) => quote!(#pg_type),
                     annotations::PgType::Inherited => quote!(<#ty as ::dbkit::DbType>::PG_TYPE),
@@ -83,6 +86,27 @@ pub(crate) fn expand(
                     })
                     .collect();
 
+                let tag = tag(name, &variant);
+                let capabilities: Vec<Ident> = declared
+                    .iter()
+                    .filter_map(|operator| capability(*operator))
+                    .map(|capability| Ident::new(capability, proc_macro2::Span::call_site()))
+                    .collect();
+
+                // A tag is generic over the column enum, because a fragment's
+                // column is spliced into whichever parent flattened it.
+                tags.push(quote! {
+                    #[doc(hidden)]
+                    #visibility struct #tag;
+
+                    #(impl<C: ::dbkit::Column> ::dbkit::#capabilities<C> for #tag {})*
+                });
+                handles.push((
+                    field.clone(),
+                    quote!(::dbkit::ColumnRef<#tag, C, #ty>),
+                    quote!(::dbkit::ColumnRef::new(map(#columns::#variant))),
+                ));
+
                 variants.push(quote!(#variant));
                 names.push(quote!(Self::#variant => #literal));
                 literals.push(quote!(#literal => ::core::option::Option::Some(Self::#variant)));
@@ -93,7 +117,14 @@ pub(crate) fn expand(
             }
             Column::Flattened { name: field, ty } => {
                 let variant = variant(field);
+                let handle = handle_type(ty);
                 let ty = column_type(ty);
+
+                handles.push((
+                    field.clone(),
+                    quote!(#handle<C>),
+                    quote!(<#handle<D>>::map(|column| map(#columns::#variant(column)))),
+                ));
 
                 variants.push(quote!(#variant(#ty)));
                 names.push(quote!(Self::#variant(inner) => ::dbkit::Column::name(inner)));
@@ -131,7 +162,46 @@ pub(crate) fn expand(
     let nullable_doc = "Whether the column is nullable.";
     let ops_doc = "The comparisons the column may be queried with, in declaration order.";
 
+    let handles_type = format_ident!("{name}Columns");
+    let handle_doc =
+        format!("The typed handles of [`{name}`], one per column, for building a `Query`.");
+    let map_doc = "The same handles, with every column replaced by `map(column)`; a model that \
+                   flattens this one splices its own column enum in.";
+    let handle_fields: Vec<&Ident> = handles.iter().map(|(field, _, _)| field).collect();
+    let handle_types: Vec<&TokenStream> = handles.iter().map(|(_, ty, _)| ty).collect();
+    let handle_inits: Vec<&TokenStream> = handles.iter().map(|(_, _, init)| init).collect();
+
     Ok(quote! {
+        #(#tags)*
+
+        #[doc = #handle_doc]
+        #visibility struct #handles_type<C: ::dbkit::Column = #columns> {
+            #(pub #handle_fields: #handle_types),*
+        }
+
+        impl<C: ::dbkit::Column> #handles_type<C> {
+            #[doc = #map_doc]
+            pub fn map<D: ::dbkit::Column>(
+                map: impl ::core::ops::Fn(#columns) -> D,
+            ) -> #handles_type<D> {
+                #handles_type::<D> {
+                    #(#handle_fields: #handle_inits),*
+                }
+            }
+        }
+
+        impl #name {
+            #[doc = #handle_doc]
+            pub fn columns() -> #handles_type<#columns> {
+                <#handles_type<#columns>>::map(|column| column)
+            }
+
+            #[doc = "A query of this table, with no filters."]
+            pub const fn query() -> ::dbkit::Query<#columns> {
+                ::dbkit::Query::new()
+            }
+        }
+
         #[doc = #doc]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #visibility enum #columns {
@@ -327,6 +397,48 @@ fn all_function(columns: &Ident, annotations: &[Column]) -> TokenStream {
     }
 }
 
+/// The handle struct of a flattened field's type: the type with `Columns`
+/// appended to its last path segment, so `size: Size` becomes `SizeColumns`.
+fn handle_type(ty: &syn::Type) -> syn::Type {
+    rename(ty, "Columns")
+}
+
+/// The zero-sized tag type of one column, unique per model, so
+/// `Order` and `status` name `OrderStatusTag`.
+fn tag(model: &Ident, variant: &Ident) -> Ident {
+    format_ident!("{model}{variant}Tag")
+}
+
+/// The capability trait an operator's handle method is gated on, or `None`
+/// when the operator takes no value and so needs no declaration.
+fn capability(operator: annotations::FilterOperator) -> Option<&'static str> {
+    use annotations::FilterOperator::*;
+
+    Some(match operator {
+        Eq => "HasEq",
+        Neq => "HasNeq",
+        Gt => "HasGt",
+        Gte => "HasGte",
+        Lt => "HasLt",
+        Lte => "HasLte",
+        Like => "HasLike",
+        ILike => "HasILike",
+        NotLike => "HasNotLike",
+        NotILike => "HasNotILike",
+        In => "HasIn",
+        NotIn => "HasNotIn",
+        Contains => "HasContains",
+        NotContains => "HasNotContains",
+        Overlaps => "HasOverlaps",
+        NotOverlaps => "HasNotOverlaps",
+        ContainsAll => "HasContainsAll",
+        NotContainsAll => "HasNotContainsAll",
+        IsNull | IsNotNull => return None,
+        Between => "HasBetween",
+        NotBetween => "HasNotBetween",
+    })
+}
+
 /// The column enum of a flattened field's type: the type with `Column`
 /// appended to its last path segment, so `size: Size` becomes `SizeColumn`.
 fn column_type(ty: &syn::Type) -> syn::Type {
@@ -334,9 +446,18 @@ fn column_type(ty: &syn::Type) -> syn::Type {
         return ty.clone();
     };
 
+    rename(&syn::Type::Path(path.clone()), "Column")
+}
+
+/// The type with `suffix` appended to its last path segment, when it is a path.
+fn rename(ty: &syn::Type, suffix: &str) -> syn::Type {
+    let syn::Type::Path(path) = ty else {
+        return ty.clone();
+    };
+
     let mut path = path.clone();
     if let Some(segment) = path.path.segments.last_mut() {
-        segment.ident = format_ident!("{}Column", segment.ident);
+        segment.ident = format_ident!("{}{}", segment.ident, suffix);
     }
 
     syn::Type::Path(path)

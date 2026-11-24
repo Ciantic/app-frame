@@ -2,7 +2,12 @@
 
 A `WHERE` clause as data: a query type tailored to one table, built from typed
 Rust values or parsed from succinct JSON, that renders to the `(sql, params)`
-pair `sqlx` executes. Nothing in this document is implemented yet.
+pair `sqlx` executes.
+
+The code lives in `crates/dbkit/src/query/`, and `#[derive(DbModel)]` generates
+the per-model parts: `<Model>Column`, the column tags, the capability impls,
+`<Model>Columns` and `<Model>::columns()`/`query()`. See
+[Where the code lives](#where-the-code-lives).
 
 ## Goal
 
@@ -68,7 +73,7 @@ assert_eq!(
 );
 ```
 
-`values` is `Vec<Box<dyn Bind>>`, so a readable assertion goes through
+`values` is `Vec<Arc<dyn Bind>>`, so a readable assertion goes through
 `values_json()`; a type-exact one uses `Bind::eq_dyn`, which is what the
 snapshot tests do (`100i64` does not equal `100i32`).
 
@@ -780,7 +785,7 @@ type-level record of nullability to reject it.
 ### Value model
 
 Rust-side values are typed; JSON-side values are not. Both end up as one boxed
-trait object, `Box<dyn Bind>`, and the tree holds that, never
+trait object behind an `Arc`, and the tree holds that, never
 `serde_json::Value`:
 
 ```rust
@@ -847,31 +852,61 @@ where
   `LIMIT` and `OFFSET` anyway.
 
 JSON has no types, so the deserializer is the one place that names concrete
-types. It dispatches on `Column::pg_type()` and boxes the result:
+types. It cannot ask sqlx for one — `Type` describes a type but cannot build a
+value from JSON — so there is one list, and sqlx decides which name denotes
+which entry:
 
 ```rust
-fn from_json(pg_type: &str, value: &serde_json::Value)
-    -> Result<Box<dyn Bind>, Error>
-{
-    let text = || value.as_str().ok_or(Error::WrongShape);
+macro_rules! bindable {
+    ($($shape:ident => $ty:ty),* $(,)?) => {
+        $(
+            if <$ty as Type<Postgres>>::compatible(&PgTypeInfo::with_name(base)) {
+                /* check the JSON shape, then serde_json::from_value */
+            }
+        )*
+    };
+}
 
-    match pg_type {
-        "uuid" => Ok(Box::new(text()?.parse::<Uuid>()?)),
-        "int8" => Ok(Box::new(value.as_i64().ok_or(Error::WrongShape)?)),
-        "bool" => Ok(Box::new(value.as_bool().ok_or(Error::WrongShape)?)),
-        "text" | "varchar(n)" => Ok(Box::new(text()?.to_owned())),
-        "timestamptz" => Ok(Box::new(text()?.parse::<DateTime<Utc>>()?)),
-        "text[]" => Ok(Box::new(parse_array::<String>(value)?)),
-        other => Err(Error::UnsupportedType {
-            pg_type: other.to_owned(),
-            ..
-        }),
-    }
+bindable! {
+    Bool => bool,
+    Number => i16,
+    Number => i32,
+    Number => i64,
+    Number => f32,
+    Number => f64,
+    Text => String,
+    Text => Uuid,
+    Text => NaiveDate,
+    Text => DateTime<Utc>,
+    Any => Value,
 }
 ```
 
-Verified: the table parses `uuid`, `int8`, `text`, `bool`, `text[]` and
-`timestamptz`, and a JSON-built `100i64` compares equal to a Rust-built
+- `Type::compatible` is what decides the name, so `dbkit` keeps no alias table:
+  `String` accepts `text`, `varchar`, `varchar(n)`, `bpchar`, `name` and
+  `citext`, because sqlx says so, and `i64` accepts only `int8`. Adding a type
+  is one line, and the accepted spellings follow the database.
+- The value is parsed by serde, so there is no per-type parsing either: a
+  `uuid` column takes a string, a `timestamptz` an RFC 3339 string, an `int8` a
+  whole number, and a `jsonb` column any JSON at all.
+- An array column resolves its *element* type through the same list and boxes a
+  `Vec` of it, because `Type::compatible` panics on an array name it cannot
+  resolve against a live connection.
+- The `Shape` in each entry is the JSON shape the type reads, and it exists only
+  for the error message: a `{"id": 42}` on a `uuid` column reports
+  "column `id` is uuid, the value is a number" rather than serde's internal
+  wording. A value with the right shape that does not parse, such as a malformed
+  uuid, keeps serde's own reason.
+- A type sqlx accepts but the list does not cover, `numeric` for instance,
+  reports `UnsupportedType` naming the column and its type rather than guessing.
+
+The list is reached only by the JSON face. A Rust-built filter names its type
+through the handle, so `c.total.eq(500)` never consults it, and a value that is
+a newtype stays a newtype.
+
+Verified: the list parses `uuid`, `int8`, `text`, `varchar(20)`, `bool`,
+`text[]`, `date`, `timestamptz` and `jsonb`, `numeric(10,2)` reports
+`UnsupportedType`, and a JSON-built `100i64` compares equal to a Rust-built
 `Box::new(100i64)` through `eq_dyn`.
 
 ### Why a trait object, not an enum
@@ -898,8 +933,13 @@ the closest possible reuse. Checked against 0.9.1:
   builder: the value list is built once per request and inspected only in
   tests.
 - **`Encode::produces()`** would let one Rust type declare a different SQL type
-  per value, but `PgTypeInfo` has no public constructor from a runtime type
-  name, so it cannot be used to reinterpret a `String` as `numeric`.
+  per value, but a `PgTypeInfo` built from a name is compared through
+  `Type::compatible`, which decides plain equality for scalars and panics for
+  an array name, so it cannot be used to reinterpret a `String` as `numeric`.
+- **`Type` cannot construct a value.** That is the one thing the trait object
+  buys that the trait does not: `Bind` is boxed from a concrete `T`, so
+  something has to name `T` for a JSON value. The list in the previous section
+  is that naming, and it is the only place a concrete type is chosen.
 
 ### Newtypes
 
@@ -1014,11 +1054,16 @@ operator:
 ```rust
 pub struct OrderStatusTag;
 
-impl dbkit::HasEq<OrderColumn> for OrderStatusTag {}
-impl dbkit::HasIn<OrderColumn> for OrderStatusTag {}
-impl dbkit::HasIlike<OrderColumn> for OrderStatusTag {}
+impl<C: dbkit::Column> dbkit::HasEq<C> for OrderStatusTag {}
+impl<C: dbkit::Column> dbkit::HasIn<C> for OrderStatusTag {}
+impl<C: dbkit::Column> dbkit::HasILike<C> for OrderStatusTag {}
 // status declares #[db(query_ops(eq, in, ilike))], so no HasBetween, no others
 ```
+
+The capability is generic over the column enum because a fragment's columns
+have no enum of their own until a parent splices them in: `Size::width` is a
+`SizeColumn` in a fragment and a `FrameColumn` in a frame, and the same tag
+serves both.
 
 The tag types are emitted next to the column enum, empty, and never
 constructed; they exist to be a distinct type per column. They must be public
@@ -1054,6 +1099,9 @@ their call sites, and each undeclared one fails as shown.
 
 - `impl Into<T>` is what keeps the call sites short: `c.status.eq("open")`
   works although the field is `String`.
+- The handle deliberately has no `PartialEq`: its `eq` would resolve when a
+  column's `eq` is not declared, and the mistake would surface as a type
+  mismatch instead of "no such method".
 - Two independent gates: the capability (`HasLike`) says the column declared
   the operator, and the value bound (`String`, `T: PartialOrd`) says the type
   supports it. Either one missing is a compile error, and the message names
@@ -1078,7 +1126,8 @@ The methods and the JSON suffixes are the same vocabulary, one entry per
 - `like`, `ilike`, `not_like`, `not_ilike` — `ColumnRef<Tag, C, String>`
   only.
 - `in_`, `not_in` — list operators; `in_` is spelled with a trailing underscore
-  because `in` is a keyword. The JSON suffix is `in`, without it.
+  because `in` is a keyword. The JSON suffix is `in`, without it. The list is
+  bound as one array parameter, so `Vec<T>` must be a `Bind` value too.
 - `between`, `not_between` — two values.
 - `contains`, `not_contains` — `Vec<T>` columns, one element.
 - `overlaps`, `not_overlaps` — `Vec<T>` columns, a list to share at least one
@@ -1093,16 +1142,16 @@ The methods and the JSON suffixes are the same vocabulary, one entry per
 struct and one accessor per column:
 
 ```rust
-pub struct OrderColumns {
-    pub status: ColumnRef<OrderStatusTag, OrderColumn, String>,
-    pub total: ColumnRef<OrderTotalTag, OrderColumn, i64>,
-    pub vip: ColumnRef<OrderVipTag, OrderColumn, bool>,
-    pub tags: ColumnRef<OrderTagsTag, OrderColumn, Vec<String>>,
-    pub deleted_at: ColumnRef<OrderDeletedAtTag, OrderColumn, DateTime<Utc>>,
+pub struct OrderColumns<C: Column = OrderColumn> {
+    pub status: ColumnRef<OrderStatusTag, C, String>,
+    pub total: ColumnRef<OrderTotalTag, C, i64>,
+    pub vip: ColumnRef<OrderVipTag, C, bool>,
+    pub tags: ColumnRef<OrderTagsTag, C, Vec<String>>,
+    pub deleted_at: ColumnRef<OrderDeletedAtTag, C, DateTime<Utc>>,
 }
 
 impl Order {
-    pub const fn columns() -> OrderColumns { /* one ColumnRef per column */ }
+    pub fn columns() -> OrderColumns { /* one ColumnRef per column */ }
     pub const fn query() -> Query<OrderColumn> { Query::new() }
 }
 ```
@@ -1114,11 +1163,17 @@ field types.
 - `T` is the field's Rust type with `Option<…>` stripped: nullability is
   expressed by `is_null`, not by `Option`, matching how patches treat nullable
   columns.
-- A `#[db(flatten)]` field contributes a nested handle struct, so
-  `c.size.width` works and the value type still comes from the fragment's field.
-- The handles are `Copy` and hold no data beyond the column tag, one byte
-  each; `columns()` is a `const fn`, so `const C: OrderColumns =
-  Order::columns();` works as well as a local binding.
+- The handle struct is generic over the column enum, with the model's own as the
+  default, and `columns()` is `const` again for a model whose columns are all
+  its own. The parameter is what a `#[db(flatten)]` field needs: the parent
+  builds `FrameColumns::<FrameColumn>` from `SizeColumns::<SizeColumn>` through
+  `FrameColumns::map`, which re-wraps each handle so a filter's `column` is a
+  `FrameColumn` and `build()` can name the table.
+- A `#[db(flatten)]` field therefore contributes a nested handle struct, so
+  `c.size.width` works, the value type comes from the fragment's field, and the
+  capability still comes from the fragment's `query_ops`.
+- The handles are `Copy` and hold no data beyond the column enum, one byte
+  each.
 
 ### Request tree
 
@@ -1145,11 +1200,13 @@ pub struct Leaf<C: Column> {
 }
 
 pub enum Operand {
-    /// A single value; also what `between` uses twice.
-    One(Box<dyn Bind>),
-    /// The list of `in` and `not_in`.
-    Many(Vec<Box<dyn Bind>>),
-    /// No value, for `is_null` and `is_not_null`.
+    /// A single value.
+    One(Arc<dyn Bind>),
+    /// Two values, for `between`.
+    Two(Arc<dyn Bind>, Arc<dyn Bind>),
+    /// One array value bound as one parameter, with its element count.
+    List { values: Arc<dyn Bind>, len: usize },
+    /// No value, for `is_null`, `is_not_null` and `neq` with `null`.
     None,
 }
 
@@ -1166,9 +1223,11 @@ pub enum Combinator {
 }
 ```
 
-`Operand` keeps arity in the type: a leaf either binds one value, a list, or
+`Operand` keeps arity in the type: a leaf binds one value, two, a list, or
 nothing. The renderer still validates that the operator's arity matches the
 operand, which catches a hand-built tree and the JSON path in one place.
+`Arc` rather than `Box` because a clone of the tree is a clone of the payload
+before `build()` borrows it.
 
 `Filter` carries four constructors: `leaf`, `group`, `and(children)` and
 `or(children)`. The last two are sugar for `group(Combinator::And | Or,
@@ -1229,7 +1288,7 @@ JSON has no types, so the deserializer picks a concrete Rust type from
 - An array type (`text[]`) boxes a `Vec` of the element type.
 - Anything else is `Error::UnsupportedType`, naming the column and its type.
 
-Both faces then hold the same `Box<dyn Bind>`. The Rust face never consults
+Both faces then hold the same boxed value. The Rust face never consults
 this table: the type system already guaranteed the field type, and `Bind`
 delegates to sqlx's `Type` and `Encode`. A binding mismatch is therefore not
 expressible: a newtype's `sqlx::Type` is derived `transparent`, so the value and
@@ -1343,7 +1402,7 @@ pub struct Built {
     /// `sqlx::postgres::PgArguments`, built ahead of the query.
     pub arguments: PgArguments,
     /// The bound values in placeholder order; equals the documented `-- params`.
-    pub values: Vec<Box<dyn Bind>>,
+    pub values: Vec<Arc<dyn Bind>>,
 }
 
 impl Built {
@@ -1437,11 +1496,14 @@ impl<C: Column> Query<C> {
     pub fn build(&self) -> Result<Built, Error>;
 }
 
+// `Children<C>` is `impl IntoIterator<Item = Filter<C>>`, named once so the
+// signatures stay readable.
 impl<C: Column> Filter<C> {
     pub fn leaf(column: C, operator: FilterOperator, operand: Operand) -> Self;
-    pub fn group(combinator: Combinator, filters: Vec<Filter<C>>) -> Self;
-    pub fn and(filters: Vec<Filter<C>>) -> Self;
-    pub fn or(filters: Vec<Filter<C>>) -> Self;
+    pub fn group(combinator: Combinator, filters: Children<C>) -> Self;
+    pub fn and(filters: Children<C>) -> Self;
+    pub fn or(filters: Children<C>) -> Self;
+    pub fn normalize(self) -> Self;
 }
 
 impl<C: Column> Serialize for Query<C> { /* flat form */ }
@@ -1476,146 +1538,104 @@ sparse; that constraint from the `Columns` work is unchanged.
 
 ## Where the code lives
 
-- `crates/dbkit-macros/src/derive_columns.rs` — extend with the handle struct,
-  the per-column tag types, one capability impl per declared `query_ops` entry,
-  `columns()` and `query()`.
-- `crates/dbkit-macros/src/derive_value.rs` — `#[derive(DbValue)]`, which now
-  only emits `From<&T> for T` when `Clone` is among the derives; it also
-  rejects a struct that is not a one-field tuple.
-- `crates/dbkit/src/query/mod.rs` — `Query<C>`, `filters`, `normalize`, `Built`,
-  limits, `build`.
-- `crates/dbkit/src/query/value.rs` — the `Bind` trait and its blanket impl, and
-  the pg_type-driven `from_json` that boxes concrete values.
+- `crates/dbkit/src/query/mod.rs` — `Query<C>`, `filters`, `normalize`,
+  `build`, the caps, and the `Error` enum.
 - `crates/dbkit/src/query/filter.rs` — `Filter`, `Leaf`, `Group`, `Operand`,
-  `Combinator`, `ColumnRef` and its operator impls.
+  `Combinator`, `ColumnRef` and its per-operator impl blocks.
 - `crates/dbkit/src/query/capability.rs` — one `Has<Operator><C>` trait per
-  `FilterOperator` variant.
-- `crates/dbkit/src/query/serde.rs` — the flat map deserializer and the flat
-  serializer.
-- `crates/dbkit/src/query/render.rs` — operator-to-SQL table, quoting,
-  parenthesization, `push_bind` over `&dyn Bind`.
-- `crates/dbkit/src/model.rs` — `FilterOperator` gains
-  `#[serde(rename_all = "snake_case")]`, and its `Any`/`NotAny` variants are
-  renamed to `Contains`/`NotContains`, with `Overlaps`/`NotOverlaps` and
-  `ContainsAll`/`NotContainsAll` added. Nothing declares `query_ops` yet, so the
-  rename needs no model change.
-- `crates/dbkit-macros/src/annotations.rs` — the operator-name table gains the
-  three new names beside the renamed ones.
-- `crates/dbkit/tests/query.rs`, `query_live.rs` — as below.
-- `docs/dbkit-annotations.md` — replace the "Building SQL from `query_ops` is
-  not supported" note with a pointer to this document.
+  `FilterOperator` variant that takes a value, declared by one `macro_rules!`
+  so the list stays in step with the enum.
+- `crates/dbkit/src/query/value.rs` — the `Bind` trait and its blanket impl, and
+  the single list that turns a JSON value into a boxed concrete type.
+- `crates/dbkit/src/query/render.rs` — the operator-to-SQL table, quoting,
+  parenthesization, `Build`'s placeholders over `&dyn Bind`.
+- `crates/dbkit/src/query/serde.rs` — the flat serializer and the flat
+  deserializer, and `Query::parse`.
+- `crates/dbkit/src/model.rs` — `FilterOperator` with its names and hand-written
+  serde, so the annotation name, the JSON suffix and the method name agree.
+- `crates/dbkit-macros/src/derive_columns.rs` — the tag types, one capability
+  impl per `query_ops` entry, the handle struct, `columns()` and `query()`.
+- `crates/dbkit-macros/src/derive_value.rs` — `#[derive(DbValue)]`.
+- `crates/dbkit-macros/src/annotations.rs` — the operator-name table the
+  annotation is parsed with.
+- `crates/dbkit/tests/query.rs`, `compile.rs` with `ui/`, and `query_live.rs` —
+  as below.
 
 ## Tests
 
-Without a database:
+`crates/dbkit/tests/query.rs`, no database:
 
-- The Rust-built query and the JSON payload render the identical `sql` and
-  `values`, and the payload is what `serde_json::to_string(&query)` produces.
-- `c.total.eq("500")` fails to compile: one `trybuild` case per mistaken type,
-  including `like` on `i64` and `gt` on a type without `PartialOrd`.
-- An operator a column does not declare fails to compile: `trybuild` cases for
-  `c.total.like(..)` (no `HasLike`), `c.status.between(..)` (no `HasBetween`)
-  and `c.tags.eq(..)` (no `HasEq` on an array column), each asserting `E0599`.
-- The same operator on a column that does declare it compiles, so the capability
-  impls are proven to be emitted rather than merely absent everywhere.
-- A key with no suffix is `eq`; `"vip": true` and `"vip__eq": true` are equal.
-- `{"deleted_at": null}` and `{"deleted_at__neq": null}` render `IS NULL` and
-  `IS NOT NULL`.
-- Reserved keys: `{"or": [...]}` nests, a column named `or` shadows the
-  combinator, and `{"and": [...]}` flattens into the same rendering as the
-  implicit form.
-- `A AND B AND (C OR (D AND E AND F))` renders exactly the SQL above from both
-  faces, and each face's output parses into the other: the Rust tree
-  serializes to that JSON, and that JSON parses to an equal tree.
-- Nesting is structural, not flattened: `filters([and([a, and([b, c])])])`
-  renders `((a AND b) AND c)`, and `normalize()` is what turns that into
-  `(a AND b AND c)`.
-- A level with two `Or` group children falls back to `{"and": [...]}`, and
-  parsing the fallback reproduces the original tree node for node.
-- `and([x])` renders `(x)`; `and([])` is an error; a group at the depth cap is
-  accepted and one past it is rejected.
-- Key order determines parameter order, and serialization reproduces the input
-  order; a duplicate key is an error.
-- Each operator renders its SQL and arity; `in` with zero elements, `between`
-  with three, `is_null` with `false`, `eq` with `null`, and a list where a
-  scalar belongs are all errors.
-- An operator absent from `query_ops` is rejected on the JSON face and on
-  `Filter::leaf`; a column with an empty list rejects every operator except
-  `is_null` and `is_not_null`.
-- `int8` with a fractional number and `uuid` with a non-uuid both report the
-  column and the reason. `numeric` either binds a `Decimal` or reports
-  `UnsupportedType`, depending on the sqlx feature the workspace enables.
-- Every error message in [Errors](#errors) is asserted verbatim, so the column
-  list stays in the unknown-column message and the short forms stay suggested.
-- Depth, node-count, list-length and paging limits trip at the boundary and not
-  before.
-- `{"limit": -1}`, `{"limit": 1.5}` and `{"offset": "10"}` are rejected. On a
-  model that has a column named `limit`, `{"limit": 5}` pages and
-  `{"limit__eq": 5}` filters; on a model with a column named `or`,
-  `{"or": [...]}` filters the column, because only paging keys outrank columns.
-- A fragment model is rejected.
-- `Bind` covers `uuid`, `date`, `timestamptz`, `jsonb` and `text[]`: each
-  binds to its column, which is the coverage `AnyValueKind` cannot provide.
-- The six array operators render their SQL and arity: `contains` with a list is
-  an error, `overlaps` with a scalar is an error, and an empty list for
-  `overlaps`/`contains_all` is rejected like an empty `in`.
-- A transparent newtype binds as its inner type: `PgTypeInfo` is the inner
-  one, and the bound bytes are the inner value's.
-- `eq_dyn` is type-exact: `Box::new(100i64)` does not equal `Box::new(100i32)`,
-  and two boxes of the same value do.
-- A newtype column takes the newtype in Rust: `c.email.eq(Email(..))` compiles
-  and `c.email.eq("x")` does not. The same holds for a key: `c.id.eq(&id)`
-  compiles through the generated `From<&OrderId>`, `c.id.eq(uuid)` does not, and
-  `c.id.in_(ids.iter())` accepts borrowed elements.
-- `c.id.eq(&id)` and `c.id.eq(id)` produce values that compare equal through
-  `eq_dyn` and serialize to the same JSON, so the borrow impl does not change
-  rendering.
-- A newtype without `PartialOrd` has no `gt`/`between`; the `trybuild` case
-  asserts the `E0599` message rather than a generic "no method".
+- Every worked example in this document: the Rust call, the SQL, and — where
+  the example has one — the JSON, both as the payload that parses into the same
+  tree and as what serializing the tree produces.
+- `{"vip": true}` equals `{"vip__eq": true}`; `{"deleted_at": null}` and
+  `{"deleted_at__neq": null}` render `IS NULL` and `IS NOT NULL`;
+  `{"deleted_at__is_null": true}` is the same request.
+- `A AND B AND (C OR (D AND E AND F))` from both faces, and each face's output
+  parses into the other.
+- Nesting is structural: `filters([and([a, and([b, c])])])` renders
+  `((a AND b) AND c)`, and `normalize()` is what makes it
+  `(a AND b AND c)`. A single-child group keeps its parentheses.
+- A level with two `Or` children falls back to `{"and": [...]}`, and the
+  fallback parses back to the same tree node for node.
+- Key order is parameter order in both directions; a duplicate key is an error.
+- A model with a column named `or` filters it with `{"or": true}`, and an `or`
+  group then has no JSON spelling, which serialization reports.
+- Every error in [Errors](#errors) verbatim, plus `and` with no children, a
+  paging key inside a group, a fractional `limit`, and a negative one.
+- The caps trip at the boundary and not before: eight nested groups, 64 nodes,
+  100 list values, `limit` 1000. `limit` 0 is accepted.
+- The untyped `Filter::leaf` is validated like any other leaf: an undeclared
+  operator and a wrong arity are both rejected by `build()`.
+- A newtype column takes the newtype, owned, borrowed, and as a list of either;
+  `eq_dyn` is type-exact, so `100i64` does not equal `100i32`.
+- A fragment model is rejected by `build()`, and a flattened handle builds a
+  filter whose column is the parent's.
 
-Against `pgtest-server`:
+`crates/dbkit/tests/compile.rs` with `tests/ui/`, four cases asserting `E0599`:
+`like` on an integer column, `between` on a column that does not declare it,
+`eq` on an array column, and a `&str` argument to an integer column.
 
-- Rows covering several statuses and totals; the example filter returns exactly
-  the expected rows, proving parameter order rather than SQL text.
-- `uuid`, `timestamptz`, `bool` and `varchar` filters each work, covering the
-  binding map.
-- A two-element and a fifty-element `in` list use one prepared statement shape.
-- A sparse `select` returns the requested columns.
-- `limit` and `offset` bound as parameters: a request with both returns the
-  expected window, and the same query with `offset` omitted returns the first
-  page. A `limit` of `0` returns no rows, which is the SQL behaviour and is
-  accepted rather than treated as absent.
-- One test per worked example: the Rust call, the JSON, and the SQL asserted
-  together, so a change to rendering fails the example rather than only the
-  snapshot. The array-column case inserts rows with overlapping `tags` and
-  checks `contains`, `overlaps` and `contains_all` return the expected rows on
-  `{rust,sql}`, `{rust}`, `{go}` and `{}`, including the empty-array case that
-  `not_contains` matches.
+Against `pgtest-server`, in `crates/dbkit/tests/query_live.rs`:
 
-## Rollout
+- A filter returns the expected rows, which proves parameter order rather than
+  SQL text.
+- A disjunction nested under a conjunction returns the intersection the
+  parentheses describe.
+- A two-element and a fifty-element `in` list produce the same statement text.
+- Paging returns the expected window, and `limit` 0 returns no rows.
+- `uuid`, `varchar`, `int8`, `bool` and `timestamptz` values each bind.
+- A sparse projection returns the requested columns.
+- `contains`, `overlaps`, `contains_all` and `not_contains` return the expected
+  rows on `{rust,sql}`, `{rust}`, `{go}` and `{}`, so the empty-array case that
+  `not_contains` matches is covered.
+- The JSON face and the Rust face return the same rows for the same predicate.
 
-Each step compiles and passes tests on its own.
+In `crates/dbkit/src/query/value.rs`, unit tests pin the JSON table: every alias
+sqlx accepts for `String` parses as one, each type name maps to its own type,
+`text[]` parses as one value, `numeric(10,2)` reports `UnsupportedType`, and a
+wrong JSON kind is reported as the column type.
 
-1. Rename `FilterOperator::Any`/`NotAny` to `Contains`/`NotContains`, add the
-   four overlap/superset variants, and put `#[serde(rename_all = "snake_case")]`
-   on the enum, with a test that every annotation name parses to its variant.
-   This is a library change on its own and compiles before any query code.
-2. The `Bind` trait and its blanket impl, `from_json` per pg type, and the
-   `From<&T>` half of `#[derive(DbValue)]`. Unit tests bind one value of every
-   supported type, compare them through `eq_dyn`, and assert `.eq(&id)` is
-   accepted while `.eq(raw_uuid)` is not; no query code yet.
-3. The capability traits, `ColumnRef` with its per-operator impl blocks, the
-   generated tag types and `columns()`, so the typed constructors compile and an
-   undeclared operator is `E0599`. `Filter` gains `Operand`, holds
-   `Box<dyn Bind>`, and gets its `and`/`or` constructors plus `Query::filters`
-   and `normalize()`, so an arbitrary tree can be written in Rust before any SQL
-   is generated.
-4. `build()`: operator table, quoting, one pair of parentheses per group, depth
-   and node limits, `limit`/`offset` clauses bound as parameters, native
-   binding, snapshot tests, then the live tests.
-5. The flat JSON deserializer and serializer, plus round-trip tests.
-6. Documentation: this file becomes `docs/query-builder.md`, and the dbkit
-   annotations doc points at it.
+## How it was built
+
+Each step compiled and passed its tests on its own; all six are done.
+
+1. Renamed `FilterOperator::Any`/`NotAny` to `Contains`/`NotContains`, added the
+   four overlap/superset variants, and gave the enum `as_str`, `from_name` and
+   hand-written serde, so the annotation name, the JSON suffix and the handle
+   method are one vocabulary.
+2. The `Bind` trait and its blanket impl, the type list behind the JSON face,
+   and `#[derive(DbValue)]`, which gives a newtype `From<&T> for T`.
+3. The capability traits, `ColumnRef` with one impl block per operator, the
+   generated tag types and `<Model>::columns()`. `Filter` gained `Operand`,
+   holding the boxed value behind an `Arc`, with `and`/`or` and `Query::filters`
+   so any tree can be written in Rust.
+4. `build()`: the operator table, quoting, one pair of parentheses per group,
+   the depth/node/list/limit caps, and `limit`/`offset` bound as parameters.
+5. The flat JSON serializer and deserializer, with round-trip tests. A rejected
+   request keeps its own `Error` variant, so a handler can map it to a status;
+   a syntactically broken payload is `Error::Json`.
+6. This document, and the annotations doc now points here.
 
 ## Open questions
 

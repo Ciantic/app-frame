@@ -1,0 +1,900 @@
+use chrono::DateTime;
+use chrono::Utc;
+use dbkit::Bind;
+use dbkit::Columns;
+use dbkit::DbModel;
+use dbkit::DbType;
+use dbkit::DbValue;
+use dbkit::Filter;
+use dbkit::FilterOperator;
+use dbkit::Operand;
+use dbkit::Query;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::json;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, DbValue, DbType)]
+#[sqlx(transparent)]
+#[db(pgtype = "uuid")]
+struct OrderId(pub Uuid);
+
+#[derive(DbModel)]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+#[db(table = "orders")]
+struct Order {
+    #[db(primary_key)]
+    #[db(query_ops(eq, in))]
+    id: OrderId,
+
+    #[db(pgtype = "varchar(20)")]
+    #[db(query_ops(eq, in, not_in, ilike))]
+    status: String,
+
+    #[db(pgtype = "int8")]
+    #[db(query_ops(eq, gte, lt, between))]
+    total: i64,
+
+    #[db(pgtype = "bool")]
+    #[db(query_ops(eq))]
+    vip: bool,
+
+    #[db(pgtype = "text[]")]
+    #[db(query_ops(
+        contains,
+        overlaps,
+        contains_all,
+        not_contains,
+        not_overlaps,
+        not_contains_all
+    ))]
+    tags: Vec<String>,
+
+    #[db(pgtype = "timestamptz")]
+    #[db(query_ops(eq, neq))]
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(DbModel)]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+#[db(table = "odd")]
+struct Odd {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "text")]
+    #[db(query_ops(contains))]
+    title: String,
+
+    #[db(pgtype = "text[]")]
+    #[db(query_ops(in))]
+    tags: Vec<String>,
+
+    #[db(pgtype = "numeric(10,2)")]
+    #[db(query_ops(eq))]
+    weight: f64,
+}
+
+fn c() -> OrderColumns {
+    Order::columns()
+}
+
+fn built(query: &Query<OrderColumn>) -> (String, Vec<serde_json::Value>) {
+    let built = query.build().expect("the query builds");
+    let values = built.values_json();
+
+    (built.sql, values)
+}
+
+fn parse_error(json: &str) -> String {
+    Query::<OrderColumn>::parse(json)
+        .expect_err("the request is rejected")
+        .to_string()
+}
+
+fn build_error(query: &Query<OrderColumn>) -> String {
+    query
+        .build()
+        .expect_err("the query is rejected")
+        .to_string()
+}
+
+#[test]
+fn the_goal_example_builds_the_documented_sql() {
+    let query = Order::query()
+        .filters([
+            c().status.in_(["open", "paid"]),
+            c().deleted_at.is_null(),
+            Filter::or([
+                c().total.between(100, 500),
+                Filter::and([c().vip.eq(true), c().tags.contains("gift")]),
+            ]),
+        ])
+        .limit(20)
+        .offset(40);
+
+    let (sql, values) = built(&query);
+
+    assert_eq!(
+        sql,
+        "SELECT * FROM \"orders\" WHERE \"status\" = ANY($1) AND \"deleted_at\" IS NULL AND \
+         (\"total\" BETWEEN $2 AND $3 OR (\"vip\" = $4 AND $5 = ANY(\"tags\"))) LIMIT $6 OFFSET $7"
+    );
+    assert_eq!(
+        values,
+        [
+            json!(["open", "paid"]),
+            json!(100),
+            json!(500),
+            json!(true),
+            json!("gift"),
+            json!(20),
+            json!(40),
+        ]
+    );
+}
+
+#[test]
+fn the_json_payload_builds_the_same_query() {
+    // A raw string, because `json!` builds a sorted map and key order is
+    // parameter order.
+    let payload = r#"{
+        "status__in": ["open", "paid"],
+        "deleted_at": null,
+        "or": [
+            {"total__between": [100, 500]},
+            {"and": [{"vip": true}, {"tags__contains": "gift"}]}
+        ],
+        "limit": 20,
+        "offset": 40
+    }"#;
+
+    let parsed = Query::<OrderColumn>::parse(payload).expect("the payload parses");
+
+    let rust = Order::query()
+        .filters([
+            c().status.in_(["open", "paid"]),
+            c().deleted_at.is_null(),
+            Filter::or([
+                c().total.between(100, 500),
+                Filter::and([c().vip.eq(true), c().tags.contains("gift")]),
+            ]),
+        ])
+        .limit(20)
+        .offset(40);
+
+    assert_eq!(parsed, rust);
+    assert_eq!(
+        serde_json::to_string(&parsed).unwrap(),
+        r#"{"status__in":["open","paid"],"deleted_at":null,"or":[{"total__between":[100,500]},{"and":[{"vip":true},{"tags__contains":"gift"}]}],"limit":20,"offset":40}"#
+    );
+}
+
+#[test]
+fn a_key_without_a_suffix_is_eq() {
+    let bare = Query::<OrderColumn>::parse(r#"{"vip": true}"#).unwrap();
+    let explicit = Query::<OrderColumn>::parse(r#"{"vip__eq": true}"#).unwrap();
+
+    assert_eq!(bare, explicit);
+    assert_eq!(
+        built(&bare).0,
+        "SELECT * FROM \"orders\" WHERE \"vip\" = $1"
+    );
+}
+
+#[test]
+fn several_keys_are_a_conjunction() {
+    let query = Query::<OrderColumn>::parse(r#"{"status": "open", "vip": true}"#).unwrap();
+
+    assert_eq!(
+        built(&query),
+        (
+            "SELECT * FROM \"orders\" WHERE \"status\" = $1 AND \"vip\" = $2".to_owned(),
+            vec![json!("open"), json!(true)],
+        )
+    );
+}
+
+#[test]
+fn key_order_is_parameter_order() {
+    let query = Query::<OrderColumn>::parse(r#"{"vip": true, "status": "open"}"#).unwrap();
+
+    assert_eq!(built(&query).1, [json!(true), json!("open")]);
+}
+
+#[test]
+fn null_is_the_short_form_of_is_null() {
+    let short = Query::<OrderColumn>::parse(r#"{"deleted_at": null}"#).unwrap();
+    let long = Query::<OrderColumn>::parse(r#"{"deleted_at__is_null": true}"#).unwrap();
+
+    assert_eq!(short, long);
+    assert_eq!(
+        built(&short).0,
+        "SELECT * FROM \"orders\" WHERE \"deleted_at\" IS NULL"
+    );
+    assert!(built(&short).1.is_empty());
+}
+
+#[test]
+fn neq_with_null_is_not_null() {
+    for payload in [
+        r#"{"deleted_at__neq": null}"#,
+        r#"{"deleted_at__is_not_null": true}"#,
+    ] {
+        let query = Query::<OrderColumn>::parse(payload).unwrap();
+
+        assert_eq!(
+            built(&query).0,
+            "SELECT * FROM \"orders\" WHERE \"deleted_at\" IS NOT NULL"
+        );
+        assert!(built(&query).1.is_empty());
+    }
+}
+
+#[test]
+fn a_list_is_one_array_parameter() {
+    let query = Order::query().filters([c().status.in_(["open", "paid"])]);
+
+    assert_eq!(
+        built(&query),
+        (
+            "SELECT * FROM \"orders\" WHERE \"status\" = ANY($1)".to_owned(),
+            vec![json!(["open", "paid"])],
+        )
+    );
+
+    let fifty: Vec<String> = (0..50).map(|index| index.to_string()).collect();
+    let query = Order::query().filters([c().status.in_(fifty)]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE \"status\" = ANY($1)"
+    );
+}
+
+#[test]
+fn not_in_is_all() {
+    let query = Query::<OrderColumn>::parse(r#"{"status__not_in": ["open"]}"#).unwrap();
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE \"status\" <> ALL($1)"
+    );
+}
+
+#[test]
+fn between_binds_two_parameters() {
+    let query = Order::query().filters([c().total.between(100, 500)]);
+
+    assert_eq!(
+        built(&query),
+        (
+            "SELECT * FROM \"orders\" WHERE \"total\" BETWEEN $1 AND $2".to_owned(),
+            vec![json!(100), json!(500)],
+        )
+    );
+}
+
+#[test]
+fn an_open_range_is_two_leaves() {
+    let query = Order::query().filters([c().total.gte(100), c().total.lt(500)]);
+
+    assert_eq!(
+        built(&query),
+        (
+            "SELECT * FROM \"orders\" WHERE \"total\" >= $1 AND \"total\" < $2".to_owned(),
+            vec![json!(100), json!(500)],
+        )
+    );
+}
+
+#[test]
+fn a_pattern_operator_renders_its_keyword() {
+    let query = Query::<OrderColumn>::parse(r#"{"status__ilike": "op%"}"#).unwrap();
+
+    assert_eq!(
+        built(&query),
+        (
+            "SELECT * FROM \"orders\" WHERE \"status\" ILIKE $1".to_owned(),
+            vec![json!("op%")],
+        )
+    );
+}
+
+#[test]
+fn the_array_operators_mirror_in() {
+    assert_eq!(
+        built(&Order::query().filters([c().tags.contains("rust")])),
+        (
+            "SELECT * FROM \"orders\" WHERE $1 = ANY(\"tags\")".to_owned(),
+            vec![json!("rust")],
+        )
+    );
+    assert_eq!(
+        built(&Order::query().filters([c().tags.overlaps(["rust", "sql"])])),
+        (
+            "SELECT * FROM \"orders\" WHERE \"tags\" && $1".to_owned(),
+            vec![json!(["rust", "sql"])],
+        )
+    );
+    assert_eq!(
+        built(&Order::query().filters([c().tags.contains_all(["rust", "sql"])])),
+        (
+            "SELECT * FROM \"orders\" WHERE \"tags\" @> $1".to_owned(),
+            vec![json!(["rust", "sql"])],
+        )
+    );
+    assert_eq!(
+        built(&Order::query().filters([c().tags.not_contains("rust")])).0,
+        "SELECT * FROM \"orders\" WHERE NOT ($1 = ANY(\"tags\"))"
+    );
+    assert_eq!(
+        built(&Order::query().filters([c().tags.not_contains_all(["rust"])])).0,
+        "SELECT * FROM \"orders\" WHERE NOT (\"tags\" @> $1)"
+    );
+    assert_eq!(
+        built(&Order::query().filters([c().tags.not_overlaps(["rust"])])).0,
+        "SELECT * FROM \"orders\" WHERE NOT (\"tags\" && $1)"
+    );
+}
+
+#[test]
+fn a_projection_lists_the_selected_columns_in_declaration_order() {
+    let columns: Columns<OrderColumn> = [OrderColumn::Total, OrderColumn::Id].into_iter().collect();
+
+    let query = Order::query()
+        .select(columns)
+        .filters([c().status.eq("open")]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT \"id\", \"total\" FROM \"orders\" WHERE \"status\" = $1"
+    );
+}
+
+#[test]
+fn paging_binds_parameters_and_is_absent_when_unset() {
+    let query = Order::query()
+        .filters([c().status.eq("open")])
+        .limit(20)
+        .offset(40);
+
+    assert_eq!(
+        built(&query),
+        (
+            "SELECT * FROM \"orders\" WHERE \"status\" = $1 LIMIT $2 OFFSET $3".to_owned(),
+            vec![json!("open"), json!(20), json!(40)],
+        )
+    );
+
+    let query = Order::query().filters([c().status.eq("open")]).limit(20);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE \"status\" = $1 LIMIT $2"
+    );
+
+    let query = Order::query().filters([c().status.eq("open")]).offset(0);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE \"status\" = $1"
+    );
+}
+
+#[test]
+fn a_disjunction_is_parenthesized_even_at_the_top_level() {
+    let query = Order::query().filters([Filter::or([c().status.eq("open"), c().vip.eq(true)])]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE (\"status\" = $1 OR \"vip\" = $2)"
+    );
+}
+
+#[test]
+fn mixed_depth_keeps_its_leaves_flat() {
+    let payload = r#"{"status":"open","or":[{"vip":true},{"and":[{"total__gte":100},{"total__lt":500}]}],"tags__contains":"gift"}"#;
+
+    let query = Order::query().filters([
+        c().status.eq("open"),
+        Filter::or([
+            c().vip.eq(true),
+            Filter::and([c().total.gte(100), c().total.lt(500)]),
+        ]),
+        c().tags.contains("gift"),
+    ]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE \"status\" = $1 AND (\"vip\" = $2 OR (\"total\" >= $3 AND \
+         \"total\" < $4)) AND $5 = ANY(\"tags\")"
+    );
+    assert_eq!(serde_json::to_string(&query).unwrap(), payload);
+    assert_eq!(Query::<OrderColumn>::parse(payload).unwrap(), query);
+}
+
+#[test]
+fn two_or_children_fall_back_to_the_and_wrapper() {
+    let query = Order::query().filters([
+        Filter::or([c().status.eq("open"), c().vip.eq(true)]),
+        Filter::or([c().total.lt(100), c().tags.contains("gift")]),
+    ]);
+
+    let payload = r#"{"and":[{"or":[{"status":"open"},{"vip":true}]},{"or":[{"total__lt":100},{"tags__contains":"gift"}]}]}"#;
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE (\"status\" = $1 OR \"vip\" = $2) AND (\"total\" < $3 OR \
+         $4 = ANY(\"tags\"))"
+    );
+    assert_eq!(serde_json::to_string(&query).unwrap(), payload);
+    assert_eq!(Query::<OrderColumn>::parse(payload).unwrap(), query);
+}
+
+#[test]
+fn a_single_child_group_keeps_its_parentheses() {
+    let query = Order::query().filters([Filter::and([c().status.eq("open")])]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE (\"status\" = $1)"
+    );
+    assert_eq!(
+        serde_json::to_string(&query).unwrap(),
+        r#"{"and":[{"status":"open"}]}"#
+    );
+}
+
+#[test]
+fn nesting_is_structural_until_normalized() {
+    let query = Order::query().filters([Filter::and([
+        c().status.eq("open"),
+        Filter::and([c().vip.eq(true)]),
+    ])]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE (\"status\" = $1 AND (\"vip\" = $2))"
+    );
+    assert_eq!(
+        built(&query.clone().normalize()).0,
+        "SELECT * FROM \"orders\" WHERE \"status\" = $1 AND \"vip\" = $2"
+    );
+}
+
+#[test]
+fn a_redundant_and_stays_nested() {
+    let query = Order::query().filters([Filter::and([
+        Filter::and([c().status.eq("open"), c().vip.eq(true)]),
+        c().tags.contains("gift"),
+    ])]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" WHERE ((\"status\" = $1 AND \"vip\" = $2) AND $3 = \
+         ANY(\"tags\"))"
+    );
+}
+
+#[test]
+fn an_empty_group_is_rejected() {
+    let query = Order::query().filters([Filter::and(Vec::new())]);
+
+    assert_eq!(build_error(&query), "`and` needs at least one filter");
+}
+
+#[test]
+fn an_unknown_column_names_the_columns() {
+    let message = parse_error(r#"{"statuss": "open"}"#);
+
+    assert!(
+        message.starts_with(
+            "unknown column `statuss`; expected one of: id, status, total, vip, tags, deleted_at"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_unknown_operator_lists_the_vocabulary() {
+    let message = parse_error(r#"{"status__betwen": [1, 2]}"#);
+
+    assert!(
+        message.starts_with("operator `betwen` is not known; expected one of: eq, neq, gt, gte"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_operator_outside_query_ops_is_rejected() {
+    let message = parse_error(r#"{"total__ilike": "5%"}"#);
+
+    assert!(
+        message.starts_with(
+            "operator `ilike` is not allowed on column `total`; its query_ops are: eq, gte, lt, \
+             between"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_empty_list_is_rejected() {
+    assert!(
+        parse_error(r#"{"status__in": []}"#).starts_with("`in` needs at least one value"),
+        "{}",
+        parse_error(r#"{"status__in": []}"#)
+    );
+}
+
+#[test]
+fn a_list_operator_with_a_scalar_says_what_it_wants() {
+    let message = parse_error(r#"{"status__in": "open"}"#);
+
+    assert!(
+        message.starts_with("`in` takes a list, got a string"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_scalar_operator_with_a_list_is_rejected() {
+    let message = parse_error(r#"{"status": ["open"]}"#);
+
+    assert!(
+        message.starts_with("column `status` is varchar(20), the value is a list"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_wrong_value_type_names_the_column() {
+    let message = parse_error(r#"{"total": "500"}"#);
+
+    assert!(
+        message.starts_with("column `total` is int8, the value is a string"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_fractional_integer_is_rejected() {
+    let message = parse_error(r#"{"total": 1.5}"#);
+
+    assert!(
+        message.starts_with(
+            "column `total` is int8, invalid type: floating point `1.5`, expected i64"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn eq_with_an_explicit_null_points_at_the_short_forms() {
+    let message = parse_error(r#"{"deleted_at__eq": null}"#);
+
+    assert!(
+        message.starts_with("use `deleted_at`: null, or `deleted_at__neq`: null"),
+        "{message}"
+    );
+}
+
+#[test]
+fn is_null_with_false_is_rejected() {
+    let message = parse_error(r#"{"deleted_at__is_null": false}"#);
+
+    assert!(
+        message.starts_with("`is_null` takes `true`, not `false`"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_duplicate_key_is_rejected() {
+    let message = parse_error(r#"{"vip": true, "vip": false}"#);
+
+    assert!(message.starts_with("duplicate key `vip`"), "{message}");
+}
+
+#[test]
+fn in_on_an_array_column_suggests_overlaps() {
+    let message = Query::<OddColumn>::parse(r#"{"tags__in": ["rust"]}"#)
+        .expect_err("the request is rejected")
+        .to_string();
+
+    assert!(
+        message.starts_with("column `tags` is an array, so `in` does not apply"),
+        "{message}"
+    );
+}
+
+#[test]
+fn contains_on_a_scalar_column_suggests_in() {
+    let message = Query::<OddColumn>::parse(r#"{"title__contains": "open"}"#)
+        .expect_err("the request is rejected")
+        .to_string();
+
+    assert!(
+        message.starts_with(
+            "column `title` is not an array, so `contains` does not apply; use `in` instead"
+        ),
+        "{message}"
+    );
+}
+
+#[derive(DbModel)]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+#[db(table = "shadowed")]
+struct Shadowed {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "bool")]
+    #[db(query_ops(eq))]
+    r#or: bool,
+}
+
+#[test]
+fn a_column_named_or_wins_over_the_combinator() {
+    let query = Query::<ShadowedColumn>::parse(r#"{"or": true}"#).unwrap();
+
+    assert_eq!(
+        query,
+        Query::new().filters([Filter::leaf(
+            ShadowedColumn::Or,
+            FilterOperator::Eq,
+            Operand::one(true)
+        )])
+    );
+
+    // A group therefore has no JSON form on this model, and says so.
+    let message = serde_json::to_string(&Query::<ShadowedColumn>::new().filters([Filter::or([
+        Filter::leaf(ShadowedColumn::Or, FilterOperator::Eq, Operand::one(true)),
+    ])]))
+    .expect_err("an `or` group cannot be written")
+    .to_string();
+
+    assert!(message.contains("has no JSON form"), "{message}");
+}
+
+#[test]
+fn a_paging_key_inside_a_group_is_rejected() {
+    let message = parse_error(r#"{"or": [{"limit": 5}]}"#);
+
+    assert!(
+        message.starts_with("`limit` is only allowed at the top level"),
+        "{message}"
+    );
+}
+
+#[test]
+fn paging_keys_must_be_non_negative_integers() {
+    for payload in [
+        r#"{"limit": -1}"#,
+        r#"{"limit": 1.5}"#,
+        r#"{"offset": "10"}"#,
+    ] {
+        assert!(
+            Query::<OrderColumn>::parse(payload).is_err(),
+            "{payload} parsed"
+        );
+    }
+}
+
+#[test]
+fn the_limit_cap_is_a_build_error() {
+    let query = Order::query().limit(1001);
+
+    assert_eq!(build_error(&query), "`limit` must be at most 1000");
+    assert!(Order::query().limit(1000).build().is_ok());
+}
+
+#[test]
+fn a_unit8_column_is_one_byte() {
+    assert_eq!(std::mem::size_of::<OrderColumns>(), 6);
+}
+
+#[test]
+fn the_depth_cap_is_eight_groups() {
+    fn nested(levels: usize) -> Query<OrderColumn> {
+        let mut filter = Order::query().filters([c().vip.eq(true)]).filters;
+        for _ in 0..levels {
+            filter = vec![Filter::and(filter)];
+        }
+
+        Order::query().filters(filter)
+    }
+
+    assert!(nested(8).build().is_ok());
+    assert_eq!(
+        nested(9).build().unwrap_err().to_string(),
+        "filters nest deeper than 8 levels"
+    );
+}
+
+#[test]
+fn the_node_cap_counts_every_filter() {
+    let filters: Vec<Filter<OrderColumn>> = (0..65).map(|_| c().vip.eq(true)).collect();
+
+    assert_eq!(
+        build_error(&Order::query().filters(filters)),
+        "the query has more than 64 filter nodes"
+    );
+}
+
+#[test]
+fn the_list_cap_is_hundred() {
+    let values: Vec<String> = (0..=100).map(|index| index.to_string()).collect();
+    let query = Order::query().filters([c().status.in_(values)]);
+
+    assert_eq!(
+        build_error(&query),
+        "`in` accepts at most 100 values, got 101"
+    );
+}
+
+#[test]
+fn a_leaf_checks_the_operator_against_query_ops() {
+    let query = Order::query().filters([Filter::leaf(
+        OrderColumn::Total,
+        FilterOperator::ILike,
+        Operand::one("5%"),
+    )]);
+
+    assert_eq!(
+        build_error(&query),
+        "operator `ilike` is not allowed on column `total`; its query_ops are: eq, gte, lt, \
+         between"
+    );
+}
+
+#[test]
+fn a_leaf_checks_the_operand_arity() {
+    let query = Order::query().filters([Filter::leaf(
+        OrderColumn::Total,
+        FilterOperator::Between,
+        Operand::one(1),
+    )]);
+
+    assert_eq!(
+        build_error(&query),
+        "`between` takes two values, got one value"
+    );
+}
+
+#[derive(DbModel)]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the column metadata"
+)]
+#[db(fragment)]
+struct Size {
+    #[db(pgtype = "int4")]
+    #[db(query_ops(gte, lt))]
+    width: i32,
+
+    #[db(pgtype = "text")]
+    height_label: String,
+}
+
+#[derive(DbModel)]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+#[db(table = "frame")]
+struct Frame {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(flatten)]
+    size: Size,
+
+    #[db(pgtype = "text")]
+    label: String,
+}
+
+#[test]
+fn a_flattened_handle_builds_a_filter_of_the_parent_model() {
+    let query = Frame::query().filters([Frame::columns().size.width.gte(10)]);
+
+    assert_eq!(
+        built_frame(&query),
+        (
+            "SELECT * FROM \"frame\" WHERE \"width\" >= $1".to_owned(),
+            vec![json!(10)],
+        )
+    );
+}
+
+fn built_frame(query: &Query<FrameColumn>) -> (String, Vec<serde_json::Value>) {
+    let built = query.build().expect("the query builds");
+    let values = built.values_json();
+
+    (built.sql, values)
+}
+
+#[test]
+fn a_fragment_has_no_table() {
+    let message = Query::<SizeColumn>::new()
+        .build()
+        .expect_err("a fragment has no table")
+        .to_string();
+
+    assert_eq!(
+        message,
+        "the model is a `#[db(fragment)]`, which has no table to query"
+    );
+}
+
+#[test]
+fn a_malformed_value_keeps_serdes_reason() {
+    let message = parse_error(r#"{"id": "not-a-uuid"}"#);
+
+    assert!(message.starts_with("column `id` is uuid, "), "{message}");
+    assert!(
+        !message.contains("line "),
+        "the position is the object's: {message}"
+    );
+}
+
+#[test]
+fn a_value_of_the_wrong_json_kind_names_the_column() {
+    let message = parse_error(r#"{"id": 42}"#);
+
+    assert!(
+        message.starts_with("column `id` is uuid, the value is a number"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_unknown_column_type_is_unsupported_rather_than_guessed() {
+    let message = Query::<OddColumn>::parse(r#"{"weight": 1}"#)
+        .expect_err("the request is rejected")
+        .to_string();
+
+    assert!(
+        message.starts_with("column `weight` is numeric(10,2), which has no JSON filter value"),
+        "{message}"
+    );
+}
+
+#[test]
+fn eq_dyn_is_type_exact() {
+    let narrow = 100i32;
+    let wide = 100i64;
+
+    assert!(!narrow.eq_dyn(&wide));
+    assert!(wide.eq_dyn(&100i64));
+}
+
+#[test]
+fn a_newtype_takes_a_borrow() {
+    let id = OrderId(Uuid::nil());
+    let rust = Order::query().filters([c().id.eq(&id)]);
+    let owned = Order::query().filters([c().id.eq(id.clone())]);
+
+    assert_eq!(rust, owned);
+    assert_eq!(built(&rust).1, [json!(id.0.to_string())]);
+    for query in [
+        Order::query().filters([c().id.in_([id.clone()])]),
+        Order::query().filters([c().id.in_([id.clone()].iter())]),
+        Order::query().filters([c().id.in_(std::slice::from_ref(&id))]),
+    ] {
+        assert_eq!(
+            query.build().unwrap().values_json(),
+            [json!([id.0.to_string()])]
+        );
+    }
+}

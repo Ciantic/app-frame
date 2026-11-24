@@ -300,20 +300,25 @@ Declares which comparisons a column may be queried with.
   `#[db(query_ops(eq, neq, like, in))]`. A bare `#[db(eq)]` is not accepted,
   and an empty `query_ops()` is an error.
 - Operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `not_like`,
-  `not_ilike`, `in`, `not_in`, `any`, `not_any`, `is_null`, `is_not_null`,
-  `between`, `not_between`. They map one-to-one onto
-  `dbkit::FilterOperator`.
+  `not_ilike`, `in`, `not_in`, `contains`, `not_contains`, `overlaps`,
+  `not_overlaps`, `contains_all`, `not_contains_all`, `is_null`, `is_not_null`,
+  `between`, `not_between`. They map one-to-one onto `dbkit::FilterOperator`,
+  and each name is also the JSON key suffix and the method on the column
+  handle.
 - Order is preserved and duplicates are an error.
-- Metadata only: the derive records the operators in
-  `Column::query_ops` and nothing else. No SQL is generated, no operator is
-  validated against the column type, and the annotation does not change how a
-  row is read or written. A query layer is expected to look the list up to
-  reject an operator a column does not support.
-- Columns without the annotation get an empty list, meaning "not queryable"
+- The list decides what a column can be filtered with, on both faces of
+  [`Query`](query-builder.md): the derive implements one capability trait per
+  entry for the column's tag type, so an operator that is not listed does not
+  compile, and the JSON deserializer rejects it at run time. The annotation
+  still records the list in `Column::query_ops` and generates no SQL.
+- Columns without the annotation get an empty list, meaning "not filterable"
   rather than "every operator allowed".
-- Nothing stops `is_null` on a non-nullable column or `like` on a `uuid`; those
-  are semantic mistakes a future query layer would have to reject, not the
-  derive.
+- `is_null` and `is_not_null` need no declaration: they take no value and cannot
+  be mistyped, so every column has them.
+- The list is not checked against the column type. `like` on a `uuid` column
+  compiles and reaches the database, which rejects it; declaring an operator
+  whose type the column does not have is a model mistake the schema test cannot
+  see.
 
 ## `primary_key`
 
@@ -639,8 +644,29 @@ impl WidgetColumn {
 }
 
 impl Serialize for WidgetColumn { /* serialize_str(self.name()) */ }
-impl<'de> Deserialize<'de> for WidgetColumn { /* from_name(), else E::custom(...) */ }
+impl<'de> Deserialize<'de> for WidgetColumn { /* from_name() */ }
+
+// one empty tag per column, one capability per query_ops entry, and the typed
+// handles the query builder takes
+pub struct WidgetIdTag;
+impl<C: Column> dbkit::HasEq<C> for WidgetIdTag {}
+
+pub struct WidgetColumns<C: Column = WidgetColumn> {
+    pub id: dbkit::ColumnRef<WidgetIdTag, C, WidgetId>,
+    pub name: dbkit::ColumnRef<WidgetNameTag, C, String>,
+    // ...
+}
+
+impl Widget {
+    pub fn columns() -> WidgetColumns { /* ... */ }
+    pub const fn query() -> dbkit::Query<WidgetColumn> { /* ... */ }
+}
 ```
+
+`WidgetColumns::map` rewraps every handle onto another column enum, which is how
+a `#[db(flatten)]` parent turns a fragment's handles into its own. The tags and
+the handle struct are public because they appear in the field types; nothing in
+the API asks a caller to name them.
 
 - A variant is the only proof that a column exists, and `name()` returns a
   `&'static str`, so a query layer builds SQL from the enum and never formats a
@@ -703,20 +729,24 @@ WidgetColumn::Name.query_ops();            // [Eq, Neq, Like], from #[db(query_o
 A model's `TableMeta::columns` holds the same values as
 `&'static dyn ErasedColumn`; `dbkit` implements `ErasedColumn` for every
 `Column`, so the erased view is a forward, not a second description. That is
-what a query builder needs to cast a parameter (`$1::text`) or to reject an
-operator the column does not declare.
+what the JSON face of [`Query`](query-builder.md) reads to pick the concrete
+type of a filter value, and what `build()` reads to reject an operator the
+column does not declare.
 
 A request type holds `Option<Columns<C>>`: absent means every column, and an
 explicitly empty list is an error rather than a second spelling of "all".
 
+`dbkit::Query` is what turns a [`Columns`](query-builder.md) selection and a
+tree of filters into SQL, so a handler does not build the statement:
+
 ```rust
-let columns = request.select.unwrap_or_else(Columns::all);
-let mut builder = QueryBuilder::new("SELECT ");
-let mut separated = builder.separated(", ");
-for name in columns.names() {
-    separated.push(format_ident!("\"{}\"", name));
-}
-builder.push(" FROM \"widget\"");
+let query = Widget::query()
+    .select(request.select.unwrap_or_else(Columns::all))
+    .filters([Widget::columns().name.eq("example")]);
+let built = query.build()?;
+let rows = sqlx::query_as_with(AssertSqlSafe(built.sql), built.arguments)
+    .fetch_all(&pool)
+    .await?;
 ```
 
 `sqlx::FromRow` cannot decode a partial projection: the derived implementation
@@ -800,8 +830,6 @@ These are deliberately out of scope until a model needs them:
   them.
 - Column names that differ from field names.
 - Non-`i64` version types.
-- Building SQL from `query_ops`: the annotation only records which operators a
-  column accepts.
 - Roles inside a fragment, such as an embedded `Audit` fragment carrying
   `created_at`: the role would have to become the parent model's role, and
   uniqueness would then be a cross-type check.

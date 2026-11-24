@@ -1,0 +1,7 @@
+error[E0599]: no method named `like` found for struct `ColumnRef<OrderTotalTag, OrderColumn, i64>` in the current scope
+ --> tests/ui/fail_like_on_integer.rs:9:45
+  |
+9 |     let _ = Order::query().filters([c.total.like("5%")]);
+  |                                             ^^^^ method not found in `ColumnRef<OrderTotalTag, OrderColumn, i64>`
+  |
+  = note: the method was found for `ColumnRef<Tag, C, String>`

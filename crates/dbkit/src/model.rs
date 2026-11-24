@@ -1,13 +1,15 @@
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::Visitor;
 
 /// A comparison a column supports, as declared by
 /// `#[db(query_ops(...))]`.
 ///
-/// This is metadata only: `dbkit` records which operators a column accepts so
-/// that a query layer can validate a request against it. Nothing here builds
-/// SQL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The name is the annotation name, the JSON key suffix and the method name on
+/// a column handle, so there is one vocabulary to learn. An operator that takes
+/// no value, [`IsNull`](Self::IsNull) and [`IsNotNull`](Self::IsNotNull), needs
+/// no declaration: it is always available and cannot be mistyped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FilterOperator {
     Eq,
     Neq,
@@ -21,12 +23,134 @@ pub enum FilterOperator {
     NotILike,
     In,
     NotIn,
-    Any,
-    NotAny,
+    /// Whether an array column holds the value: `$1 = ANY("column")`.
+    Contains,
+    NotContains,
+    /// Whether an array column shares any element with the list.
+    Overlaps,
+    NotOverlaps,
+    /// Whether an array column holds every element of the list.
+    ContainsAll,
+    NotContainsAll,
     IsNull,
     IsNotNull,
     Between,
     NotBetween,
+}
+
+impl FilterOperator {
+    /// Every operator, in the order the vocabulary lists them.
+    pub const ALL: &'static [FilterOperator] = &[
+        FilterOperator::Eq,
+        FilterOperator::Neq,
+        FilterOperator::Gt,
+        FilterOperator::Gte,
+        FilterOperator::Lt,
+        FilterOperator::Lte,
+        FilterOperator::Like,
+        FilterOperator::ILike,
+        FilterOperator::NotLike,
+        FilterOperator::NotILike,
+        FilterOperator::In,
+        FilterOperator::NotIn,
+        FilterOperator::Contains,
+        FilterOperator::NotContains,
+        FilterOperator::Overlaps,
+        FilterOperator::NotOverlaps,
+        FilterOperator::ContainsAll,
+        FilterOperator::NotContainsAll,
+        FilterOperator::IsNull,
+        FilterOperator::IsNotNull,
+        FilterOperator::Between,
+        FilterOperator::NotBetween,
+    ];
+
+    /// The operator as the annotation, the JSON key suffix and the handle
+    /// method spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FilterOperator::Eq => "eq",
+            FilterOperator::Neq => "neq",
+            FilterOperator::Gt => "gt",
+            FilterOperator::Gte => "gte",
+            FilterOperator::Lt => "lt",
+            FilterOperator::Lte => "lte",
+            FilterOperator::Like => "like",
+            FilterOperator::ILike => "ilike",
+            FilterOperator::NotLike => "not_like",
+            FilterOperator::NotILike => "not_ilike",
+            FilterOperator::In => "in",
+            FilterOperator::NotIn => "not_in",
+            FilterOperator::Contains => "contains",
+            FilterOperator::NotContains => "not_contains",
+            FilterOperator::Overlaps => "overlaps",
+            FilterOperator::NotOverlaps => "not_overlaps",
+            FilterOperator::ContainsAll => "contains_all",
+            FilterOperator::NotContainsAll => "not_contains_all",
+            FilterOperator::IsNull => "is_null",
+            FilterOperator::IsNotNull => "is_not_null",
+            FilterOperator::Between => "between",
+            FilterOperator::NotBetween => "not_between",
+        }
+    }
+
+    /// The operator of that name, or `None` when no operator is spelled so.
+    pub fn from_name(name: &str) -> Option<Self> {
+        FilterOperator::ALL
+            .iter()
+            .copied()
+            .find(|operator| operator.as_str() == name)
+    }
+
+    /// Whether the operator takes no value, so it needs no `query_ops`
+    /// declaration and no operand.
+    pub fn is_nullary(self) -> bool {
+        matches!(self, FilterOperator::IsNull | FilterOperator::IsNotNull)
+    }
+
+    /// The names of every operator, for an error that lists what is accepted.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        FilterOperator::ALL.iter().map(|operator| operator.as_str())
+    }
+}
+
+impl Serialize for FilterOperator {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterOperator {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct OperatorVisitor;
+
+        impl Visitor<'_> for OperatorVisitor {
+            type Value = FilterOperator;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a filter operator name")
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                name: &str,
+            ) -> std::result::Result<FilterOperator, E> {
+                FilterOperator::from_name(name).ok_or_else(|| {
+                    E::custom(format_args!(
+                        "operator `{name}` is not known; expected one of: {}",
+                        FilterOperator::names().collect::<Vec<_>>().join(", "),
+                    ))
+                })
+            }
+        }
+
+        deserializer.deserialize_str(OperatorVisitor)
+    }
 }
 
 /// A column of a model table, erased so that one table's description can hold

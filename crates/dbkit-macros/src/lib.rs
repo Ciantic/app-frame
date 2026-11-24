@@ -5,7 +5,8 @@
 //! `DbPatch` reads the same annotations and emits the model's patch input
 //! type, and the same expansion emits the model's selectable column enum.
 //! `DbType` records the database type of a value type, so a model field of
-//! that type needs no `pgtype` or `pgdefault` of its own.
+//! that type needs no `pgtype` or `pgdefault` of its own. `DbValue` gives a
+//! newtype the borrow conversion a column handle takes.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -17,6 +18,7 @@ use syn::Expr;
 mod annotations;
 mod derive_columns;
 mod derive_patch;
+mod derive_value;
 
 /// Reads the `#[db(...)]` annotations of a model struct and generates
 /// `impl dbkit::Model for ...`, carrying them as `Model::meta()`.
@@ -104,6 +106,22 @@ pub fn derive_db_patch(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
 
     match derive_patch::expand(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Generates `impl From<&T> for T` for a one-field tuple struct, so a column
+/// handle takes `&value` as well as `value`.
+///
+/// The conversion clones, so the struct must derive or implement `Clone`; the
+/// compiler reports a missing `Clone` at the derive. A struct that is not a
+/// one-field tuple is rejected.
+#[proc_macro_derive(DbValue)]
+pub fn derive_db_value(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+
+    match derive_value::expand(&input) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
