@@ -71,22 +71,48 @@ pub struct UserPatch {
 See [dbkit annotations](dbkit-annotations.md#generated-patch) for the full
 patch generation rules.
 
+### Building a patch
+
+The generated patch has a constructor for its required fields and fluent
+setters for the rest:
+
+```rust
+let patch = UserPatch::new(UserId(Uuid::now_v7()), 3)
+    .set_email(Email("new@example.com".to_owned()))
+    .clear_email_verified_at();
+```
+
+- `new` takes the required fields in order: primary key columns in declaration
+  order, then `version` when the model has one.
+- Every business column starts as `Patch::Absent`.
+- `set_<field>(value)` stores `Patch::Set(value)`. The argument is
+  `impl Into<T>`, so a `String` field accepts `"text"`.
+- `clear_<field>()` stores `Patch::Null`. It exists only for nullable fields;
+  clearing a non-nullable column is a database error, so the method is not
+  generated.
+- A flattened field starts as an empty fragment patch and is set with its own
+  builder:
+
+  ```rust
+  let patch = FramePatch::new(id, 3)
+      .set_size(SizePatch::new().set_width(640).clear_note())
+      .set_label("photo");
+  ```
+
+- The constructor and setters are ordinary inherent methods. A patch from
+  JSON, a struct literal and a built patch are the same type and can be mixed.
+- A fragment patch has no key or version, so `FragmentPatch::new()` takes no
+  arguments.
+
 ## Applying patches
 
 ```rust
-let first = UserPatch {
-    id: UserId(Uuid::now_v7()),
-    version: 3,
-    email: Patch::Set(Email("new@example.com".to_owned())),
-    email_verified_at: Patch::Null,
-};
+let first = UserPatch::new(UserId(Uuid::now_v7()), 3)
+    .set_email(Email("new@example.com".to_owned()))
+    .clear_email_verified_at();
 
-let second = UserPatch {
-    id: UserId(Uuid::now_v7()),
-    version: 7,
-    email: Patch::Absent,
-    email_verified_at: Patch::Set(Utc::now()),
-};
+let second = UserPatch::new(UserId(Uuid::now_v7()), 7)
+    .set_email_verified_at(Utc::now());
 
 User::patch([first, second]).execute(&pool).await?;
 ```
@@ -214,6 +240,16 @@ impl PatchRow for UserPatch {
   extends its assignments.
 - A fragment patch has no key and no version, so it can be embedded but not
   applied on its own. `::patch()` is generated only for tables.
+
+The derive also emits the fluent surface:
+
+```rust
+impl UserPatch {
+    pub fn new(id: UserId, version: i64) -> Self;
+    pub fn set_email(mut self, value: impl Into<Email>) -> Self;
+    pub fn clear_email_verified_at(mut self) -> Self;
+}
+```
 
 For a table, the derive also adds:
 

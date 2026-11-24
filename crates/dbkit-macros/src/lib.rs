@@ -110,6 +110,10 @@ pub fn derive_db_type(input: TokenStream) -> TokenStream {
 /// so `Patch::Set` values are validated while `Patch::Absent` and
 /// `Patch::Null` pass.
 ///
+/// The generated patch has a `new(...)` constructor taking the required key and
+/// version fields, a `set_<field>` method per business column and, for a
+/// nullable column, a `clear_<field>()` method.
+///
 /// The expansion also implements `dbkit::PatchRow` and, for a table, adds
 /// `Model::patch(entries)`, which returns a `dbkit::PatchQuery`. The query
 /// renders one `UPDATE` per entry, checks the primary key and version, bumps

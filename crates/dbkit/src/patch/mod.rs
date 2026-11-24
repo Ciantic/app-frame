@@ -8,7 +8,6 @@ pub use query::PatchError;
 pub use query::PatchQuery;
 pub use query::PatchRow;
 pub use query::RenderedPatch;
-
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;

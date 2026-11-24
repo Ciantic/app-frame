@@ -38,7 +38,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let patch = format_ident!("{name}Patch");
     let doc = format!(
         "Patch input of [`{name}`]. The primary key is required, as is `version` when the model \
-         has one; every other column is a [`dbkit::Patch`] field."
+         has one; every other column is a [`dbkit::Patch`] field. `new` takes the required fields \
+         and starts every other column absent; `set_` and `clear_` methods change one column."
     );
     let generics = &input.generics;
 
@@ -46,10 +47,16 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let mut assignments = Vec::new();
     let mut keys = Vec::new();
     let mut expected_version = quote!(::core::option::Option::None);
+    let mut initializers = Vec::new();
+    let mut setters = Vec::new();
+    let mut key_parameters = Vec::new();
+    let mut version_parameter = None;
 
     for column in &annotations.columns {
-        let (field_name, ty) = match column {
-            Column::Scalar { name, ty, .. } => (name, ty),
+        let (field_name, ty, nullable) = match column {
+            Column::Scalar {
+                name, ty, nullable, ..
+            } => (name, ty, *nullable),
             Column::Flattened { name, ty } => {
                 let nested = patch_type(ty);
                 definitions.push(quote! {
@@ -61,6 +68,17 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                     assignments.extend(
                         <#nested as ::dbkit::PatchRow>::assignments(&self.#name),
                     );
+                });
+                initializers.push(quote!(#name: <#nested>::new()));
+                let field = field_text(name);
+                let setter = format_ident!("set_{field}");
+                let doc = format!("Sets the flattened `{field}` patch.");
+                setters.push(quote! {
+                    #[doc = #doc]
+                    pub fn #setter(mut self, value: #nested) -> Self {
+                        self.#name = value;
+                        self
+                    }
                 });
                 continue;
             }
@@ -78,6 +96,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 pub #field_name: #ty
             });
             keys.push(quote!(&self.#field_name));
+            initializers.push(quote!(#field_name));
+            key_parameters.push(quote!(#field_name: #ty));
             continue;
         }
 
@@ -87,6 +107,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 pub #field_name: #ty
             });
             expected_version = quote!(::core::option::Option::Some(&self.#field_name));
+            initializers.push(quote!(#field_name));
+            version_parameter = Some(quote!(#field_name: #ty));
             continue;
         }
 
@@ -101,9 +123,10 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             #garde
             pub #field_name: ::dbkit::Patch<#inner>
         });
+        initializers.push(quote!(#field_name: ::dbkit::Patch::Absent));
 
-        let field = field_name.to_string();
-        let column = syn::LitStr::new(field.trim_start_matches("r#"), field_name.span());
+        let field = field_text(field_name);
+        let column = syn::LitStr::new(&field, field_name.span());
         assignments.push(quote! {
             match &self.#field_name {
                 ::dbkit::Patch::Absent => {}
@@ -117,7 +140,42 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 }),
             }
         });
+
+        let setter = format_ident!("set_{field}");
+        let doc = format!("Sets `{field}` on this patch.");
+        setters.push(quote! {
+            #[doc = #doc]
+            pub fn #setter(mut self, value: impl ::core::convert::Into<#inner>) -> Self {
+                self.#field_name = ::dbkit::Patch::Set(::core::convert::Into::into(value));
+                self
+            }
+        });
+
+        if nullable {
+            let clear = format_ident!("clear_{field}");
+            let doc = format!("Clears `{field}` on this patch by setting it to `NULL`.");
+            setters.push(quote! {
+                #[doc = #doc]
+                pub fn #clear(mut self) -> Self {
+                    self.#field_name = ::dbkit::Patch::Null;
+                    self
+                }
+            });
+        }
     }
+
+    let parameters = key_parameters.into_iter().chain(version_parameter);
+    let builder = quote! {
+        impl #impl_generics #patch #type_generics #where_clause {
+            #[doc = "Starts a patch with the required key and version fields; every other column \
+                     is absent."]
+            pub fn new(#(#parameters),*) -> Self {
+                Self { #(#initializers),* }
+            }
+
+            #(#setters)*
+        }
+    };
 
     let patch_method = match annotations.shape {
         annotations::Shape::Table(_) => quote! {
@@ -140,6 +198,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             #(#definitions),*
         }
 
+        #builder
+
         #[automatically_derived]
         impl #impl_generics ::dbkit::PatchRow for #patch #type_generics #where_clause {
             type Model = #name #type_generics;
@@ -161,6 +221,11 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
         #patch_method
     })
+}
+
+/// The field name as a column and method suffix: a raw identifier loses `r#`.
+fn field_text(name: &syn::Ident) -> String {
+    name.to_string().trim_start_matches("r#").to_owned()
 }
 
 /// The patch type of a flattened field: the field type with `Patch` appended to

@@ -175,12 +175,10 @@ fn every_entry_is_its_own_statement() {
 
 #[test]
 fn a_composite_key_keeps_declaration_order() {
-    let patch = TranslationPatch {
-        lang: "en".to_owned(),
-        key: "greeting".to_owned(),
-        value: Patch::Set("hi".to_owned()),
-        version: 2,
-    };
+    let patch = TranslationPatch::new("en".to_owned(), "greeting".to_owned(), 2).set_value("hi");
+
+    assert_eq!(patch.lang, "en");
+    assert_eq!(patch.key, "greeting");
 
     let rendered = Translation::patch([patch]).render().unwrap();
 
@@ -231,6 +229,42 @@ fn a_flattened_patch_contributes_its_columns() {
          WHERE \"id\" = $2 AND \"version\" = $3"
     );
     assert_eq!(rendered[0].values, vec![json!(640), json!(id()), json!(1)]);
+}
+
+#[test]
+fn the_builder_takes_required_fields_and_sets_optional_ones() {
+    let patch = WidgetPatch::new(id(), 3).set_name("Thingie").clear_note();
+
+    assert_eq!(patch.id, id());
+    assert_eq!(patch.version, 3);
+    assert_eq!(patch.name, Patch::Set("Thingie".to_owned()));
+    assert_eq!(patch.note, Patch::Null);
+}
+
+#[test]
+fn the_builder_starts_optional_fields_absent() {
+    let patch = TranslationPatch::new("en".to_owned(), "greeting".to_owned(), 2);
+
+    assert_eq!(patch.value, Patch::Absent);
+}
+
+#[test]
+fn a_model_without_version_takes_only_the_key() {
+    let patch = AppendOnlyPatch::new(id()).set_note("kept");
+
+    assert_eq!(patch.id, id());
+    assert_eq!(patch.note, Patch::Set("kept".to_owned()));
+}
+
+#[test]
+fn the_builder_recurses_into_a_flattened_patch() {
+    let patch = FramePatch::new(id(), 1)
+        .set_size(SizePatch::new().set_width(640).clear_note())
+        .set_label("photo");
+
+    assert_eq!(patch.size.width, Patch::Set(640));
+    assert_eq!(patch.size.note, Patch::Null);
+    assert_eq!(patch.label, Patch::Set("photo".to_owned()));
 }
 
 #[test]

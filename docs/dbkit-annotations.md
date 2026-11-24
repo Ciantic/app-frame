@@ -698,6 +698,11 @@ pub struct UserPatch {
   one attribute covers all three states.
 - `garde` is not tied to a web framework: a handler deserializes the patch and
   calls `patch.validate()`, mapping an error to `422 Unprocessable Entity`.
+- The patch has a `new(...)` constructor taking the key columns in declaration
+  order and then `version` when the model has one. Every business column starts
+  as `Patch::Absent`. Each business column gets a `set_<field>(value)` method;
+  a nullable column also gets `clear_<field>()`, which sets `Patch::Null`. A
+  flattened field's setter takes the fragment's patch.
 
 ## Generated update
 
@@ -705,12 +710,9 @@ The same derive implements `dbkit::PatchRow` and, for a table, adds
 `Model::patch(entries)`, which returns a `dbkit::PatchQuery`:
 
 ```rust
-let patch = UserPatch {
-    id,
-    version: 3,
-    email: Patch::Set(Email::parse("new@example.com")?),
-    email_verified_at: Patch::Null,
-};
+let patch = UserPatch::new(id, 3)
+    .set_email(Email("new@example.com".to_owned()))
+    .clear_email_verified_at();
 
 User::patch([patch]).execute(&pool).await?;
 ```
