@@ -36,7 +36,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let insert = format_ident!("{name}Insert");
     let key = match &annotations.shape {
         annotations::Shape::Table(_) => {
-            let key = format_ident!("{name}PrimaryKey");
+            let key = format_ident!("{name}PK");
             quote!(#key)
         }
         annotations::Shape::SubQuery(_) | annotations::Shape::Fragment => quote!(()),

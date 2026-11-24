@@ -323,8 +323,8 @@ fn every_entry_is_its_own_statement() {
 }
 
 #[test]
-fn the_primary_key_struct_holds_only_key_columns() {
-    let key = TranslationPrimaryKey {
+fn the_key_structs_hold_only_key_and_version_columns() {
+    let key = TranslationPK {
         lang: "en".to_owned(),
         key: "greeting".to_owned(),
     };
@@ -332,6 +332,25 @@ fn the_primary_key_struct_holds_only_key_columns() {
     assert_eq!(
         serde_json::to_value(&key).unwrap(),
         json!({ "lang": "en", "key": "greeting" })
+    );
+
+    let key = WidgetPKV {
+        id: id(),
+        version: 4,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&key).unwrap(),
+        json!({ "id": id(), "version": 4 })
+    );
+
+    let key = AppendOnlyPKV {
+        id: Uuid::from_u128(1),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&key).unwrap(),
+        json!({ "id": Uuid::from_u128(1) })
     );
 }
 

@@ -18,8 +18,8 @@ use syn::Expr;
 mod annotations;
 mod derive_columns;
 mod derive_insert;
+mod derive_keys;
 mod derive_patch;
-mod derive_primary_key;
 mod derive_select;
 mod derive_value;
 
@@ -45,8 +45,9 @@ mod derive_value;
 /// two cannot disagree. A `#[db(flatten)]` field contributes a variant that
 /// wraps the fragment's own enum, so a flattened column stays selectable as
 /// `<Model>Column::<Field>(<Fragment>Column::<Column>)` and its columns follow
-/// the field's position in `all()`. A table also gets `<Model>PrimaryKey`,
-/// holding only the key fields, which an insert returns.
+/// the field's position in `all()`. A table also gets `<Model>PK`, holding the
+/// key fields an insert returns, and `<Model>PKV`, which adds the version
+/// column when the model has one or aliases `<Model>PK` when it does not.
 ///
 /// `query_ops` records which comparisons a column supports in
 /// `Column::query_ops`, and `orderable` whether it may be sorted, in
@@ -297,7 +298,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     let columns = derive_columns::expand(input, &annotations)?;
-    let primary_key = derive_primary_key::expand(input, &annotations)?;
+    let keys = derive_keys::expand(input, &annotations)?;
 
     Ok(quote! {
         #[automatically_derived]
@@ -307,7 +308,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        #primary_key
+        #keys
 
         #columns
     })

@@ -645,30 +645,44 @@ is listed in `MODELS`.
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
 
-## Generated primary key
+## Generated keys
 
-`#[derive(DbModel)]` on a table also emits `<Model>PrimaryKey`, holding exactly
+`#[derive(DbModel)]` on a table emits two key structs. `<Model>PK` holds exactly
 the primary key fields:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserPrimaryKey {
+pub struct UserPK {
     pub id: UserId,
 }
 
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for UserPrimaryKey {
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for UserPK {
     // decodes by the primary key column names
 }
 ```
 
-- Fields follow `TableMeta::primary_key`, which is model declaration order. A
+`<Model>PKV` holds the same fields and appends the version column when the model
+has one:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPKV {
+    pub id: UserId,
+    pub version: i64,
+}
+```
+
+- PK fields follow `TableMeta::primary_key`, which is model declaration order. A
   composite key contributes one field per key column.
-- The struct has the model's visibility and derives `Debug`, `Clone`,
-  `Serialize` and `Deserialize`. It implements `sqlx::FromRow`, so the
-  `RETURNING` list of an insert decodes into it.
-- A fragment or a subquery has no primary key and gets no key struct.
-- `DbInsert` uses it as `InsertRow::Key`, so an insert returns the key rather
-  than the whole row.
+- PKV appends `version` after the key fields. A model without a version gets an
+  alias instead: `pub type UserPKV = UserPK;`.
+- Both names have the model's visibility and work with `Debug`, `Clone`,
+  `Serialize`, `Deserialize` and `sqlx::FromRow`, so a `RETURNING` list decodes
+  into either.
+- A fragment or a subquery has no primary key and gets neither struct.
+- `DbInsert` uses PK as `InsertRow::Key`, so an insert returns the key rather
+  than the whole row. PKV is the shape a later derivation, such as deleting a
+  row with optimistic locking, can use.
 
 ## Generated patch
 
@@ -832,7 +846,7 @@ For a table, the derive also adds:
 let insert = UserInsert::new(Email("new@example.com".to_owned()))
     .set_email_verified_at(Utc::now());
 
-let inserted: Vec<UserPrimaryKey> = User::insert([insert]).execute(&pool).await?;
+let inserted: Vec<UserPK> = User::insert([insert]).execute(&pool).await?;
 ```
 
 - `InsertQuery::render()` returns one `RenderedInsert` per entry, each an
@@ -843,7 +857,7 @@ let inserted: Vec<UserPrimaryKey> = User::insert([insert]).execute(&pool).await?
 - An entry with every optional column `None` renders
   `INSERT INTO "table" DEFAULT VALUES RETURNING <primary key>`.
 - The `RETURNING` list names the primary key columns, so the result decodes into
-  `<Model>PrimaryKey`. Other generated columns are read back by key.
+  `<Model>PK`. Other generated columns are read back by key.
 - A supplied `created_at` also supplies `updated_at` when the latter is omitted,
   so imported rows keep their creation time.
 - A constraint violation is `InsertError::Sqlx`; the whole batch rolls back.
