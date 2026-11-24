@@ -18,6 +18,7 @@ use syn::Expr;
 mod annotations;
 mod derive_columns;
 mod derive_patch;
+mod derive_select;
 mod derive_value;
 
 /// Reads the `#[db(...)]` annotations of a model struct and generates
@@ -122,6 +123,26 @@ pub fn derive_db_value(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
 
     match derive_value::expand(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Generates the projected-row type of a model, `<Model>Select`.
+///
+/// Every column becomes a `dbkit::Selected<T>` field, which is `Set` when the
+/// query selected the column and `Absent` when it did not, so one type serves
+/// every projection of a table and a selected `NULL` stays distinct from a
+/// column nobody asked for. The derive also implements `dbkit::Selectable`,
+/// which is the bound `Query::query` needs.
+///
+/// Reads the same `#[db(...)]` annotations as `DbModel`: a `#[db(flatten)]`
+/// field nests the fragment's own select type.
+#[proc_macro_derive(DbSelect, attributes(db))]
+pub fn derive_db_select(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+
+    match derive_select::expand(&input) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }

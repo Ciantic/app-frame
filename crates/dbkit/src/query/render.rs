@@ -16,8 +16,15 @@ use crate::query::value::is_array;
 use sqlx::postgres::PgArguments;
 use std::sync::Arc;
 
-/// The statement `sqlx` executes, and the values it was built from.
-pub struct Built {
+/// The statement `sqlx` executes, and the values it was rendered from.
+///
+/// What [`Query::render`] returns: the SQL text and its arguments, for a caller
+/// that logs them, hands them to its own executor, or asserts on them in a
+/// test. [`Query::build`] takes the same pair straight to a `QueryAs`.
+///
+/// [`Query::build`]: crate::Query::build
+/// [`Query::render`]: crate::Query::render
+pub struct Rendered {
     pub sql: String,
     /// Assembled ahead of the query, which `query_as_with` then takes.
     pub arguments: PgArguments,
@@ -25,17 +32,17 @@ pub struct Built {
     pub values: Vec<Arc<dyn Bind>>,
 }
 
-impl std::fmt::Debug for Built {
+impl std::fmt::Debug for Rendered {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("Built")
+            .debug_struct("Rendered")
             .field("sql", &self.sql)
             .field("values", &self.values_json())
             .finish_non_exhaustive()
     }
 }
 
-impl Built {
+impl Rendered {
     /// The same values as JSON, for a readable assertion.
     pub fn values_json(&self) -> Vec<serde_json::Value> {
         self.values.iter().map(|value| value.as_json()).collect()
@@ -79,7 +86,7 @@ fn needs_array_column(operator: FilterOperator) -> bool {
     )
 }
 
-pub(crate) fn build<C: Column>(query: &Query<C>) -> Result<Built, Error> {
+pub(crate) fn render<C: Column>(query: &Query<C>) -> Result<Rendered, Error> {
     let table = query.table()?;
     let mut renderer = Renderer::default();
 
@@ -122,7 +129,7 @@ pub(crate) fn build<C: Column>(query: &Query<C>) -> Result<Built, Error> {
         renderer.push(Arc::new(i64::from(offset)))?;
     }
 
-    Ok(Built {
+    Ok(Rendered {
         sql: renderer.sql,
         arguments: renderer.arguments,
         values: renderer.values,

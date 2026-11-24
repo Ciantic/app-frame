@@ -738,17 +738,24 @@ A request type holds `Option<Columns<C>>`: absent means every column, and an
 explicitly empty list is an error rather than a second spelling of "all".
 
 `dbkit::Query` is what turns a [`Columns`](query-builder.md) selection and a
-tree of filters into SQL, so a handler does not build the statement:
+tree of filters into SQL, so a handler does not build the statement. With
+`#[derive(DbSelect)]` on the model it also decodes the rows:
 
 ```rust
+#[derive(DbModel, DbSelect)]
+#[db(table = "widget")]
+pub struct Widget {
+    /* ... */
+}
+
 let query = Widget::query()
     .select(request.select.unwrap_or_else(Columns::all))
     .filters([Widget::columns().name.eq("example")]);
-let built = query.build()?;
-let rows = sqlx::query_as_with(AssertSqlSafe(built.sql), built.arguments)
-    .fetch_all(&pool)
-    .await?;
+let rows: Vec<WidgetSelect> = query.build()?.fetch_all(&pool).await?;
 ```
+
+`render()` is the same rendering without running it, for a caller that wants the
+SQL text and its parameters.
 
 `sqlx::FromRow` cannot decode a partial projection: the derived implementation
 reads every field by name. A sparse selection therefore only suits a response

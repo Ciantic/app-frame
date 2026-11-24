@@ -274,6 +274,19 @@ pub trait DbType {
     const PG_DEFAULT: Option<&'static str> = None;
 }
 
+/// A model whose projected rows can be decoded.
+///
+/// `#[derive(DbSelect)]` generates `{Model}Select`, one `Selected<T>` field per
+/// column, and implements this trait to name it. [`Query::build`] is bounded on
+/// it, so a model without the derive can still render SQL but cannot be turned
+/// into a query that decodes rows.
+///
+/// [`Query::build`]: crate::Query::build
+pub trait Selectable: Model {
+    /// The struct a projected row decodes into.
+    type Select: crate::SelectRow + for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin;
+}
+
 /// A row type of one table, or a group of columns embedded in one.
 pub trait Model {
     /// What the model describes, built on first use and cached.

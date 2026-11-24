@@ -1,15 +1,16 @@
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbModel;
+use dbkit::DbSelect;
 use dbkit::Filter;
 use dbkit::Query;
+use dbkit::Selected;
 use pgtest_server::PgtestServer;
 use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
-use sqlx::Row;
 use uuid::Uuid;
 
-#[derive(DbModel)]
+#[derive(DbModel, DbSelect)]
 #[expect(
     dead_code,
     reason = "the fields exist only to derive the table metadata"
@@ -87,13 +88,15 @@ async fn seeded() -> PgPool {
 
 /// Runs the query and returns the `total` of every row, in table order.
 async fn totals(db: &PgPool, query: &Query<OrderLiveColumn>) -> Vec<i64> {
-    let built = query.build().unwrap();
-    let rows = sqlx::query_with(AssertSqlSafe(built.sql), built.arguments)
+    query
+        .build()
+        .unwrap()
         .fetch_all(db)
         .await
-        .unwrap();
-
-    rows.iter().map(|row| row.get("total")).collect()
+        .unwrap()
+        .iter()
+        .map(|row| row.total.into_set().expect("every total was selected"))
+        .collect()
 }
 
 fn c() -> OrderLiveColumns {
@@ -133,8 +136,8 @@ async fn a_list_length_does_not_change_the_statement() {
     let many = OrderLive::query().filters([c().status.in_(fifty)]);
 
     assert_eq!(
-        two.build().unwrap().sql,
-        many.build().unwrap().sql,
+        two.render().unwrap().sql,
+        many.render().unwrap().sql,
         "one statement shape, whatever the list holds"
     );
     // Both open rows and the paid one.
@@ -248,20 +251,16 @@ async fn a_sparse_selection_returns_its_columns() {
     let query = OrderLive::query()
         .select([OrderLiveColumn::Status, OrderLiveColumn::Total])
         .filters([c().total.eq(100)]);
-    let built = query.build().unwrap();
 
     assert_eq!(
-        built.sql,
+        query.render().unwrap().sql,
         "SELECT \"status\", \"total\" FROM \"orders_live\" WHERE \"total\" = $1"
     );
 
-    let row = sqlx::query_with(AssertSqlSafe(built.sql), built.arguments)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+    let row: OrderLiveSelect = query.build().unwrap().fetch_one(&db).await.unwrap();
 
-    assert_eq!(row.get::<String, _>("status"), "open");
-    assert_eq!(row.get::<i64, _>("total"), 100);
+    assert_eq!(row.status, Selected::Set("open".to_owned()));
+    assert_eq!(row.total, Selected::Set(100));
 }
 
 #[tokio::test]
@@ -271,39 +270,33 @@ async fn the_handles_build_a_projection_that_runs() {
     let query = OrderLive::query()
         .select(c().status)
         .filters([c().total.eq(100)]);
-    let built = query.build().unwrap();
 
     assert_eq!(
-        built.sql,
+        query.render().unwrap().sql,
         "SELECT \"status\" FROM \"orders_live\" WHERE \"total\" = $1"
     );
 
-    let row = sqlx::query_with(AssertSqlSafe(built.sql), built.arguments)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+    let row: OrderLiveSelect = query.build().unwrap().fetch_one(&db).await.unwrap();
 
-    assert_eq!(row.get::<String, _>("status"), "open");
+    assert_eq!(row.status, Selected::Set("open".to_owned()));
 }
 
 #[tokio::test]
 async fn a_projected_row_reports_the_columns_it_lacks() {
-    use sqlx::Column as _;
-    use sqlx::Row as _;
-
     let db = seeded().await;
 
-    let query = OrderLive::query().select([c().status.column(), c().total.column()]);
-    let built = query.build().unwrap();
-    let row = sqlx::query_with(AssertSqlSafe(built.sql), built.arguments)
+    let row: OrderLiveSelect = OrderLive::query()
+        .select([c().status.column(), c().total.column()])
+        .build()
+        .unwrap()
         .fetch_one(&db)
         .await
         .unwrap();
 
-    let names: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
-
-    assert_eq!(names, ["status", "total"]);
-    assert!(row.try_get::<Uuid, _>("id").is_err());
+    assert!(row.status.is_set());
+    assert!(row.total.is_set());
+    assert!(row.id.is_absent(), "the projection left it out");
+    assert!(row.tags.is_absent());
 }
 
 #[tokio::test]
@@ -321,4 +314,152 @@ async fn the_json_face_and_the_rust_face_agree() {
     assert_eq!(parsed, rust);
     assert_eq!(totals(&db, &parsed).await, [100, 500]);
     assert_eq!(totals(&db, &rust).await, [100, 500]);
+}
+
+#[tokio::test]
+async fn build_returns_a_query_that_decodes_selected_rows() {
+    let db = seeded().await;
+
+    let rows: Vec<OrderLiveSelect> = OrderLive::query()
+        .select([c().status.column(), c().total.column()])
+        .filters([c().status.eq("open")])
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].total, Selected::Set(100));
+    assert_eq!(rows[1].total, Selected::Set(250));
+    assert!(rows[0].id.is_absent(), "the projection left it out");
+    assert!(rows[0].tags.is_absent());
+}
+
+#[tokio::test]
+async fn a_select_star_row_sets_every_field() {
+    let db = seeded().await;
+
+    let rows: Vec<OrderLiveSelect> = OrderLive::query()
+        .limit(1)
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].id.is_set());
+    assert!(rows[0].deleted_at.is_set(), "selected, and `NULL`");
+    assert_eq!(rows[0].deleted_at, Selected::Set(None));
+}
+
+#[tokio::test]
+async fn the_query_can_be_held_before_it_runs() {
+    let db = seeded().await;
+
+    let query = OrderLive::query()
+        .filters([c().total.eq(250)])
+        .build()
+        .unwrap();
+
+    // The value owns its SQL and arguments, so it outlives the builder.
+    let row: OrderLiveSelect = query.fetch_one(&db).await.unwrap();
+
+    assert_eq!(row.total, Selected::Set(250));
+}
+
+#[tokio::test]
+async fn fetch_one_errors_and_fetch_optional_reports_none() {
+    let db = seeded().await;
+
+    let missing = OrderLive::query()
+        .filters([c().total.eq(-1)])
+        .build()
+        .unwrap()
+        .fetch_one(&db)
+        .await;
+
+    assert!(
+        matches!(missing, Err(sqlx::Error::RowNotFound)),
+        "{missing:?}"
+    );
+
+    let optional: Option<OrderLiveSelect> = OrderLive::query()
+        .filters([c().total.eq(-1)])
+        .build()
+        .unwrap()
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+
+    assert!(optional.is_none());
+}
+
+#[tokio::test]
+async fn the_query_runs_a_filter_and_paging() {
+    let db = seeded().await;
+
+    let rows: Vec<OrderLiveSelect> = OrderLive::query()
+        .select(c().total)
+        .filters([c().status.in_(["open", "paid"])])
+        .limit(2)
+        .offset(1)
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.total).collect::<Vec<_>>(),
+        [Selected::Set(250), Selected::Set(500)]
+    );
+}
+
+#[tokio::test]
+async fn build_surfaces_the_render_error_before_any_sql_runs() {
+    let db = seeded().await;
+
+    // `QueryAs` is not `Debug`, so the error is matched rather than unwrapped.
+    let Err(error) = OrderLive::query().select(dbkit::Columns::default()).build() else {
+        panic!("the projection is empty");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "a selection needs at least one column; omit `select` to read every column"
+    );
+
+    let _ = db;
+}
+
+#[tokio::test]
+async fn the_query_takes_a_transaction_and_a_connection() {
+    let db = seeded().await;
+
+    let mut transaction = db.begin().await.unwrap();
+    let in_transaction: Vec<OrderLiveSelect> = OrderLive::query()
+        .select(c().total)
+        .filters([c().total.eq(100)])
+        .build()
+        .unwrap()
+        .fetch_all(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+
+    assert_eq!(in_transaction[0].total, Selected::Set(100));
+
+    let mut connection = db.acquire().await.unwrap();
+    let on_connection: Vec<OrderLiveSelect> = OrderLive::query()
+        .select(c().total)
+        .filters([c().total.eq(250)])
+        .build()
+        .unwrap()
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+
+    assert_eq!(on_connection[0].total, Selected::Set(250));
 }

@@ -88,7 +88,7 @@ fn c() -> OrderColumns {
 }
 
 fn built(query: &Query<OrderColumn>) -> (String, Vec<serde_json::Value>) {
-    let built = query.build().expect("the query builds");
+    let built = query.render().expect("the query renders");
     let values = built.values_json();
 
     (built.sql, values)
@@ -113,7 +113,7 @@ fn parse_error_of<C: Column>(filters: &str) -> String {
 
 fn build_error(query: &Query<OrderColumn>) -> String {
     query
-        .build()
+        .render()
         .expect_err("the query is rejected")
         .to_string()
 }
@@ -819,7 +819,7 @@ struct Reserved {
 }
 
 fn built_reserved(query: &Query<ReservedColumn>) -> (String, Vec<serde_json::Value>) {
-    let built = query.build().expect("the query builds");
+    let built = query.render().expect("the query renders");
     let values = built.values_json();
 
     (built.sql, values)
@@ -917,7 +917,7 @@ fn the_limit_cap_is_a_build_error() {
     let query = Order::query().limit(1001);
 
     assert_eq!(build_error(&query), "`limit` must be at most 1000");
-    assert!(Order::query().limit(1000).build().is_ok());
+    assert!(Order::query().limit(1000).render().is_ok());
 }
 
 #[test]
@@ -936,9 +936,9 @@ fn the_depth_cap_is_eight_groups() {
         Order::query().filters(filter)
     }
 
-    assert!(nested(8).build().is_ok());
+    assert!(nested(8).render().is_ok());
     assert_eq!(
-        nested(9).build().unwrap_err().to_string(),
+        nested(9).render().unwrap_err().to_string(),
         "filters nest deeper than 8 levels"
     );
 }
@@ -1039,7 +1039,7 @@ fn a_flattened_handle_builds_a_filter_of_the_parent_model() {
 }
 
 fn built_frame(query: &Query<FrameColumn>) -> (String, Vec<serde_json::Value>) {
-    let built = query.build().expect("the query builds");
+    let built = query.render().expect("the query renders");
     let values = built.values_json();
 
     (built.sql, values)
@@ -1048,7 +1048,7 @@ fn built_frame(query: &Query<FrameColumn>) -> (String, Vec<serde_json::Value>) {
 #[test]
 fn a_fragment_has_no_table() {
     let message = Query::<SizeColumn>::new()
-        .build()
+        .render()
         .expect_err("a fragment has no table")
         .to_string();
 
@@ -1112,7 +1112,7 @@ fn a_newtype_takes_a_borrow() {
         Order::query().filters([c().id.in_(std::slice::from_ref(&id))]),
     ] {
         assert_eq!(
-            query.build().unwrap().values_json(),
+            query.render().unwrap().values_json(),
             [json!([id.0.to_string()])]
         );
     }

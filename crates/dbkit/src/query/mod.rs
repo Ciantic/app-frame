@@ -10,7 +10,12 @@ use crate::Column;
 use crate::Columns;
 use crate::FilterOperator;
 use crate::Meta;
+use crate::Selectable;
 use crate::model::Model;
+use sqlx::AssertSqlSafe;
+use sqlx::postgres::PgArguments;
+use sqlx::postgres::Postgres;
+use sqlx::query::QueryAs;
 use std::fmt;
 
 pub mod capability;
@@ -26,7 +31,7 @@ pub use filter::Group;
 pub use filter::IntoColumns;
 pub use filter::Leaf;
 pub use filter::Operand;
-pub use render::Built;
+pub use render::Rendered;
 pub use value::Bind;
 
 /// The largest `LIMIT` a request may ask for.
@@ -40,6 +45,11 @@ pub const MAX_NODES: usize = 64;
 
 /// How many values one list operand may hold.
 pub const MAX_LIST: usize = 100;
+
+/// The statement [`Query::build`] returns: the SQL and its arguments, ready to
+/// run, decoding into the model's select type.
+pub type SelectedQuery<C> =
+    QueryAs<'static, Postgres, <<C as Column>::Model as Selectable>::Select, PgArguments>;
 
 /// One query of one table.
 ///
@@ -117,8 +127,38 @@ impl<C: Column> Query<C> {
     }
 
     /// The statement and its parameters, or the first problem the tree has.
-    pub fn build(&self) -> Result<Built, Error> {
-        render::build(self)
+    ///
+    /// For a caller that wants the SQL text and the bound values: to log them,
+    /// to hand them to its own executor, or to assert on them in a test.
+    /// [`build`](Self::build) is the same rendering taken straight to a query.
+    pub fn render(&self) -> Result<Rendered, Error> {
+        render::render(self)
+    }
+
+    /// The same statement as a `QueryAs`, ready to run.
+    ///
+    /// The SQL and its arguments are owned, so the value can be held, passed
+    /// around and only then awaited:
+    ///
+    /// ```ignore
+    /// let rows = Order::query().filters([c.status.eq("open")]).build()?.fetch_all(&pool).await?;
+    /// ```
+    ///
+    /// Decoding goes through the model's select type, so a sparse projection
+    /// shows up as [`Selected::Absent`](crate::Selected::Absent) fields rather
+    /// than as a decode error.
+    pub fn build(&self) -> Result<SelectedQuery<C>, Error>
+    where
+        C::Model: Selectable,
+    {
+        let Rendered { sql, arguments, .. } = self.render()?;
+
+        Ok(
+            sqlx::query_as_with::<_, <C::Model as Selectable>::Select, _>(
+                AssertSqlSafe(sql),
+                arguments,
+            ),
+        )
     }
 
     /// The table the query reads, or an error when the model is a fragment.
