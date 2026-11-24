@@ -3,8 +3,9 @@
 //! `DbModel` parses the `#[db(...)]` annotations and emits
 //! `impl dbkit::Model`, whose `META` const describes the table at runtime.
 //! `DbPatch` and `DbInsert` read the same annotations and emit the model's
-//! patch and insert input types, and the same expansion emits the model's
-//! selectable column enum. `DbType` records the database type of a value type,
+//! patch and insert input types, and `DbDelete` adds the model's batch delete
+//! by key. The same `DbModel` expansion emits the model's selectable column
+//! enum. `DbType` records the database type of a value type,
 //! so a model field of that type needs no `pgtype` or `pgdefault` of its own.
 //! `DbValue` gives a newtype the borrow conversion a column handle takes.
 
@@ -17,6 +18,7 @@ use syn::Expr;
 
 mod annotations;
 mod derive_columns;
+mod derive_delete;
 mod derive_insert;
 mod derive_keys;
 mod derive_patch;
@@ -47,7 +49,8 @@ mod derive_value;
 /// `<Model>Column::<Field>(<Fragment>Column::<Column>)` and its columns follow
 /// the field's position in `all()`. A table also gets `<Model>PK`, holding the
 /// key fields an insert returns, and `<Model>PKV`, which adds the version
-/// column when the model has one or aliases `<Model>PK` when it does not.
+/// column when the model has one or aliases `<Model>PK` when it does not and is
+/// the input of `#[derive(DbDelete)]`.
 ///
 /// `query_ops` records which comparisons a column supports in
 /// `Column::query_ops`, and `orderable` whether it may be sorted, in
@@ -151,6 +154,27 @@ pub fn derive_db_insert(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
 
     match derive_insert::expand(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Adds `Model::delete(entries)`, a batch that deletes rows by primary key.
+///
+/// Reads the same `#[db(...)]` annotations as `DbModel` and implements
+/// `dbkit::DeleteKey` for `{Model}PKV`, the key struct `DbModel` generates. The
+/// version column, when the model has one, is part of the key, so every delete
+/// checks it and a stale version deletes nothing. The input is a batch of
+/// `{Model}PKV`; one `DELETE` per entry runs in one transaction, and every
+/// entry must delete exactly one row or the whole batch rolls back.
+///
+/// A `#[db(subquery = "...")]` or `#[db(fragment)]` model has no table to
+/// delete from and is rejected.
+#[proc_macro_derive(DbDelete, attributes(db))]
+pub fn derive_db_delete(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+
+    match derive_delete::expand(&input) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }

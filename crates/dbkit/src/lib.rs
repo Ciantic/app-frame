@@ -6,6 +6,9 @@
 //! transaction. `#[derive(DbInsert)]` generates an insert input whose required
 //! fields are plain values and whose defaulted or nullable fields are optional,
 //! and [`InsertQuery`] inserts a batch and returns the inserted primary keys.
+//! `#[derive(DbDelete)]` adds `Model::delete`, which deletes a batch by key and
+//! checks each row's version, and [`DeleteQuery`] runs the batch in one
+//! transaction.
 //! [`Model`] and its [`TableMeta`] describe a table at runtime, [`SubQuery`]
 //! describes a model whose row source is a query, and
 //! [`schema::check_live_schema_against_models`] compares a list of tables with
@@ -20,6 +23,7 @@
 //! projection can report its absent columns.
 
 mod columns;
+mod delete;
 mod insert;
 mod model;
 mod patch;
@@ -29,12 +33,17 @@ mod select;
 
 pub use columns::Column;
 pub use columns::Columns;
+pub use dbkit_macros::DbDelete;
 pub use dbkit_macros::DbInsert;
 pub use dbkit_macros::DbModel;
 pub use dbkit_macros::DbPatch;
 pub use dbkit_macros::DbSelect;
 pub use dbkit_macros::DbType;
 pub use dbkit_macros::DbValue;
+pub use delete::DeleteError;
+pub use delete::DeleteKey;
+pub use delete::DeleteQuery;
+pub use delete::RenderedDelete;
 pub use insert::InsertError;
 pub use insert::InsertQuery;
 pub use insert::InsertRow;

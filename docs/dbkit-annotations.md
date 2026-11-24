@@ -22,10 +22,11 @@ A struct is one of three shapes:
 
 `#[derive(DbPatch)]` and `#[derive(DbInsert)]` read the same annotations to
 generate the model's patch and insert input types, which `garde` validates.
-[Patch builder](patch-builder.md) and [Insert builder](insert-builder.md)
-document the generated queries. The same `#[derive(DbModel)]` expansion also
-generates the model's selectable column enum, `<Model>Column`. The accepted
-syntax stays as documented here.
+`#[derive(DbDelete)]` reads them to link the generated key struct to a batch
+delete. [Patch builder](patch-builder.md), [Insert builder](insert-builder.md)
+and [Delete builder](delete-builder.md) document the generated queries. The
+same `#[derive(DbModel)]` expansion also generates the model's selectable
+column enum, `<Model>Column`. The accepted syntax stays as documented here.
 
 ## Example
 
@@ -681,8 +682,8 @@ pub struct UserPKV {
   into either.
 - A fragment or a subquery has no primary key and gets neither struct.
 - `DbInsert` uses PK as `InsertRow::Key`, so an insert returns the key rather
-  than the whole row. PKV is the shape a later derivation, such as deleting a
-  row with optimistic locking, can use.
+  than the whole row. `DbDelete` uses PKV as its input, so a delete names the
+  row and checks its version.
 
 ## Generated patch
 
@@ -790,6 +791,39 @@ User::patch([patch]).execute(&pool).await?;
   value.
 
 See [Patch builder](patch-builder.md) for the transaction behavior, SQL shape
+and error cases.
+
+## Generated delete
+
+`#[derive(DbDelete)]` on a table implements `dbkit::DeleteKey` for the
+`{Model}PKV` that `DbModel` generates, and adds `Model::delete(entries)`:
+
+```rust
+User::delete([
+    UserPKV { id: first, version: 3 },
+    UserPKV { id: second, version: 7 },
+])
+.execute(&pool)
+.await?;
+```
+
+- The input is the key struct, not a new `{Model}Delete` type. `DeleteKey::key`
+  lists the primary key values in `TableMeta::primary_key` order, and
+  `DeleteKey::version` is `Some` exactly when the model has a version.
+- A versioned model renders `"version" = $n` in `WHERE`, so a stale version
+  deletes nothing. A model without a version has
+  `type {Model}PKV = {Model}PK` and deletes by key alone.
+- `DeleteQuery::render()` returns one `dbkit::RenderedDelete` per entry, each a
+  `DELETE` whose identifiers come from `TableMeta`.
+- `DeleteQuery::execute` renders every entry before opening a transaction. A
+  pool or plain connection starts one; a `&mut Transaction` creates a savepoint.
+- Every entry must delete exactly one row. A missing row or a stale version is
+  `DeleteError::NotDeleted`, and the whole batch rolls back, so a four-entry
+  batch never leaves three rows deleted.
+- A fragment or subquery model cannot derive `DbDelete`: there is no table to
+  delete from.
+
+See [Delete builder](delete-builder.md) for the transaction behavior, SQL shape
 and error cases.
 
 ## Generated insert
@@ -1125,6 +1159,8 @@ These are deliberately out of scope until a model needs them:
 
 - Soft-delete columns (`deleted_at`) and any read filter convention around
   them.
+- Deleting by an arbitrary filter: the query builder is read-only, and
+  `DbDelete` deletes by primary key only.
 - Column names that differ from field names.
 - Non-`i64` version types.
 - Roles inside a fragment, such as an embedded `Audit` fragment carrying

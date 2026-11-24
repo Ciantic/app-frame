@@ -81,8 +81,8 @@ pub struct UserPKV {
   optional; one without a default is required.
 - `DbModel` also generates `{Model}PK`, holding exactly the primary key fields,
   which an insert returns. `{Model}PKV` adds the version column, when the model
-  has one, for a later operation that identifies a row and checks its version.
-  A model without a version gets `type {Model}PKV = {Model}PK`.
+  has one, and is the input of [`::delete()`](delete-builder.md). A model
+  without a version gets `type {Model}PKV = {Model}PK`.
 
 ### Defaults
 
