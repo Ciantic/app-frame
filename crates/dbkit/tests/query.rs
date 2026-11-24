@@ -4,6 +4,7 @@ use dbkit::Bind;
 use dbkit::Column;
 use dbkit::Columns;
 use dbkit::DbModel;
+use dbkit::DbSelect;
 use dbkit::DbType;
 use dbkit::DbValue;
 use dbkit::Filter;
@@ -21,7 +22,7 @@ use uuid::Uuid;
 #[db(pgtype = "uuid")]
 struct OrderId(pub Uuid);
 
-#[derive(DbModel)]
+#[derive(DbModel, DbSelect, sqlx::FromRow)]
 #[expect(
     dead_code,
     reason = "the fields exist only to derive the table metadata"
@@ -918,6 +919,52 @@ fn the_limit_cap_is_a_build_error() {
 
     assert_eq!(build_error(&query), "`limit` must be at most 1000");
     assert!(Order::query().limit(1000).render().is_ok());
+}
+
+#[test]
+fn build_takes_every_column_but_not_a_subset() {
+    // A full selection in any order renders the same columns as `SELECT *`.
+    let every_column: Columns<OrderColumn> = OrderColumn::all().iter().rev().copied().collect();
+    let _ = Order::query().select(every_column).build().unwrap();
+
+    let Err(error) = Order::query().select([c().total.column()]).build() else {
+        panic!("the projection leaves columns out");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "`build` decodes every column; the query selects a subset, so call `build_selected` or \
+         omit `select`"
+    );
+}
+
+#[test]
+fn build_reports_an_empty_selection_as_such() {
+    // The render check comes first, so an empty selection is not reported as a
+    // subset of the columns.
+    let Err(error) = Order::query().select(Columns::default()).build() else {
+        panic!("the projection is empty");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "a selection needs at least one column; omit `select` to read every column"
+    );
+}
+
+#[test]
+fn build_selected_needs_an_explicit_selection() {
+    let Err(error) = Order::query().build_selected() else {
+        panic!("the query reads every column");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "`build_selected` decodes a projection; the query has no `select`, so call `build` or \
+         name the columns"
+    );
+
+    let _ = Order::query().select(c().total).build_selected().unwrap();
 }
 
 #[test]

@@ -9,8 +9,10 @@
 //! [`Column`] and [`Columns`] name the selectable columns of a model;
 //! `#[derive(DbModel)]` generates the enum and [`ErasedColumn`] is the erased
 //! view a [`TableMeta`] holds. [`Query`] is the filter of one table, built from
-//! the typed [`ColumnRef`] handles or parsed from JSON, and
-//! [`Query::build`] renders it to the statement `sqlx` executes.
+//! the typed [`ColumnRef`] handles or parsed from JSON, and [`Query::build`]
+//! renders it to the statement `sqlx` executes, decoding into the model, while
+//! [`Query::build_selected`] decodes into the model's select type so a sparse
+//! projection can report its absent columns.
 
 mod columns;
 mod model;

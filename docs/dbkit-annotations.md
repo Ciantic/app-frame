@@ -751,7 +751,7 @@ pub struct Widget {
 let query = Widget::query()
     .select(request.select.unwrap_or_else(Columns::all))
     .filters([Widget::columns().name.eq("example")]);
-let rows: Vec<WidgetSelect> = query.build()?.fetch_all(&pool).await?;
+let rows: Vec<WidgetSelect> = query.build_selected()?.fetch_all(&pool).await?;
 ```
 
 `render()` is the same rendering without running it, for a caller that wants the
@@ -760,6 +760,20 @@ SQL text and its parameters.
 `sqlx::FromRow` cannot decode a partial projection: the derived implementation
 reads every field by name. A sparse selection therefore only suits a response
 built dynamically or a projection type that matches the requested columns.
+
+`build_selected()` needs an explicit `select`; a query without one is
+`Error::MissingSelection`, because the model is what decodes every column:
+
+```rust
+let rows: Vec<Widget> = Widget::query()
+    .filters([Widget::columns().name.eq("example")])
+    .build()?
+    .fetch_all(&pool)
+    .await?;
+```
+
+`build()` requires every column and rejects a `select` that leaves one out with
+`Error::ProjectedModel`, before any SQL runs.
 
 ## Collecting models
 

@@ -10,7 +10,7 @@ use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[derive(DbModel, DbSelect)]
+#[derive(DbModel, DbSelect, sqlx::FromRow)]
 #[expect(
     dead_code,
     reason = "the fields exist only to derive the table metadata"
@@ -95,7 +95,7 @@ async fn totals(db: &PgPool, query: &Query<OrderLiveColumn>) -> Vec<i64> {
         .await
         .unwrap()
         .iter()
-        .map(|row| row.total.into_set().expect("every total was selected"))
+        .map(|row| row.total)
         .collect()
 }
 
@@ -257,7 +257,12 @@ async fn a_sparse_selection_returns_its_columns() {
         "SELECT \"status\", \"total\" FROM \"orders_live\" WHERE \"total\" = $1"
     );
 
-    let row: OrderLiveSelect = query.build().unwrap().fetch_one(&db).await.unwrap();
+    let row: OrderLiveSelect = query
+        .build_selected()
+        .unwrap()
+        .fetch_one(&db)
+        .await
+        .unwrap();
 
     assert_eq!(row.status, Selected::Set("open".to_owned()));
     assert_eq!(row.total, Selected::Set(100));
@@ -276,7 +281,12 @@ async fn the_handles_build_a_projection_that_runs() {
         "SELECT \"status\" FROM \"orders_live\" WHERE \"total\" = $1"
     );
 
-    let row: OrderLiveSelect = query.build().unwrap().fetch_one(&db).await.unwrap();
+    let row: OrderLiveSelect = query
+        .build_selected()
+        .unwrap()
+        .fetch_one(&db)
+        .await
+        .unwrap();
 
     assert_eq!(row.status, Selected::Set("open".to_owned()));
 }
@@ -287,7 +297,7 @@ async fn a_projected_row_reports_the_columns_it_lacks() {
 
     let row: OrderLiveSelect = OrderLive::query()
         .select([c().status.column(), c().total.column()])
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_one(&db)
         .await
@@ -323,7 +333,7 @@ async fn build_returns_a_query_that_decodes_selected_rows() {
     let rows: Vec<OrderLiveSelect> = OrderLive::query()
         .select([c().status.column(), c().total.column()])
         .filters([c().status.eq("open")])
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_all(&db)
         .await
@@ -337,12 +347,44 @@ async fn build_returns_a_query_that_decodes_selected_rows() {
 }
 
 #[tokio::test]
-async fn a_select_star_row_sets_every_field() {
+async fn build_decodes_the_whole_row_into_the_model() {
+    let db = seeded().await;
+
+    let rows: Vec<OrderLive> = OrderLive::query()
+        .filters([c().status.eq("open")])
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].total, 100);
+    assert_eq!(rows[1].total, 250);
+    assert!(rows[0].deleted_at.is_none(), "the column is `NULL`");
+}
+
+#[tokio::test]
+async fn build_selected_rejects_a_query_without_a_selection() {
+    let Err(error) = OrderLive::query().build_selected() else {
+        panic!("the query reads every column");
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "`build_selected` decodes a projection; the query has no `select`, so call `build` or \
+         name the columns"
+    );
+}
+
+#[tokio::test]
+async fn a_selection_of_every_column_sets_every_field() {
     let db = seeded().await;
 
     let rows: Vec<OrderLiveSelect> = OrderLive::query()
+        .select(dbkit::Columns::<OrderLiveColumn>::all())
         .limit(1)
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_all(&db)
         .await
@@ -359,8 +401,9 @@ async fn the_query_can_be_held_before_it_runs() {
     let db = seeded().await;
 
     let query = OrderLive::query()
+        .select(c().total)
         .filters([c().total.eq(250)])
-        .build()
+        .build_selected()
         .unwrap();
 
     // The value owns its SQL and arguments, so it outlives the builder.
@@ -374,8 +417,9 @@ async fn fetch_one_errors_and_fetch_optional_reports_none() {
     let db = seeded().await;
 
     let missing = OrderLive::query()
+        .select(c().total)
         .filters([c().total.eq(-1)])
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_one(&db)
         .await;
@@ -386,8 +430,9 @@ async fn fetch_one_errors_and_fetch_optional_reports_none() {
     );
 
     let optional: Option<OrderLiveSelect> = OrderLive::query()
+        .select(c().total)
         .filters([c().total.eq(-1)])
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_optional(&db)
         .await
@@ -405,7 +450,7 @@ async fn the_query_runs_a_filter_and_paging() {
         .filters([c().status.any(["open", "paid"])])
         .limit(2)
         .offset(1)
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_all(&db)
         .await
@@ -422,7 +467,10 @@ async fn build_surfaces_the_render_error_before_any_sql_runs() {
     let db = seeded().await;
 
     // `QueryAs` is not `Debug`, so the error is matched rather than unwrapped.
-    let Err(error) = OrderLive::query().select(dbkit::Columns::default()).build() else {
+    let Err(error) = OrderLive::query()
+        .select(dbkit::Columns::default())
+        .build_selected()
+    else {
         panic!("the projection is empty");
     };
 
@@ -442,7 +490,7 @@ async fn the_query_takes_a_transaction_and_a_connection() {
     let in_transaction: Vec<OrderLiveSelect> = OrderLive::query()
         .select(c().total)
         .filters([c().total.eq(100)])
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_all(&mut *transaction)
         .await
@@ -455,7 +503,7 @@ async fn the_query_takes_a_transaction_and_a_connection() {
     let on_connection: Vec<OrderLiveSelect> = OrderLive::query()
         .select(c().total)
         .filters([c().total.eq(250)])
-        .build()
+        .build_selected()
         .unwrap()
         .fetch_all(&mut *connection)
         .await

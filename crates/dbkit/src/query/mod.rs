@@ -14,6 +14,7 @@ use crate::Selectable;
 use crate::model::Model;
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::PgArguments;
+use sqlx::postgres::PgRow;
 use sqlx::postgres::Postgres;
 use sqlx::query::QueryAs;
 use std::fmt;
@@ -46,8 +47,8 @@ pub const MAX_NODES: usize = 64;
 /// How many values one list operand may hold.
 pub const MAX_LIST: usize = 100;
 
-/// The statement [`Query::build`] returns: the SQL and its arguments, ready to
-/// run, decoding into the model's select type.
+/// The statement [`Query::build_selected`] returns: the SQL and its arguments,
+/// ready to run, decoding into the model's select type.
 pub type SelectedQuery<C> =
     QueryAs<'static, Postgres, <<C as Column>::Model as Selectable>::Select, PgArguments>;
 
@@ -130,27 +131,67 @@ impl<C: Column> Query<C> {
     ///
     /// For a caller that wants the SQL text and the bound values: to log them,
     /// to hand them to its own executor, or to assert on them in a test.
-    /// [`build`](Self::build) is the same rendering taken straight to a query.
+    /// [`build`](Self::build) and [`build_selected`](Self::build_selected) are
+    /// the same rendering taken straight to a query.
     pub fn render(&self) -> Result<Rendered, Error> {
         render::render(self)
     }
 
-    /// The same statement as a `QueryAs`, ready to run.
+    /// The same statement as a `QueryAs`, decoding into the model.
     ///
     /// The SQL and its arguments are owned, so the value can be held, passed
     /// around and only then awaited:
     ///
     /// ```ignore
-    /// let rows = Order::query().filters([c.status.eq("open")]).build()?.fetch_all(&pool).await?;
+    /// let rows: Vec<Order> = Order::query().filters([c.status.eq("open")]).build()?.fetch_all(&pool).await?;
     /// ```
     ///
-    /// Decoding goes through the model's select type, so a sparse projection
-    /// shows up as [`Selected::Absent`](crate::Selected::Absent) fields rather
-    /// than as a decode error.
-    pub fn build(&self) -> Result<SelectedQuery<C>, Error>
+    /// `C::Model` must derive `sqlx::FromRow`, which the service models already
+    /// do. The query has to read every column — no `select`, or one that names
+    /// all of them — because a partial row cannot be decoded into the model;
+    /// [`build_selected`](Self::build_selected) is the projection form.
+    pub fn build(&self) -> Result<QueryAs<'static, Postgres, C::Model, PgArguments>, Error>
+    where
+        C::Model: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
+    {
+        let rendered = self.render()?;
+
+        if let Some(select) = &self.select
+            && !C::all().iter().all(|column| select.contains(*column))
+        {
+            return Err(Error::ProjectedModel);
+        }
+
+        let Rendered { sql, arguments, .. } = rendered;
+
+        Ok(sqlx::query_as_with::<_, C::Model, _>(
+            AssertSqlSafe(sql),
+            arguments,
+        ))
+    }
+
+    /// The same statement, decoding into the model's select type.
+    ///
+    /// Use it for a sparse projection: decoding goes through `{Model}Select`,
+    /// so a column the query left out is a
+    /// [`Selected::Absent`](crate::Selected::Absent) field rather than a decode
+    /// error.
+    ///
+    /// It needs an explicit `select`: a query that reads every column decodes
+    /// into the model through [`build`](Self::build), and asking for the select
+    /// type there is [`Error::MissingSelection`].
+    ///
+    /// ```ignore
+    /// let rows = Order::query().select([c.total.column()]).build_selected()?.fetch_all(&pool).await?;
+    /// ```
+    pub fn build_selected(&self) -> Result<SelectedQuery<C>, Error>
     where
         C::Model: Selectable,
     {
+        if self.select.is_none() {
+            return Err(Error::MissingSelection);
+        }
+
         let Rendered { sql, arguments, .. } = self.render()?;
 
         Ok(
@@ -291,6 +332,12 @@ pub enum Error {
     NotATable,
     /// A selection with no columns, which is neither `SELECT *` nor valid SQL.
     EmptySelection,
+    /// A `select` that leaves a column out, which [`Query::build`] cannot
+    /// decode into the model.
+    ProjectedModel,
+    /// [`Query::build_selected`] on a query with no `select`, which
+    /// [`Query::build`] decodes instead.
+    MissingSelection,
     /// sqlx refused a value while the arguments were assembled.
     Encode(sqlx::Error),
     Json(serde_json::Error),
@@ -411,6 +458,14 @@ impl fmt::Display for Error {
             }
             Error::EmptySelection => formatter.write_str(
                 "a selection needs at least one column; omit `select` to read every column",
+            ),
+            Error::ProjectedModel => formatter.write_str(
+                "`build` decodes every column; the query selects a subset, so call \
+                 `build_selected` or omit `select`",
+            ),
+            Error::MissingSelection => formatter.write_str(
+                "`build_selected` decodes a projection; the query has no `select`, so call \
+                 `build` or name the columns",
             ),
             Error::Encode(error) => error.fmt(formatter),
             Error::Json(error) => error.fmt(formatter),
