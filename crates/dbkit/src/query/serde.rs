@@ -1,9 +1,14 @@
-//! The flat JSON form: one key per filter, nesting through `and` and `or`.
+//! The JSON form: a `filters` object, and the paging keys beside it.
 //!
-//! A key is a column name with an optional `__operator` suffix, so a level is
-//! one object and its keys combine with `AND`. A group is the one reserved key
-//! `and` or `or` holding an array of objects, one per child, which is what
-//! keeps any finite tree expressible without a positional syntax.
+//! Inside `filters` a key is a column name with an optional `__operator`
+//! suffix, so one object is a level and its keys combine with `AND`. A group is
+//! the reserved key `and` or `or` holding an array of objects, one per child,
+//! which is what keeps any finite tree expressible without a positional syntax.
+//!
+//! `filters` is a wrapper rather than the whole payload because paging is not a
+//! filter. Keeping the two apart means the top level has no columns at all, so
+//! a column named `limit` or `filters` is just a column, and no reserved key
+//! has to outrank one.
 
 use crate::Column;
 use crate::FilterOperator;
@@ -29,8 +34,10 @@ use std::sync::Arc;
 impl<C: Column> Serialize for Query<C> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(None)?;
-        serialize_level(&self.filters, &mut map)?;
 
+        if !self.filters.is_empty() {
+            map.serialize_entry("filters", &Level(&self.filters))?;
+        }
         if let Some(limit) = self.limit {
             map.serialize_entry("limit", &limit)?;
         }
@@ -42,44 +49,46 @@ impl<C: Column> Serialize for Query<C> {
     }
 }
 
-/// Writes the children of one implicit conjunction as flat keys, falling back
-/// to an explicit `and` list when two children would need the same key.
-fn serialize_level<C: Column, M: SerializeMap>(
-    filters: &[Filter<C>],
-    map: &mut M,
-) -> Result<(), M::Error> {
-    let mut keys = Vec::with_capacity(filters.len());
-    let mut collision = false;
+/// One filter object: the children of an implicit conjunction, written as flat
+/// keys, falling back to an explicit `and` list when two children would need
+/// the same key.
+struct Level<'a, C: Column>(&'a [Filter<C>]);
 
-    for filter in filters {
-        let key = match filter {
-            Filter::Leaf(leaf) => leaf_key(leaf),
-            Filter::Group(group) => {
-                reserved::<C>(group.combinator).map_err(M::Error::custom)?;
-                group.combinator.as_str().to_owned()
-            }
-        };
+impl<C: Column> Serialize for Level<'_, C> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut keys = Vec::with_capacity(self.0.len());
+        let mut collision = false;
 
-        collision |= keys.contains(&key);
-        keys.push(key);
-    }
+        for filter in self.0 {
+            let key = match filter {
+                Filter::Leaf(leaf) => leaf_key(leaf),
+                Filter::Group(group) => {
+                    reserved::<C>(group.combinator).map_err(S::Error::custom)?;
+                    group.combinator.as_str().to_owned()
+                }
+            };
 
-    if collision {
-        map.serialize_entry("and", &Children(filters))?;
+            collision |= keys.contains(&key);
+            keys.push(key);
+        }
 
-        return Ok(());
-    }
+        let mut map = serializer.serialize_map(Some(if collision { 1 } else { keys.len() }))?;
 
-    for (filter, key) in filters.iter().zip(&keys) {
-        match filter {
-            Filter::Leaf(leaf) => map.serialize_entry(key, &leaf_value(leaf))?,
-            Filter::Group(group) => {
-                map.serialize_entry(key, &Children(&group.filters))?;
+        if collision {
+            map.serialize_entry("and", &Children(self.0))?;
+
+            return map.end();
+        }
+
+        for (filter, key) in self.0.iter().zip(&keys) {
+            match filter {
+                Filter::Leaf(leaf) => map.serialize_entry(key, &leaf_value(leaf))?,
+                Filter::Group(group) => map.serialize_entry(key, &Children(&group.filters))?,
             }
         }
-    }
 
-    Ok(())
+        map.end()
+    }
 }
 
 /// A combinator key is unreachable when the model has a column of that name,
@@ -168,7 +177,7 @@ impl<'de, C: Column> Deserialize<'de> for Query<C> {
 /// `serde_json::Error` for a handler that only wants the message.
 pub(crate) struct Parsed<C: Column>(Result<Query<C>, Error>);
 
-/// Reads the flat JSON form, keeping a rejected request's own variant.
+/// Reads the JSON form, keeping a rejected request's own variant.
 pub(crate) fn parse<C: Column>(json: &str) -> Result<Query<C>, Error> {
     let mut deserializer = serde_json::Deserializer::from_str(json);
 
@@ -192,7 +201,7 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
     type Value = Result<Query<C>, Error>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a filter object")
+        formatter.write_str("a query object, holding `filters`, `limit` and `offset`")
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
@@ -219,39 +228,16 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
             }
             seen.push(key.clone());
 
-            let classified = match classify::<C>(&key) {
-                Ok(classified) => classified,
-                Err(error) => {
-                    rejected = Some(error);
+            match key.as_str() {
+                "filters" => match map.next_value::<ParsedLevel<C>>()? {
+                    ParsedLevel(Ok(LevelOwned(filters))) => query.filters = filters,
+                    ParsedLevel(Err(error)) => rejected = Some(error),
+                },
+                "limit" => query.limit = Some(map.next_value()?),
+                "offset" => query.offset = Some(map.next_value()?),
+                _ => {
+                    rejected = Some(Error::UnknownKey { key });
                     map.next_value::<serde::de::IgnoredAny>()?;
-
-                    continue;
-                }
-            };
-
-            match classified {
-                Key::Limit => query.limit = Some(map.next_value()?),
-                Key::Offset => query.offset = Some(map.next_value()?),
-                Key::Group(combinator) => {
-                    let levels = map
-                        .next_value::<Vec<ParsedFilters<C>>>()?
-                        .into_iter()
-                        .map(|parsed| parsed.0)
-                        .collect();
-
-                    rejected = children(combinator, levels, &mut query.filters).err();
-                }
-                Key::Leaf {
-                    column,
-                    operator,
-                    suffixed,
-                } => {
-                    let value = map.next_value::<Value>()?;
-
-                    match leaf(column, operator, suffixed, value) {
-                        Ok(filter) => query.filters.push(filter),
-                        Err(error) => rejected = Some(error),
-                    }
                 }
             }
         }
@@ -263,32 +249,32 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
     }
 }
 
-/// The filters of one object, for a level inside an `and`/`or` array.
-struct Filters<C: Column>(Vec<Filter<C>>);
+/// One filter object, for the `filters` value and for a level inside an
+/// `and`/`or` array.
+struct LevelOwned<C: Column>(Vec<Filter<C>>);
 
-struct ParsedFilters<C: Column>(Result<Filters<C>, Error>);
+struct ParsedLevel<C: Column>(Result<LevelOwned<C>, Error>);
 
-impl<'de, C: Column> Deserialize<'de> for ParsedFilters<C> {
+impl<'de, C: Column> Deserialize<'de> for ParsedLevel<C> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer
-            .deserialize_map(FiltersVisitor(PhantomData))
-            .map(ParsedFilters)
+            .deserialize_map(LevelVisitor(PhantomData))
+            .map(ParsedLevel)
     }
 }
 
-struct FiltersVisitor<C: Column>(PhantomData<C>);
+struct LevelVisitor<C: Column>(PhantomData<C>);
 
-impl<'de, C: Column> Visitor<'de> for FiltersVisitor<C> {
-    type Value = Result<Filters<C>, Error>;
+impl<'de, C: Column> Visitor<'de> for LevelVisitor<C> {
+    type Value = Result<LevelOwned<C>, Error>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a filter object")
+        formatter.write_str("a filters object")
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut filters = Vec::new();
         let mut seen: Vec<String> = Vec::new();
-
         let mut rejected = None;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -317,17 +303,9 @@ impl<'de, C: Column> Visitor<'de> for FiltersVisitor<C> {
             };
 
             match classified {
-                Key::Limit => {
-                    rejected = Some(Error::PagingInsideGroup { key: "limit" });
-                    map.next_value::<serde::de::IgnoredAny>()?;
-                }
-                Key::Offset => {
-                    rejected = Some(Error::PagingInsideGroup { key: "offset" });
-                    map.next_value::<serde::de::IgnoredAny>()?;
-                }
                 Key::Group(combinator) => {
                     let levels = map
-                        .next_value::<Vec<ParsedFilters<C>>>()?
+                        .next_value::<Vec<ParsedLevel<C>>>()?
                         .into_iter()
                         .map(|parsed| parsed.0)
                         .collect();
@@ -351,17 +329,15 @@ impl<'de, C: Column> Visitor<'de> for FiltersVisitor<C> {
 
         Ok(match rejected {
             Some(error) => Err(error),
-            None => Ok(Filters(filters)),
+            None => Ok(LevelOwned(filters)),
         })
     }
 }
 
-/// What a key means, resolved in the order the grammar states: paging keys,
-/// then the whole key as a column, then a combinator, then the last-`__`
+/// What a key inside a filter object means, resolved in the order the grammar
+/// states: the whole key as a column, then a combinator, then the last-`__`
 /// split.
 enum Key<C: Column> {
-    Limit,
-    Offset,
     Group(Combinator),
     Leaf {
         column: C,
@@ -373,12 +349,6 @@ enum Key<C: Column> {
 }
 
 fn classify<C: Column>(key: &str) -> Result<Key<C>, Error> {
-    match key {
-        "limit" => return Ok(Key::Limit),
-        "offset" => return Ok(Key::Offset),
-        _ => {}
-    }
-
     if let Some(column) = C::from_name(key) {
         return Ok(Key::Leaf {
             column,
@@ -431,13 +401,13 @@ fn names<C: Column>() -> Vec<&'static str> {
 /// parse back to the tree it came from.
 fn children<C: Column>(
     combinator: Combinator,
-    levels: Vec<Result<Filters<C>, Error>>,
+    levels: Vec<Result<LevelOwned<C>, Error>>,
     level: &mut Vec<Filter<C>>,
 ) -> Result<(), Error> {
     let mut children = Vec::with_capacity(levels.len());
 
     for parsed in levels {
-        let Filters(filters) = parsed?;
+        let LevelOwned(filters) = parsed?;
 
         match filters.len() {
             0 => return Err(Error::EmptyGroup { combinator }),
@@ -457,6 +427,7 @@ fn children<C: Column>(
 
     Ok(())
 }
+
 fn leaf<C: Column>(
     column: C,
     operator: FilterOperator,

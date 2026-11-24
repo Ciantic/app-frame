@@ -16,7 +16,7 @@ One query type per table, `Query<OrderColumn>`, with three faces:
 ```mermaid
 graph LR
   A["Rust<br/>Order::query().filters([...])"] --> Q["Query<OrderColumn>"]
-  B["JSON<br/>{&quot;status__in&quot;: [...]}"] --> Q
+  B["JSON<br/>{&quot;filters&quot;: {&quot;status__in&quot;: [...]}}"] --> Q
   Q -->|"Serialize"| B
   Q -->|"build()"| S["sql + params"]
 ```
@@ -24,9 +24,10 @@ graph LR
 - The Rust face is type-checked: a column handle knows its value type, so
   `c.total.eq("500")` does not compile and a filter on a column the table does
   not have cannot be constructed at all.
-- The JSON face is the same tree in a flat, key-per-filter form. It parses into
-  the same `Query<C>`, so the two faces converge on one representation instead
-  of two code paths, and a Rust-built query serializes back to the same JSON.
+- The JSON face is the same tree in a flat, key-per-filter form under a
+  `filters` key, with `limit` and `offset` beside it. It parses into the same
+  `Query<C>`, so the two faces converge on one representation instead of two
+  code paths, and a Rust-built query serializes back to the same JSON.
 - Rendering is the only exit: `build()` produces the SQL text and the parameter
   list, with every value bound and every identifier quoted from model metadata,
   never from the request.
@@ -107,12 +108,14 @@ A newtype keeps its identity: a column of type `Email` takes `Email`, not
 
 ```json
 {
-  "status__in": ["open", "paid"],
-  "deleted_at": null,
-  "or": [
-    { "total__between": [100, 500] },
-    { "and": [{ "vip": true }, { "tags__contains": "gift" }] }
-  ],
+  "filters": {
+    "status__in": ["open", "paid"],
+    "deleted_at": null,
+    "or": [
+      { "total__between": [100, 500] },
+      { "and": [{ "vip": true }, { "tags__contains": "gift" }] }
+    ]
+  },
   "limit": 20,
   "offset": 40
 }
@@ -120,6 +123,8 @@ A newtype keeps its identity: a column of type `Email` takes `Email`, not
 
 `Query::<OrderColumn>::parse(&body)` yields the same `Query<OrderColumn>` the
 Rust block built, and serializing that value produces this payload again.
+`filters` holds the tree; `limit` and `offset` sit beside it, because paging is
+not a filter and the endpoint already knows the table.
 
 ### Rendered SQL
 
@@ -191,8 +196,21 @@ Because of the first point, an empty `in` list is an error rather than a silent
 
 ### The JSON grammar
 
-- A key is a column name, optionally followed by `__` and an operator:
-  `"status__in"`, `"total__between"`.
+A query object holds `filters`, `limit` and `offset`, and nothing else:
+
+```json
+{
+  "filters": { "status__in": ["open", "paid"] },
+  "limit": 20,
+  "offset": 40
+}
+```
+
+- `filters` is the filter tree. It is absent when there is nothing to filter,
+  which is why `{"limit": 20}` is a valid request for the first page of every
+  row; an empty object is the same as absent.
+- Inside `filters` a key is a column name, optionally followed by `__` and an
+  operator: `"status__in"`, `"total__between"`.
 - A key with no operator suffix means `eq`: `"vip": true` is
   `"vip__eq": true`.
 - The operator suffix is the snake_case `FilterOperator` name: `eq`, `neq`,
@@ -204,18 +222,33 @@ Because of the first point, an empty `in` list is an error rather than a silent
 - Keys at one level combine with `AND`. Nesting is explicit through the
   reserved keys `and` and `or`, each holding an array of filter objects:
   `{"or": [{...}, {...}]}`.
-- A key is resolved in this order, so no shadowing is implicit:
-  1. `limit` and `offset`, the paging keys.
-  2. The whole key as a column name, which means `eq`.
-  3. The whole key as `and` or `or`.
-  4. The key split at its *last* `__`, left side as a column, right side as an
+- A key inside `filters` is resolved in this order, so no shadowing is implicit:
+  1. The whole key as a column name, which means `eq`.
+  2. The whole key as `and` or `or`.
+  3. The key split at its *last* `__`, left side as a column, right side as an
      operator suffix. This is what lets a column named `foo__in` still be
      filtered as `"foo__in": value`.
-  A key that matches none of the four is an error naming the column list, not a
+  A key that matches none of the three is an error naming the column list, not a
   silently ignored filter. The cost of that order is a rare ambiguity: with
   columns `foo` and `foo__in`, the key `"foo__in"` is the column, so `in` on
   `foo` is unreachable. Renaming one column is cheaper than a positional
   syntax.
+- The wrapper is what makes the reserved keys cheap. Paging is not a filter, so
+  it does not belong in the tree, and putting it outside means the filter level
+  holds only columns plus the two combinators. A column named `limit`, `offset`
+  or even `filters` is therefore an ordinary column inside the filter object,
+  and the nesting decides which one is meant:
+
+  ```json
+  { "filters": { "limit": 5 }, "limit": 20 }
+  ```
+
+  That filters on the `limit` column and then takes 20 rows. The combinators
+  `and` and `or` are the only reserved keys left inside a level, and a column
+  of that name wins there — see [Arbitrary nesting](#arbitrary-nesting).
+- A key beside `filters` that is none of the three is an error naming them, so
+  a payload in the older flat shape is rejected with a message rather than
+  silently matching nothing.
 - `null` is the short form of `is_null`: `{"deleted_at": null}` renders
   `"deleted_at" IS NULL`, and `{"deleted_at__neq": null}` renders
   `IS NOT NULL`.
@@ -226,19 +259,15 @@ Because of the first point, an empty `in` list is an error rather than a silent
   error, not a coercion: `{"status": ["open"]}` says "use `in`".
 - Key order is preserved, so parameter order is the order the client wrote,
   and serialization reproduces the request.
-- A duplicate key is an error. `serde_json` would silently keep the last one.
+- A duplicate key is an error, at either level. `serde_json` would silently keep
+  the last one.
 - Serializing a level whose flat keys would collide falls back to an explicit
   `{"and": [...]}` list, which parses back to the same tree; see
   [Arbitrary nesting](#arbitrary-nesting).
 - There is no `table` key: the endpoint is per model, and `C` already names the
   table. Cross-table queries are out of scope.
-- `limit` and `offset` are reserved keys holding a non-negative integer, and
-  they take precedence over a column of the same name: `"limit": 20` always
-  pages. Paging must stay expressible on every model, and a column named
-  `limit` still has a spelling, `{"limit__eq": 20}`. This is the one place
-  where a reserved key wins over a column, and the reason the operators `and`
-  and `or` do not: a column named `or` has no alternative spelling, so there
-  the column wins.
+- `limit` and `offset` hold a non-negative integer. A negative or fractional
+  value is a syntax error rather than a clamp.
 
 ### Arbitrary nesting
 
@@ -268,12 +297,14 @@ WHERE "a" = $1 AND "b" = $2
 
 ```json
 {
-  "a": 1,
-  "b": 2,
-  "or": [
-    { "c": 3 },
-    { "and": [{ "d": 4 }, { "e": 5 }, { "f": 6 }] }
-  ]
+  "filters": {
+    "a": 1,
+    "b": 2,
+    "or": [
+      { "c": 3 },
+      { "and": [{ "d": 4 }, { "e": 5 }, { "f": 6 }] }
+    ]
+  }
 }
 ```
 
@@ -301,9 +332,9 @@ Construction does not flatten either: `and([and([a, b]), c])` renders
 the caller's tree and change what serialization prints. `normalize()` — flatten
 same-combinator nesting, drop single-child groups — is available but opt-in.
 
-The flat JSON form has one constraint the tree does not: a duplicate key is
-invalid, so an object can carry at most one `and` key and one `or` key. The
-serializer therefore:
+The JSON form has one constraint the tree does not: a duplicate key is invalid,
+so an object can carry at most one `and` key and one `or` key. The serializer
+therefore:
 
 - emits one flat key per leaf child of the object's implicit `And`;
 - emits one `or` key per `Or` group child, since each group is one key;
@@ -313,9 +344,14 @@ serializer therefore:
 Inside an `and`/`or` array every child is its own object, so no two keys in one
 object can collide, and the fallback never needs to merge siblings. That keeps
 serialization structural: `filters([a, and([b, c])])` prints
-`{"a": 1, "and": [{"b": 2}, {"c": 3}]}` and parses back to the same tree rather
-than a flattened one, while `filters([and([a, and([b, c])])])` — one group at the
-top — keeps both wrappers.
+`{"filters": {"a": 1, "and": [{"b": 2}, {"c": 3}]}}` and parses back to the same
+tree rather than a flattened one, while `filters([and([a, and([b, c])])])` — one
+group at the top — keeps both wrappers.
+
+A column named `and` or `or` cannot be told apart from the combinator key, and
+the column wins, so a group of that kind has no JSON spelling on such a model.
+Serialization reports it rather than writing a payload that would parse back as
+something else.
 
 The depth cap of 8 applies to groups, so this example uses 2 of its 8.
 
@@ -369,7 +405,7 @@ Order::query().filters([c.status.eq("open")])
 ```
 
 ```json
-{ "status": "open" }
+{ "filters": { "status": "open" } }
 ```
 
 ```sql
@@ -390,7 +426,7 @@ Order::query().filters([c.id.eq(&id)])
 ```
 
 ```json
-{ "id": "018f2b0e-..." }
+{ "filters": { "id": "018f2b0e-..." } }
 ```
 
 ```sql
@@ -410,7 +446,7 @@ Order::query().filters([c.status.eq("open"), c.vip.eq(true)])
 ```
 
 ```json
-{ "status": "open", "vip": true }
+{ "filters": { "status": "open", "vip": true } }
 ```
 
 ```sql
@@ -429,7 +465,7 @@ Order::query().filters([c.status.in_(["open", "paid"])])
 ```
 
 ```json
-{ "status__in": ["open", "paid"] }
+{ "filters": { "status__in": ["open", "paid"] } }
 ```
 
 ```sql
@@ -447,7 +483,7 @@ Order::query().filters([c.total.between(100, 500)])
 ```
 
 ```json
-{ "total__between": [100, 500] }
+{ "filters": { "total__between": [100, 500] } }
 ```
 
 ```sql
@@ -462,7 +498,7 @@ Order::query().filters([c.total.gte(100), c.total.lt(500)])
 ```
 
 ```json
-{ "total__gte": 100, "total__lt": 500 }
+{ "filters": { "total__gte": 100, "total__lt": 500 } }
 ```
 
 ```sql
@@ -477,7 +513,7 @@ Order::query().filters([c.status.ilike("op%")])
 ```
 
 ```json
-{ "status__ilike": "op%" }
+{ "filters": { "status__ilike": "op%" } }
 ```
 
 ```sql
@@ -496,7 +532,7 @@ Order::query().filters([c.deleted_at.is_null()])
 ```
 
 ```json
-{ "deleted_at": null }
+{ "filters": { "deleted_at": null } }
 ```
 
 ```sql
@@ -508,7 +544,7 @@ Order::query().filters([c.deleted_at.is_not_null()])
 ```
 
 ```json
-{ "deleted_at__neq": null }
+{ "filters": { "deleted_at__neq": null } }
 ```
 
 ```sql
@@ -526,7 +562,7 @@ Order::query().filters([c.tags.contains("rust")])
 ```
 
 ```json
-{ "tags__contains": "rust" }
+{ "filters": { "tags__contains": "rust" } }
 ```
 
 ```sql
@@ -543,7 +579,7 @@ Order::query().filters([c.tags.overlaps(["rust", "sql"])])
 ```
 
 ```json
-{ "tags__overlaps": ["rust", "sql"] }
+{ "filters": { "tags__overlaps": ["rust", "sql"] } }
 ```
 
 ```sql
@@ -558,7 +594,7 @@ Order::query().filters([c.tags.contains_all(["rust", "sql"])])
 ```
 
 ```json
-{ "tags__contains_all": ["rust", "sql"] }
+{ "filters": { "tags__contains_all": ["rust", "sql"] } }
 ```
 
 ```sql
@@ -599,7 +635,7 @@ Order::query()
 ```
 
 ```json
-{ "status": "open", "limit": 20, "offset": 40 }
+{ "filters": { "status": "open" }, "limit": 20, "offset": 40 }
 ```
 
 ```sql
@@ -609,7 +645,9 @@ SELECT * FROM "orders" WHERE "status" = $1 LIMIT $2 OFFSET $3
 
 `limit` and `offset` are bound like any other value, not interpolated: they are
 integers from an untrusted request, and binding keeps the statement shape
-constant too. With only a limit:
+constant too. They are not filters, so they sit beside `filters` rather than in
+it, and `{"filters": {}}` is the same as no `filters` key at all. With only a
+limit:
 
 ```rust
 Order::query().filters([c.status.eq("open")]).limit(20)
@@ -636,7 +674,7 @@ Order::query().filters([Filter::or([
 ```
 
 ```json
-{ "or": [{ "status": "open" }, { "vip": true }] }
+{ "filters": { "or": [{ "status": "open" }, { "vip": true }] } }
 ```
 
 ```sql
@@ -663,12 +701,14 @@ Order::query().filters([
 
 ```json
 {
-  "status": "open",
-  "or": [
-    { "vip": true },
-    { "and": [{ "total__gte": 100 }, { "total__lt": 500 }] }
-  ],
-  "tags__contains": "gift"
+  "filters": {
+    "status": "open",
+    "or": [
+      { "vip": true },
+      { "and": [{ "total__gte": 100 }, { "total__lt": 500 }] }
+    ],
+    "tags__contains": "gift"
+  }
 }
 ```
 
@@ -697,10 +737,12 @@ Order::query().filters([
 
 ```json
 {
-  "and": [
-    { "or": [{ "status": "open" }, { "vip": true }] },
-    { "or": [{ "total__lt": 100 }, { "tags__contains": "gift" }] }
-  ]
+  "filters": {
+    "and": [
+      { "or": [{ "status": "open" }, { "vip": true }] },
+      { "or": [{ "total__lt": 100 }, { "tags__contains": "gift" }] }
+    ]
+  }
 }
 ```
 
@@ -739,7 +781,8 @@ differently from the one the caller wrote.
 
 ### Errors
 
-Each rejected request names what is wrong:
+Each rejected request names what is wrong. The payloads below show only the
+`filters` object, since that is where each problem is:
 
 ```text
 { "statuss": "open" }
@@ -764,6 +807,13 @@ Each rejected request names what is wrong:
 { "total__ilike": "5%" }
   operator `ilike` is not allowed on column `total`; its query_ops are: eq, neq,
   gt, gte, lt, lte
+```
+
+A key beside `filters` is rejected with the three that belong there:
+
+```text
+{ "vip": true }
+  unknown key `vip`; a query takes `filters`, `limit` and `offset`
 ```
 
 The Rust face catches the value type and the unlisted operator at compile time
@@ -1239,32 +1289,44 @@ groups.
 
 ### Serde
 
-`FilterOperator` gains `#[serde(rename_all = "snake_case")]` so the wire name and
-the `#[db(query_ops(...))]` annotation finally agree; today serde would demand
-`"In"` and `"NotILike"`.
+`FilterOperator` has hand-written serde over `as_str`/`from_name`, so the wire
+name and the `#[db(query_ops(...))]` annotation agree; a derived impl would
+demand `"In"` and `"NotILike"`.
 
-`Query<C>` serializes to the flat form and does not derive `Deserialize`. The
-serializer follows the level rules in
-[Arbitrary nesting](#arbitrary-nesting), so its output always re-parses to the
-same tree. The `Deserialize` implementation walks the map with `MapAccess`,
-preserving order:
+`Query<C>` serializes to the wrapped form and does not derive `Deserialize`. It
+writes `filters` when there is at least one, then `limit`, then `offset`, so a
+payload round-trips in that order. Inside `filters` the serializer follows the
+level rules in [Arbitrary nesting](#arbitrary-nesting), so its output always
+re-parses to the same tree.
 
-- Resolve each key in the order the grammar states: `limit` and `offset` first,
-  then the whole key as a column, then `and` and `or`, then the last-`__`
-  split. `C::from_name` supplies the column list for the error, and a paging key
-  is parsed as a `u32`, so `"limit": -1` and `"limit": 1.5` are errors.
-- Parse the suffix with the same match that maps `FilterOperator` variants, so
+The `Deserialize` implementation walks each map with `MapAccess`, preserving
+order:
+
+- At the top level the only keys are `filters`, `limit` and `offset`; anything
+  else is `Error::UnknownKey`, which names all three.
+- Inside `filters`, resolve each key in the order the grammar states: the whole
+  key as a column, then `and` and `or`, then the last-`__` split.
+  `C::from_name` supplies the column list for the error.
+- Parse the suffix with the same table that maps `FilterOperator` variants, so
   the accepted suffix set cannot drift from the enum.
 - Box a concrete value from the JSON value and the column's `pg_type()`,
   rejecting a mismatch with the column name, the operator and the expected
   type.
+- Drain the map after a rejection. Returning early leaves the object half-read,
+  and `serde_json` then reports "trailing characters" instead of the real
+  problem — the first version of this did exactly that.
 
-Error examples the implementation should produce:
+A rejected request keeps its `Error` variant through `Query::parse`, so a
+handler can map it to a status; `Deserialize` flattens it into
+`serde_json::Error` with the same message for a caller that only logs it.
+
+Error examples the implementation produces:
 
 ```text
-unknown column `statuss` in `statuss__in`; expected one of: id, status, total, vip
+unknown key `vip`; a query takes `filters`, `limit` and `offset`
+unknown column `statuss`; expected one of: id, status, total, vip, tags, …
 operator `betwen` is not known; expected one of: eq, neq, gt, …, not_between
-column `status` takes a list for `in`, got a string
+`in` takes a list, got a string
 column `total` is int8, the value is a string
 ```
 
@@ -1431,8 +1493,9 @@ without reaching into them.
 
 Checks, in the order a request hits them:
 
-- Key syntax: unknown column (with the column list), unknown operator (with the
-  operator list), duplicate key, wrong value shape.
+- Shape: a top-level key that is not `filters`, `limit` or `offset`.
+- Key syntax inside `filters`: unknown column (with the column list), unknown
+  operator (with the operator list), duplicate key, wrong value shape.
 - Table: `C::Model` must be a table, not a fragment.
 - Operator allowed, Rust face: enforced by the compiler. A column's handle only
   has methods for the operators its `#[db(query_ops(...))]` lists, so
@@ -1451,7 +1514,8 @@ Checks, in the order a request hits them:
   `null` is an error so a cleared column has one spelling.
 - Paging: `limit` and `offset` must be non-negative integers, and `limit` may
   not exceed `MAX_LIMIT`. A negative or fractional value is a syntax error,
-  not a clamp.
+  not a clamp. Both live beside `filters` and are never filter keys, so a
+  column of the same name needs no precedence rule.
 - Limits, below.
 
 Errors are one enum, `dbkit::query::Error`, with `Display` naming the column and
@@ -1506,7 +1570,7 @@ impl<C: Column> Filter<C> {
     pub fn normalize(self) -> Self;
 }
 
-impl<C: Column> Serialize for Query<C> { /* flat form */ }
+impl<C: Column> Serialize for Query<C> { /* `filters` plus paging */ }
 
 // handler
 let query: Query<OrderColumn> = serde_json::from_slice(&body)?;
@@ -1527,6 +1591,12 @@ is not re-exported at the crate root.
 
 `Filter::leaf` stays public and untyped so an advanced caller can build an
 operator the handles do not cover; `build()` validates it like any other leaf.
+
+`parse` and the `Deserialize` impl differ in one way worth knowing: `parse`
+keeps the variant of a rejected request, so a handler can map an
+`OperatorNotAllowed` to 422 and a `Limit` to 400, while `Deserialize` flattens
+every rejection into a `serde_json::Error` whose message is the same text. A
+syntactically broken payload is `Error::Json` either way, with serde's position.
 
 `build` returns the SQL as `String` because `sqlx::query_as` 0.9 wants a
 `&'static str` or `AssertSqlSafe`. The SQL is generated entirely from metadata
@@ -1568,9 +1638,12 @@ sparse; that constraint from the `Columns` work is unchanged.
 - Every worked example in this document: the Rust call, the SQL, and — where
   the example has one — the JSON, both as the payload that parses into the same
   tree and as what serializing the tree produces.
-- `{"vip": true}` equals `{"vip__eq": true}`; `{"deleted_at": null}` and
-  `{"deleted_at__neq": null}` render `IS NULL` and `IS NOT NULL`;
-  `{"deleted_at__is_null": true}` is the same request.
+- `{"filters": {"vip": true}}` equals `{"filters": {"vip__eq": true}}`;
+  `{"deleted_at": null}` and `{"deleted_at__neq": null}` render `IS NULL` and
+  `IS NOT NULL`; `{"deleted_at__is_null": true}` is the same request.
+- The wrapper is load-bearing: a key beside `filters` is rejected with the three
+  that belong there, `{"filters": 5}` says it expects an object, and
+  `{"filters": {}}` builds a query with no `WHERE`.
 - `A AND B AND (C OR (D AND E AND F))` from both faces, and each face's output
   parses into the other.
 - Nesting is structural: `filters([and([a, and([b, c])])])` renders
@@ -1579,10 +1652,12 @@ sparse; that constraint from the `Columns` work is unchanged.
 - A level with two `Or` children falls back to `{"and": [...]}`, and the
   fallback parses back to the same tree node for node.
 - Key order is parameter order in both directions; a duplicate key is an error.
-- A model with a column named `or` filters it with `{"or": true}`, and an `or`
-  group then has no JSON spelling, which serialization reports.
+- A model with columns named `or` and `limit` filters both from inside
+  `filters`, while `{"limit": 5}` beside it pages: the nesting is the whole
+  disambiguation, with no precedence rule. On that model an `or` group has no
+  JSON spelling, which serialization reports.
 - Every error in [Errors](#errors) verbatim, plus `and` with no children, a
-  paging key inside a group, a fractional `limit`, and a negative one.
+  fractional `limit`, and a negative one.
 - The caps trip at the boundary and not before: eight nested groups, 64 nodes,
   100 list values, `limit` 1000. `limit` 0 is accepted.
 - The untyped `Filter::leaf` is validated like any other leaf: an undeclared
@@ -1632,9 +1707,10 @@ Each step compiled and passed its tests on its own; all six are done.
    so any tree can be written in Rust.
 4. `build()`: the operator table, quoting, one pair of parentheses per group,
    the depth/node/list/limit caps, and `limit`/`offset` bound as parameters.
-5. The flat JSON serializer and deserializer, with round-trip tests. A rejected
-   request keeps its own `Error` variant, so a handler can map it to a status;
-   a syntactically broken payload is `Error::Json`.
+5. The JSON serializer and deserializer: a `filters` object with `limit` and
+   `offset` beside it, plus round-trip tests. A rejected request keeps its own
+   `Error` variant, so a handler can map it to a status; a syntactically broken
+   payload is `Error::Json`.
 6. This document, and the annotations doc now points here.
 
 ## Open questions

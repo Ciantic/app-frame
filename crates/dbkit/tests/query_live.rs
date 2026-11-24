@@ -272,7 +272,8 @@ async fn a_sparse_selection_returns_its_columns() {
 async fn the_json_face_and_the_rust_face_agree() {
     let db = seeded().await;
 
-    let payload = r#"{"status__in":["open","paid"],"or":[{"total__lt":200},{"vip":true}]}"#;
+    let payload =
+        r#"{"filters":{"status__in":["open","paid"],"or":[{"total__lt":200},{"vip":true}]}}"#;
     let parsed = Query::<OrderLiveColumn>::parse(payload).unwrap();
     let rust = OrderLive::query().filters([
         c().status.in_(["open", "paid"]),

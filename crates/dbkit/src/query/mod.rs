@@ -105,7 +105,8 @@ impl<C: Column> Query<C> {
         self
     }
 
-    /// Reads the flat JSON form.
+    /// Reads the JSON form: a `filters` object with `limit` and `offset`
+    /// beside it.
     ///
     /// A syntactically broken payload is [`Error::Json`]; a rejected one keeps
     /// its own variant, so a handler can map it to a status.
@@ -234,9 +235,9 @@ pub enum Error {
     CombinatorShadowed {
         combinator: Combinator,
     },
-    /// A paging key inside a group, where it cannot mean anything.
-    PagingInsideGroup {
-        key: &'static str,
+    /// A top-level key that is not `filters`, `limit` or `offset`.
+    UnknownKey {
+        key: String,
     },
     /// More than [`MAX_DEPTH`] nested groups.
     Depth,
@@ -351,9 +352,10 @@ impl fmt::Display for Error {
                 combinator.as_str(),
                 combinator.as_str(),
             ),
-            Error::PagingInsideGroup { key } => {
-                write!(formatter, "`{key}` is only allowed at the top level")
-            }
+            Error::UnknownKey { key } => write!(
+                formatter,
+                "unknown key `{key}`; a query takes `filters`, `limit` and `offset`"
+            ),
             Error::Depth => write!(formatter, "filters nest deeper than {MAX_DEPTH} levels"),
             Error::Nodes => write!(
                 formatter,
