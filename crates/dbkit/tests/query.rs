@@ -29,11 +29,11 @@ struct OrderId(pub Uuid);
 #[db(table = "orders")]
 struct Order {
     #[db(primary_key)]
-    #[db(query_ops(eq, in))]
+    #[db(query_ops(eq, any))]
     id: OrderId,
 
     #[db(pgtype = "varchar(20)")]
-    #[db(query_ops(eq, in, not_in, ilike))]
+    #[db(query_ops(eq, any, not_any, ilike))]
     status: String,
 
     #[db(pgtype = "int8")]
@@ -75,7 +75,7 @@ struct Odd {
     title: String,
 
     #[db(pgtype = "text[]")]
-    #[db(query_ops(in))]
+    #[db(query_ops(any))]
     tags: Vec<String>,
 
     #[db(pgtype = "numeric(10,2)")]
@@ -122,7 +122,7 @@ fn build_error(query: &Query<OrderColumn>) -> String {
 fn the_goal_example_builds_the_documented_sql() {
     let query = Order::query()
         .filters([
-            c().status.in_(["open", "paid"]),
+            c().status.any(["open", "paid"]),
             c().deleted_at.is_null(),
             Filter::or([
                 c().total.between(100, 500),
@@ -159,7 +159,7 @@ fn the_json_payload_builds_the_same_query() {
     // parameter order.
     let payload = r#"{
         "filters": {
-            "status__in": ["open", "paid"],
+            "status__any": ["open", "paid"],
             "deleted_at": null,
             "or": [
                 {"total__between": [100, 500]},
@@ -174,7 +174,7 @@ fn the_json_payload_builds_the_same_query() {
 
     let rust = Order::query()
         .filters([
-            c().status.in_(["open", "paid"]),
+            c().status.any(["open", "paid"]),
             c().deleted_at.is_null(),
             Filter::or([
                 c().total.between(100, 500),
@@ -187,7 +187,7 @@ fn the_json_payload_builds_the_same_query() {
     assert_eq!(parsed, rust);
     assert_eq!(
         serde_json::to_string(&parsed).unwrap(),
-        r#"{"filters":{"status__in":["open","paid"],"deleted_at":null,"or":[{"total__between":[100,500]},{"and":[{"vip":true},{"tags__contains":"gift"}]}]},"limit":20,"offset":40}"#
+        r#"{"filters":{"status__any":["open","paid"],"deleted_at":null,"or":[{"total__between":[100,500]},{"and":[{"vip":true},{"tags__contains":"gift"}]}]},"limit":20,"offset":40}"#
     );
 }
 
@@ -254,7 +254,7 @@ fn neq_with_null_is_not_null() {
 
 #[test]
 fn a_list_is_one_array_parameter() {
-    let query = Order::query().filters([c().status.in_(["open", "paid"])]);
+    let query = Order::query().filters([c().status.any(["open", "paid"])]);
 
     assert_eq!(
         built(&query),
@@ -265,7 +265,7 @@ fn a_list_is_one_array_parameter() {
     );
 
     let fifty: Vec<String> = (0..50).map(|index| index.to_string()).collect();
-    let query = Order::query().filters([c().status.in_(fifty)]);
+    let query = Order::query().filters([c().status.any(fifty)]);
 
     assert_eq!(
         built(&query).0,
@@ -274,8 +274,8 @@ fn a_list_is_one_array_parameter() {
 }
 
 #[test]
-fn not_in_is_all() {
-    let query = parse::<OrderColumn>(r#"{"status__not_in": ["open"]}"#).unwrap();
+fn not_any_is_all() {
+    let query = parse::<OrderColumn>(r#"{"status__not_any": ["open"]}"#).unwrap();
 
     assert_eq!(
         built(&query).0,
@@ -697,18 +697,18 @@ fn an_operator_outside_query_ops_is_rejected() {
 #[test]
 fn an_empty_list_is_rejected() {
     assert!(
-        parse_error(r#"{"status__in": []}"#).starts_with("`in` needs at least one value"),
+        parse_error(r#"{"status__any": []}"#).starts_with("`any` needs at least one value"),
         "{}",
-        parse_error(r#"{"status__in": []}"#)
+        parse_error(r#"{"status__any": []}"#)
     );
 }
 
 #[test]
 fn a_list_operator_with_a_scalar_says_what_it_wants() {
-    let message = parse_error(r#"{"status__in": "open"}"#);
+    let message = parse_error(r#"{"status__any": "open"}"#);
 
     assert!(
-        message.starts_with("`in` takes a list, got a string"),
+        message.starts_with("`any` takes a list, got a string"),
         "{message}"
     );
 }
@@ -773,22 +773,22 @@ fn a_duplicate_key_is_rejected() {
 }
 
 #[test]
-fn in_on_an_array_column_suggests_overlaps() {
-    let message = parse_error_of::<OddColumn>(r#"{"tags__in": ["rust"]}"#);
+fn any_on_an_array_column_suggests_overlaps() {
+    let message = parse_error_of::<OddColumn>(r#"{"tags__any": ["rust"]}"#);
 
     assert!(
-        message.starts_with("column `tags` is an array, so `in` does not apply"),
+        message.starts_with("column `tags` is an array, so `any` does not apply"),
         "{message}"
     );
 }
 
 #[test]
-fn contains_on_a_scalar_column_suggests_in() {
+fn contains_on_a_scalar_column_suggests_any() {
     let message = parse_error_of::<OddColumn>(r#"{"title__contains": "open"}"#);
 
     assert!(
         message.starts_with(
-            "column `title` is not an array, so `contains` does not apply; use `in` instead"
+            "column `title` is not an array, so `contains` does not apply; use `any` instead"
         ),
         "{message}"
     );
@@ -956,11 +956,11 @@ fn the_node_cap_counts_every_filter() {
 #[test]
 fn the_list_cap_is_hundred() {
     let values: Vec<String> = (0..=100).map(|index| index.to_string()).collect();
-    let query = Order::query().filters([c().status.in_(values)]);
+    let query = Order::query().filters([c().status.any(values)]);
 
     assert_eq!(
         build_error(&query),
-        "`in` accepts at most 100 values, got 101"
+        "`any` accepts at most 100 values, got 101"
     );
 }
 
@@ -1107,9 +1107,9 @@ fn a_newtype_takes_a_borrow() {
     assert_eq!(rust, owned);
     assert_eq!(built(&rust).1, [json!(id.0.to_string())]);
     for query in [
-        Order::query().filters([c().id.in_([id.clone()])]),
-        Order::query().filters([c().id.in_([id.clone()].iter())]),
-        Order::query().filters([c().id.in_(std::slice::from_ref(&id))]),
+        Order::query().filters([c().id.any([id.clone()])]),
+        Order::query().filters([c().id.any([id.clone()].iter())]),
+        Order::query().filters([c().id.any(std::slice::from_ref(&id))]),
     ] {
         assert_eq!(
             query.render().unwrap().values_json(),

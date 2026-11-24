@@ -16,7 +16,7 @@ One query type per table, `Query<OrderColumn>`, with three faces:
 ```mermaid
 graph LR
   A["Rust<br/>Order::query().filters([...])"] --> Q["Query<OrderColumn>"]
-  B["JSON<br/>{&quot;filters&quot;: {&quot;status__in&quot;: [...]}}"] --> Q
+  B["JSON<br/>{&quot;filters&quot;: {&quot;status__any&quot;: [...]}}"] --> Q
   Q -->|"Serialize"| B
   Q -->|"render()"| S["sql + params"]
   Q -->|"build()"| R["QueryAs: fetch_all(&pool)"]
@@ -41,7 +41,7 @@ let c = Order::columns();
 
 let query = Order::query()
     .filters([
-        c.status.in_(["open", "paid"]),
+        c.status.any(["open", "paid"]),
         c.deleted_at.is_null(),
         Filter::or([
             c.total.between(100, 500),
@@ -111,7 +111,7 @@ A newtype keeps its identity: a column of type `Email` takes `Email`, not
 ```json
 {
   "filters": {
-    "status__in": ["open", "paid"],
+    "status__any": ["open", "paid"],
     "deleted_at": null,
     "or": [
       { "total__between": [100, 500] },
@@ -142,9 +142,9 @@ LIMIT $6 OFFSET $7
 -- params: [["open", "paid"], 100, 500, true, "gift", 20, 40]
 ```
 
-### `in` becomes one array parameter
+### `any` becomes one array parameter
 
-`in` is where the payload and the SQL diverge most. `IN ($1, $2, …)` would put
+`any` is where the payload and the SQL diverge most. `IN ($1, $2, …)` would put
 one placeholder per element, so the SQL text would change with the request: a
 five-element list and a fifty-element list become two different prepared
 statements, and an unbounded list can build SQL of unbounded size.
@@ -156,10 +156,10 @@ SELECT * FROM "orders" WHERE "status" = ANY($1)
 -- params: [["open", "paid"]]
 ```
 
-- One placeholder per `in`, whatever the list length: the statement text is a
+- One placeholder per `any`, whatever the list length: the statement text is a
   function of the filter *shape*, not of the data, so `sqlx` reuses one prepared
   statement for every request of that shape. In the larger example above the
-  `in` list is `$1`, and the rest of the tree shifts by one rather than by the
+  `any` list is `$1`, and the rest of the tree shifts by one rather than by the
   list's length.
 - The parameter list nests: the array is a single entry, so `params` is
   `[["open", "paid"]]` rather than two flat strings.
@@ -168,7 +168,7 @@ SELECT * FROM "orders" WHERE "status" = ANY($1)
   `varchar(20)` columns each accept `Vec<Uuid>`, `Vec<i64>`,
   `Vec<DateTime<Utc>>` and `Vec<String>` without a cast, so the map that serves
   scalars serves arrays.
-- In JSON this is the key `"status__in": ["open", "paid"]`; the array form is a
+- In JSON this is the key `"status__any": ["open", "paid"]`; the array form is a
   property of the rendering, not of the payload.
 
 The spelling matters: `IN ($1)` with an array parameter is a type error, not a
@@ -188,12 +188,12 @@ interchangeable spellings of one idea.
 Semantics, also verified:
 
 - An empty array is `false`, not "match everything": `x = ANY('{}')` returns
-  `false`, so `in []` selects nothing and `not_in []` matches every row.
+  `false`, so `any []` selects nothing and `not_any []` matches every row.
 - A `NULL` element behaves like `IN (…, NULL)`: `= ANY(array[open, NULL])` and
   `IN ('open', NULL)` both match only the non-null hits.
 - A `varchar(n)` column accepts a `text[]` parameter without a cast.
 
-Because of the first point, an empty `in` list is an error rather than a silent
+Because of the first point, an empty `any` list is an error rather than a silent
 "no rows".
 
 ### The JSON grammar
@@ -203,7 +203,7 @@ else:
 
 ```json
 {
-  "filters": { "status__in": ["open", "paid"] },
+  "filters": { "status__any": ["open", "paid"] },
   "limit": 20,
   "offset": 40
 }
@@ -216,12 +216,12 @@ else:
   which is why `{"limit": 20}` is a valid request for the first page of every
   row; an empty object is the same as absent.
 - Inside `filters` a key is a column name, optionally followed by `__` and an
-  operator: `"status__in"`, `"total__between"`.
+  operator: `"status__any"`, `"total__between"`.
 - A key with no operator suffix means `eq`: `"vip": true` is
   `"vip__eq": true`.
 - The operator suffix is the snake_case `FilterOperator` name: `eq`, `neq`,
-  `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `not_like`, `not_ilike`, `in`,
-  `not_in`, `contains`, `not_contains`, `contains_all`, `not_contains_all`,
+  `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `not_like`, `not_ilike`, `any`,
+  `not_any`, `contains`, `not_contains`, `contains_all`, `not_contains_all`,
   `overlaps`, `not_overlaps`, `is_null`, `is_not_null`, `between`,
   `not_between`. The same vocabulary is the method name on a column handle, so
   there is one list to learn.
@@ -232,11 +232,11 @@ else:
   1. The whole key as a column name, which means `eq`.
   2. The whole key as `and` or `or`.
   3. The key split at its *last* `__`, left side as a column, right side as an
-     operator suffix. This is what lets a column named `foo__in` still be
-     filtered as `"foo__in": value`.
+     operator suffix. This is what lets a column named `foo__any` still be
+     filtered as `"foo__any": value`.
   A key that matches none of the three is an error naming the column list, not a
   silently ignored filter. The cost of that order is a rare ambiguity: with
-  columns `foo` and `foo__in`, the key `"foo__in"` is the column, so `in` on
+  columns `foo` and `foo__any`, the key `"foo__any"` is the column, so `any` on
   `foo` is unreachable. Renaming one column is cheaper than a positional
   syntax.
 - The wrapper is what makes the reserved keys cheap. Paging is not a filter, so
@@ -258,11 +258,11 @@ else:
 - `null` is the short form of `is_null`: `{"deleted_at": null}` renders
   `"deleted_at" IS NULL`, and `{"deleted_at__neq": null}` renders
   `IS NOT NULL`.
-- `in`, `not_in`, `overlaps`, `not_overlaps`, `contains_all` and
+- `any`, `not_any`, `overlaps`, `not_overlaps`, `contains_all` and
   `not_contains_all` take an array; `between` takes a two-element array;
   `contains` and `not_contains` take a scalar; `is_null` and `is_not_null` take
   `true`, since every JSON key needs a value. A value of the wrong shape is an
-  error, not a coercion: `{"status": ["open"]}` says "use `in`".
+  error, not a coercion: `{"status": ["open"]}` says "use `any`".
 - Key order is preserved, so parameter order is the order the client wrote,
   and serialization reproduces the request.
 - A duplicate key is an error, at either level. `serde_json` would silently keep
@@ -381,7 +381,7 @@ pub struct Order {
     pub id: OrderId,
 
     #[db(pgtype = "varchar(20)")]
-    #[db(query_ops(eq, in, ilike))]
+    #[db(query_ops(eq, any, ilike))]
     pub status: String,
 
     #[db(pgtype = "int8")]
@@ -470,11 +470,11 @@ parameters in the opposite order.
 ### A list
 
 ```rust
-Order::query().filters([c.status.in_(["open", "paid"])])
+Order::query().filters([c.status.any(["open", "paid"])])
 ```
 
 ```json
-{ "filters": { "status__in": ["open", "paid"] } }
+{ "filters": { "status__any": ["open", "paid"] } }
 ```
 
 ```sql
@@ -483,7 +483,7 @@ SELECT * FROM "orders" WHERE "status" = ANY($1)
 ```
 
 One placeholder for the list; see
-[`in` becomes one array parameter](#in-becomes-one-array-parameter).
+[`any` becomes one array parameter](#any-becomes-one-array-parameter).
 
 ### A range
 
@@ -580,7 +580,7 @@ SELECT * FROM "orders" WHERE $1 = ANY("tags")
 ```
 
 The column holds the array and the parameter is one element, the reverse of
-`in`. The multi-value question — "tags share anything with this list?" — is
+`any`. The multi-value question — "tags share anything with this list?" — is
 `overlaps`, which takes the list:
 
 ```rust
@@ -853,11 +853,11 @@ Each rejected request names what is wrong. The payloads below show only the
 { "status__betwen": [1, 2] }
   operator `betwen` is not known; expected one of: eq, neq, gt, gte, lt, lte, …
 
-{ "status__in": [] }
-  `in` needs at least one value
+{ "status__any": [] }
+  `any` needs at least one value
 
-{ "status__in": "open" }
-  `in` takes a list, got a string
+{ "status__any": "open" }
+  `any` takes a list, got a string
 
 { "total": "500" }
   column `total` is int8, the value is a string
@@ -1080,9 +1080,9 @@ let id = OrderId(uuid);
 c.id.eq(id);                        // owned
 c.id.eq(&id);                       // borrowed, via #[derive(DbValue)]
 c.id.neq(&id);
-c.id.in_([id, other]);              // array of owned
-c.id.in_(ids.iter());               // iterator of &OrderId
-c.id.in_(&ids);                     // &Vec<OrderId>
+c.id.any([id, other]);              // array of owned
+c.id.any(ids.iter());               // iterator of &OrderId
+c.id.any(&ids);                     // &Vec<OrderId>
 c.id.is_null();                     // no value at all
 
 c.email.eq(Email::parse("a@b")?);   // the newtype, not a String
@@ -1172,9 +1172,9 @@ operator:
 pub struct OrderStatusTag;
 
 impl<C: dbkit::Column> dbkit::HasEq<C> for OrderStatusTag {}
-impl<C: dbkit::Column> dbkit::HasIn<C> for OrderStatusTag {}
+impl<C: dbkit::Column> dbkit::HasAny<C> for OrderStatusTag {}
 impl<C: dbkit::Column> dbkit::HasILike<C> for OrderStatusTag {}
-// status declares #[db(query_ops(eq, in, ilike))], so no HasBetween, no others
+// status declares #[db(query_ops(eq, any, ilike))], so no HasBetween, no others
 ```
 
 The capability is generic over the column enum because a fragment's columns
@@ -1233,7 +1233,7 @@ their call sites, and each undeclared one fails as shown.
 - The array operators exist only for a `Vec<T>` column. `contains` takes one
   `T`, because the parameter is the element; `overlaps` and `contains_all` take
   a list, because they compare two arrays. That is the opposite direction from
-  `in_`, which belongs to a scalar column.
+  `any`, which belongs to a scalar column.
 
 The methods and the JSON suffixes are the same vocabulary, one entry per
 `FilterOperator` variant:
@@ -1242,9 +1242,9 @@ The methods and the JSON suffixes are the same vocabulary, one entry per
   needed bound.
 - `like`, `ilike`, `not_like`, `not_ilike` — `ColumnRef<Tag, C, String>`
   only.
-- `in_`, `not_in` — list operators; `in_` is spelled with a trailing underscore
-  because `in` is a keyword. The JSON suffix is `in`, without it. The list is
-  bound as one array parameter, so `Vec<T>` must be a `Bind` value too.
+- `any`, `not_any` — list operators; the name matches the rendering, `any`
+  renders `= ANY($n)` and `not_any` renders `<> ALL($n)`. The list is bound as
+  one array parameter, so `Vec<T>` must be a `Bind` value too.
 - `between`, `not_between` — two values.
 - `contains`, `not_contains` — `Vec<T>` columns, one element.
 - `overlaps`, `not_overlaps` — `Vec<T>` columns, a list to share at least one
@@ -1393,7 +1393,7 @@ Error examples the implementation produces:
 unknown key `vip`; a query takes `filters`, `limit` and `offset`
 unknown column `statuss`; expected one of: id, status, total, vip, tags, …
 operator `betwen` is not known; expected one of: eq, neq, gt, …, not_between
-`in` takes a list, got a string
+`any` takes a list, got a string
 column `total` is int8, the value is a string
 ```
 
@@ -1460,9 +1460,9 @@ Two consequences worth stating:
   and take one value.
 - `like`, `ilike`, `not_like`, `not_ilike` render `LIKE`, `ILIKE`, `NOT LIKE`,
   `NOT ILIKE` and take one value.
-- `in`, `not_in` render `= ANY($n)`, `<> ALL($n)` and take a non-empty list
+- `any`, `not_any` render `= ANY($n)`, `<> ALL($n)` and take a non-empty list
   bound as one array parameter; an empty list is rejected. See
-  [`in` becomes one array parameter](#in-becomes-one-array-parameter).
+  [`any` becomes one array parameter](#any-becomes-one-array-parameter).
 - `between`, `not_between` render `BETWEEN $n AND $n+1`, `NOT BETWEEN …` and
   take exactly two values.
 - `contains`, `not_contains` render `$n = ANY("column")`,
@@ -1484,10 +1484,10 @@ Two consequences worth stating:
 
 ### Array operators
 
-The array operators are the mirror image of `in`, and the direction is what
+The array operators are the mirror image of `any`, and the direction is what
 distinguishes them:
 
-- `in` — scalar column, array parameter: `"status" = ANY($1)`. The column is on
+- `any` — scalar column, array parameter: `"status" = ANY($1)`. The column is on
   the left of `=`, the list on the right.
 - `contains` — array column, scalar parameter: `$1 = ANY("tags")`. The element
   is on the left, the array column on the right.
@@ -1495,7 +1495,7 @@ distinguishes them:
   at all; `&&` is the operator that compares two arrays.
 - `contains_all` — array column, array parameter: `"tags" @> $1`. Also no `=`.
 
-`in` over an array column cannot be expressed, which is why `overlaps` exists:
+`any` over an array column cannot be expressed, which is why `overlaps` exists:
 it would need `col = ANY($1)` with a two-dimensional parameter, and sqlx has no
 `Vec<Vec<T>>` bind. Verified against PostgreSQL 18 on rows
 `{rust,sql}`, `{rust}`, `{go}`, `{}`:
@@ -1509,12 +1509,12 @@ not (tags && $1) bound {sql}                -> {rust}, {go}, {}
 ```
 
 Note the last row of the first pair: an empty array does not contain the
-element, so `not_contains` matches it. That is the opposite of `in []`, which is
-rejected, because an empty *list* has no sensible "any of" answer while an
+element, so `not_contains` matches it. That is the opposite of `any []`, which
+is rejected, because an empty *list* has no sensible "any of" answer while an
 empty *column* has a definite one.
 
 `overlaps` and `contains_all` each bind one array parameter, so the statement
-shape does not depend on the list length, exactly as with `in`.
+shape does not depend on the list length, exactly as with `any`.
 
 ### Placeholders and parameters
 
@@ -1598,7 +1598,7 @@ Untrusted trees need bounds so one request cannot build unbounded SQL:
 
 - Maximum nesting depth of `and`/`or`, 8.
 - Maximum total filter nodes, 64.
-- Maximum `in` list length, 100. The cap is about request size and scan cost,
+- Maximum `any` list length, 100. The cap is about request size and scan cost,
   not SQL length: an array parameter keeps the statement text constant.
 - `MAX_LIMIT`, 1000, enforced in `render()` so a JSON `"limit": 1000000` is a 400
   rather than a slow query. `None` means no `LIMIT`; a service that wants a
@@ -1787,7 +1787,7 @@ Against `pgtest-server`, in `crates/dbkit/tests/query_live.rs`:
   SQL text.
 - A disjunction nested under a conjunction returns the intersection the
   parentheses describe.
-- A two-element and a fifty-element `in` list produce the same statement text.
+- A two-element and a fifty-element `any` list produce the same statement text.
 - Paging returns the expected window, and `limit` 0 returns no rows.
 - `uuid`, `varchar`, `int8`, `bool` and `timestamptz` values each bind.
 - A projection built from handles returns the requested columns, and the row

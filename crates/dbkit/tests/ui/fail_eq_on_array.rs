@@ -1,4 +1,4 @@
-// An array column declares `contains`, not `eq`: `in` has no two-dimensional
+// An array column declares `contains`, not `eq`: `any` has no two-dimensional
 // parameter, so the plan gives it no value operator at all.
 #[path = "support.rs"]
 mod support;

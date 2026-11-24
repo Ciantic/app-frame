@@ -32,8 +32,8 @@ pub enum FilterOperator {
     ILike,
     NotLike,
     NotILike,
-    In,
-    NotIn,
+    Any,
+    NotAny,
     Contains,
     NotContains,
     Overlaps,
@@ -60,8 +60,8 @@ impl FilterOperator {
             FilterOperator::ILike => "ILike",
             FilterOperator::NotLike => "NotLike",
             FilterOperator::NotILike => "NotILike",
-            FilterOperator::In => "In",
-            FilterOperator::NotIn => "NotIn",
+            FilterOperator::Any => "Any",
+            FilterOperator::NotAny => "NotAny",
             FilterOperator::Contains => "Contains",
             FilterOperator::NotContains => "NotContains",
             FilterOperator::Overlaps => "Overlaps",
@@ -162,8 +162,8 @@ const FILTER_OPERATORS: &[(&str, FilterOperator)] = &[
     ("ilike", FilterOperator::ILike),
     ("not_like", FilterOperator::NotLike),
     ("not_ilike", FilterOperator::NotILike),
-    ("in", FilterOperator::In),
-    ("not_in", FilterOperator::NotIn),
+    ("any", FilterOperator::Any),
+    ("not_any", FilterOperator::NotAny),
     ("contains", FilterOperator::Contains),
     ("not_contains", FilterOperator::NotContains),
     ("overlaps", FilterOperator::Overlaps),
@@ -506,7 +506,7 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                     else {
                         return Err(operator.error(
                             "unknown query operator; expected `eq`, `neq`, `gt`, `gte`, `lt`, \
-                             `lte`, `like`, `ilike`, `not_like`, `not_ilike`, `in`, `not_in`, \
+                             `lte`, `like`, `ilike`, `not_like`, `not_ilike`, `any`, `not_any`, \
                              `contains`, `not_contains`, `overlaps`, `not_overlaps`, \
                              `contains_all`, `not_contains_all`, `is_null`, `is_not_null`, \
                              `between` or `not_between`",
@@ -841,7 +841,7 @@ mod tests {
                 #[db(primary_key, pgtype = "uuid")]
                 id: WidgetId,
                 #[db(pgtype = "text")]
-                #[db(query_ops(eq, neq, like, in))]
+                #[db(query_ops(eq, neq, like, any))]
                 name: String,
                 #[db(pgtype = "text")]
                 #[db(query_ops(between))]
@@ -857,7 +857,7 @@ mod tests {
                 FilterOperator::Eq,
                 FilterOperator::Neq,
                 FilterOperator::Like,
-                FilterOperator::In,
+                FilterOperator::Any,
             ]
         );
         assert_eq!(
@@ -877,7 +877,7 @@ mod tests {
                 id: WidgetId,
                 #[db(pgtype = "text")]
                 #[db(query_ops(
-                    eq, neq, gt, gte, lt, lte, like, ilike, not_like, not_ilike, in, not_in,
+                    eq, neq, gt, gte, lt, lte, like, ilike, not_like, not_ilike, any, not_any,
                     contains, not_contains, overlaps, not_overlaps, contains_all,
                     not_contains_all, is_null, is_not_null, between, not_between
                 ))]
@@ -900,8 +900,8 @@ mod tests {
                 FilterOperator::ILike,
                 FilterOperator::NotLike,
                 FilterOperator::NotILike,
-                FilterOperator::In,
-                FilterOperator::NotIn,
+                FilterOperator::Any,
+                FilterOperator::NotAny,
                 FilterOperator::Contains,
                 FilterOperator::NotContains,
                 FilterOperator::Overlaps,

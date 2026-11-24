@@ -526,9 +526,9 @@ fn leaf<C: Column>(
 
             Operand::Two(low, high)
         }
-        FilterOperator::In | FilterOperator::NotIn => {
+        FilterOperator::Any | FilterOperator::NotAny => {
             if value::is_array(pg_type) {
-                return Err(Error::ArrayList { column: name });
+                return Err(Error::ArrayAny { column: name });
             }
 
             list(operator, pg_type, name, &value)?

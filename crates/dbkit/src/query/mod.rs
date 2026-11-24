@@ -262,8 +262,8 @@ pub enum Error {
         column: &'static str,
         operator: FilterOperator,
     },
-    /// `in` needs a scalar column; an array column has `overlaps`.
-    ArrayList {
+    /// `any` needs a scalar column; an array column has `overlaps`.
+    ArrayAny {
         column: &'static str,
     },
     DuplicateKey {
@@ -375,12 +375,12 @@ impl fmt::Display for Error {
             ),
             Error::ArrayRequired { column, operator } => write!(
                 formatter,
-                "column `{column}` is not an array, so `{}` does not apply; use `in` instead",
+                "column `{column}` is not an array, so `{}` does not apply; use `any` instead",
                 operator.as_str()
             ),
-            Error::ArrayList { column } => write!(
+            Error::ArrayAny { column } => write!(
                 formatter,
-                "column `{column}` is an array, so `in` does not apply; use `overlaps`, \
+                "column `{column}` is an array, so `any` does not apply; use `overlaps`, \
                  `contains_all` or `contains` instead"
             ),
             Error::DuplicateKey { key } => write!(formatter, "duplicate key `{key}`"),

@@ -22,7 +22,7 @@ struct OrderLive {
     id: Uuid,
 
     #[db(pgtype = "varchar(20)")]
-    #[db(query_ops(eq, in, not_in, ilike))]
+    #[db(query_ops(eq, any, not_any, ilike))]
     status: String,
 
     #[db(pgtype = "int8")]
@@ -108,7 +108,7 @@ async fn a_filter_returns_the_expected_rows() {
     let db = seeded().await;
 
     let query =
-        OrderLive::query().filters([c().status.in_(["open", "paid"]), c().deleted_at.is_null()]);
+        OrderLive::query().filters([c().status.any(["open", "paid"]), c().deleted_at.is_null()]);
 
     assert_eq!(totals(&db, &query).await, [100, 250]);
 }
@@ -131,9 +131,9 @@ async fn a_disjunction_is_not_flattened() {
 async fn a_list_length_does_not_change_the_statement() {
     let db = seeded().await;
 
-    let two = OrderLive::query().filters([c().status.in_(["open", "paid"])]);
+    let two = OrderLive::query().filters([c().status.any(["open", "paid"])]);
     let fifty: Vec<String> = (0..50).map(|index| format!("status{index}")).collect();
-    let many = OrderLive::query().filters([c().status.in_(fifty)]);
+    let many = OrderLive::query().filters([c().status.any(fifty)]);
 
     assert_eq!(
         two.render().unwrap().sql,
@@ -150,15 +150,15 @@ async fn paging_binds_its_parameters() {
     let db = seeded().await;
 
     let first = OrderLive::query()
-        .filters([c().status.in_(["open", "paid"])])
+        .filters([c().status.any(["open", "paid"])])
         .limit(2);
     let second = OrderLive::query()
-        .filters([c().status.in_(["open", "paid"])])
+        .filters([c().status.any(["open", "paid"])])
         .limit(2)
         .offset(2);
 
     assert_eq!(totals(&db, &first).await, [100, 250]);
-    // The `in` list holds two statuses, so the third matching row is the void
+    // The `any` list holds two statuses, so the third matching row is the void
     // one, which the list excludes.
     assert_eq!(totals(&db, &second).await, [500]);
 
@@ -304,10 +304,10 @@ async fn the_json_face_and_the_rust_face_agree() {
     let db = seeded().await;
 
     let payload =
-        r#"{"filters":{"status__in":["open","paid"],"or":[{"total__lt":200},{"vip":true}]}}"#;
+        r#"{"filters":{"status__any":["open","paid"],"or":[{"total__lt":200},{"vip":true}]}}"#;
     let parsed = Query::<OrderLiveColumn>::parse(payload).unwrap();
     let rust = OrderLive::query().filters([
-        c().status.in_(["open", "paid"]),
+        c().status.any(["open", "paid"]),
         Filter::or([c().total.lt(200), c().vip.eq(true)]),
     ]);
 
@@ -402,7 +402,7 @@ async fn the_query_runs_a_filter_and_paging() {
 
     let rows: Vec<OrderLiveSelect> = OrderLive::query()
         .select(c().total)
-        .filters([c().status.in_(["open", "paid"])])
+        .filters([c().status.any(["open", "paid"])])
         .limit(2)
         .offset(1)
         .build()

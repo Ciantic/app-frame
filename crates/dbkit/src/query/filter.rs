@@ -5,6 +5,7 @@ use crate::Column;
 use crate::Columns;
 use crate::FilterOperator;
 use crate::query::Bind;
+use crate::query::capability::HasAny;
 use crate::query::capability::HasBetween;
 use crate::query::capability::HasContains;
 use crate::query::capability::HasContainsAll;
@@ -12,16 +13,15 @@ use crate::query::capability::HasEq;
 use crate::query::capability::HasGt;
 use crate::query::capability::HasGte;
 use crate::query::capability::HasILike;
-use crate::query::capability::HasIn;
 use crate::query::capability::HasLike;
 use crate::query::capability::HasLt;
 use crate::query::capability::HasLte;
 use crate::query::capability::HasNeq;
+use crate::query::capability::HasNotAny;
 use crate::query::capability::HasNotBetween;
 use crate::query::capability::HasNotContains;
 use crate::query::capability::HasNotContainsAll;
 use crate::query::capability::HasNotILike;
-use crate::query::capability::HasNotIn;
 use crate::query::capability::HasNotLike;
 use crate::query::capability::HasNotOverlaps;
 use crate::query::capability::HasOverlaps;
@@ -379,8 +379,8 @@ impl<Tag: HasNotBetween<C>, C: Column, T: Bind + PartialOrd> ColumnRef<Tag, C, T
     }
 }
 
-impl<Tag: HasIn<C>, C: Column, T: Bind> ColumnRef<Tag, C, T> {
-    pub fn in_<I>(self, values: I) -> Filter<C>
+impl<Tag: HasAny<C>, C: Column, T: Bind> ColumnRef<Tag, C, T> {
+    pub fn any<I>(self, values: I) -> Filter<C>
     where
         I: IntoIterator,
         I::Item: Into<T>,
@@ -388,12 +388,12 @@ impl<Tag: HasIn<C>, C: Column, T: Bind> ColumnRef<Tag, C, T> {
     {
         let values: Vec<T> = values.into_iter().map(Into::into).collect();
 
-        self.leaf(FilterOperator::In, Operand::list(values))
+        self.leaf(FilterOperator::Any, Operand::list(values))
     }
 }
 
-impl<Tag: HasNotIn<C>, C: Column, T: Bind> ColumnRef<Tag, C, T> {
-    pub fn not_in<I>(self, values: I) -> Filter<C>
+impl<Tag: HasNotAny<C>, C: Column, T: Bind> ColumnRef<Tag, C, T> {
+    pub fn not_any<I>(self, values: I) -> Filter<C>
     where
         I: IntoIterator,
         I::Item: Into<T>,
@@ -401,7 +401,7 @@ impl<Tag: HasNotIn<C>, C: Column, T: Bind> ColumnRef<Tag, C, T> {
     {
         let values: Vec<T> = values.into_iter().map(Into::into).collect();
 
-        self.leaf(FilterOperator::NotIn, Operand::list(values))
+        self.leaf(FilterOperator::NotAny, Operand::list(values))
     }
 }
 

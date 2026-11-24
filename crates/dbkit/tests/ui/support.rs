@@ -15,7 +15,7 @@ pub struct Order {
     pub id: Uuid,
 
     #[db(pgtype = "varchar(20)")]
-    #[db(query_ops(eq, in))]
+    #[db(query_ops(eq, any))]
     pub status: String,
 
     #[db(pgtype = "int8")]

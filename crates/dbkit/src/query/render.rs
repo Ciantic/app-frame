@@ -61,8 +61,8 @@ enum Arity {
 
 fn arity(operator: FilterOperator) -> Arity {
     match operator {
-        FilterOperator::In
-        | FilterOperator::NotIn
+        FilterOperator::Any
+        | FilterOperator::NotAny
         | FilterOperator::Overlaps
         | FilterOperator::NotOverlaps
         | FilterOperator::ContainsAll
@@ -248,13 +248,13 @@ impl Renderer {
                 self.sql.push_str(" AND ");
                 self.push(Arc::clone(high))?;
             }
-            (Operand::List { values, .. }, FilterOperator::In) => {
+            (Operand::List { values, .. }, FilterOperator::Any) => {
                 self.column(column);
                 self.sql.push_str(" = ANY(");
                 self.push(Arc::clone(values))?;
                 self.sql.push(')');
             }
-            (Operand::List { values, .. }, FilterOperator::NotIn) => {
+            (Operand::List { values, .. }, FilterOperator::NotAny) => {
                 self.column(column);
                 self.sql.push_str(" <> ALL(");
                 self.push(Arc::clone(values))?;
@@ -319,10 +319,10 @@ impl Renderer {
             return Err(Error::ArrayRequired { column, operator });
         }
 
-        if matches!(operator, FilterOperator::In | FilterOperator::NotIn)
+        if matches!(operator, FilterOperator::Any | FilterOperator::NotAny)
             && is_array(leaf.column.pg_type())
         {
-            return Err(Error::ArrayList { column });
+            return Err(Error::ArrayAny { column });
         }
 
         match (arity(operator), &leaf.operand) {

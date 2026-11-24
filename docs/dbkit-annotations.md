@@ -41,7 +41,7 @@ pub struct Email {
     pub to: String,
 
     #[db(pgtype = "text")]
-    #[db(query_ops(eq, neq, like, ilike, in))]
+    #[db(query_ops(eq, neq, like, ilike, any))]
     pub subject: String,
 
     #[db(pgtype = "text")]
@@ -100,7 +100,7 @@ not use that form:
 - One annotation per line, each in its own `#[db(...)]` attribute.
 - Role first, then `pgtype`, then `pgdefault`, then `query_ops`:
   `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
-  `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, in))]`.
+  `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, any))]`.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
 - A `#[db(flatten)]` field carries that annotation alone.
 - On a `DbType` struct, `#[db(pgtype = "...")]` sits above
@@ -297,10 +297,10 @@ Declares which comparisons a column may be queried with.
 
 - Legal on: a field, optional and at most once.
 - Value: one or more operators inside parentheses, comma-separated:
-  `#[db(query_ops(eq, neq, like, in))]`. A bare `#[db(eq)]` is not accepted,
+  `#[db(query_ops(eq, neq, like, any))]`. A bare `#[db(eq)]` is not accepted,
   and an empty `query_ops()` is an error.
 - Operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `not_like`,
-  `not_ilike`, `in`, `not_in`, `contains`, `not_contains`, `overlaps`,
+  `not_ilike`, `any`, `not_any`, `contains`, `not_contains`, `overlaps`,
   `not_overlaps`, `contains_all`, `not_contains_all`, `is_null`, `is_not_null`,
   `between`, `not_between`. They map one-to-one onto `dbkit::FilterOperator`,
   and each name is also the JSON key suffix and the method on the column

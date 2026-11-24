@@ -14,7 +14,7 @@ struct Widget {
     #[db(primary_key, pgtype = "uuid", pgdefault = "uuidv7()")]
     id: Uuid,
     #[db(pgtype = "text")]
-    #[db(query_ops(eq, neq, like, in))]
+    #[db(query_ops(eq, neq, like, any))]
     name: String,
     #[db(created_at, pgtype = "timestamptz", pgdefault = "now()")]
     created_at: DateTime<Utc>,
@@ -152,7 +152,7 @@ fn derive_generates_table_metadata() {
             FilterOperator::Eq,
             FilterOperator::Neq,
             FilterOperator::Like,
-            FilterOperator::In,
+            FilterOperator::Any,
         ]
     );
     assert!(meta.columns[0].query_ops().is_empty());
