@@ -13,18 +13,23 @@ use std::collections::BTreeSet;
 /// The enum is the only description of a column: the model's
 /// [`TableMeta`](crate::TableMeta) holds these same values erased as
 /// [`ErasedColumn`], so the two cannot disagree.
+///
+/// A `#[db(flatten)]` field contributes a variant that wraps the fragment's
+/// enum, so a flattened column stays typed and selectable as
+/// `FrameColumn::Size(SizeColumn::Width)`.
 pub trait Column: Copy + Ord + std::fmt::Debug + Send + Sync + 'static {
     /// The model the column belongs to.
     type Model: Model;
 
-    /// Every column declared on the model itself, in declaration order.
-    ///
-    /// The columns of a `#[db(flatten)]` field are spliced into the model's
-    /// metadata at runtime, so they have no variant here.
-    const ALL: &'static [Self];
+    /// Every column, in declaration order, with a flattened field's columns at
+    /// the field's position.
+    fn all() -> &'static [Self];
 
     /// The column name as the database spells it.
     fn name(self) -> &'static str;
+
+    /// The column of that name, or `None` when the model has no such column.
+    fn from_name(name: &str) -> Option<Self>;
 
     /// The column type as DDL spells it: `uuid`, `text`, `varchar(255)`.
     fn pg_type(self) -> &'static str;
@@ -72,7 +77,7 @@ pub struct Columns<C: Column>(BTreeSet<C>);
 impl<C: Column> Columns<C> {
     /// Every column of the model.
     pub fn all() -> Self {
-        Self(C::ALL.iter().copied().collect())
+        Self(C::all().iter().copied().collect())
     }
 
     pub fn insert(&mut self, column: C) -> bool {

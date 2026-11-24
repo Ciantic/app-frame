@@ -66,14 +66,17 @@ pub struct Frame {
 
 #[test]
 fn the_column_trait_mirrors_the_inherent_items() {
-    assert_eq!(<WidgetColumn as Column>::ALL.len(), WidgetColumn::ALL.len());
+    assert_eq!(
+        <WidgetColumn as Column>::all().len(),
+        WidgetColumn::all().len()
+    );
     assert_eq!(Column::name(WidgetColumn::Name), "name");
 }
 
 #[test]
 fn all_lists_every_column_in_declaration_order() {
     assert_eq!(
-        WidgetColumn::ALL,
+        WidgetColumn::all(),
         &[
             WidgetColumn::Id,
             WidgetColumn::Name,
@@ -87,7 +90,7 @@ fn all_lists_every_column_in_declaration_order() {
 
 #[test]
 fn names_are_the_column_names() {
-    let names: Vec<&str> = WidgetColumn::ALL
+    let names: Vec<&str> = WidgetColumn::all()
         .iter()
         .map(|column| column.name())
         .collect();
@@ -108,7 +111,7 @@ fn names_are_the_column_names() {
 #[test]
 fn a_fragment_derives_columns_too() {
     assert_eq!(
-        SizeColumn::ALL
+        SizeColumn::all()
             .iter()
             .map(|column| column.name())
             .collect::<Vec<_>>(),
@@ -120,7 +123,7 @@ fn a_fragment_derives_columns_too() {
 fn all_selects_every_column() {
     let columns = Columns::all();
 
-    assert_eq!(columns.len(), WidgetColumn::ALL.len());
+    assert_eq!(columns.len(), WidgetColumn::all().len());
     assert!(columns.contains(WidgetColumn::Name));
 }
 
@@ -150,6 +153,24 @@ fn a_selection_serializes_to_column_names() {
 #[test]
 fn an_unknown_column_fails_to_deserialize() {
     assert!(serde_json::from_str::<Columns<WidgetColumn>>(r#"["password"]"#).is_err());
+}
+
+#[test]
+fn an_unknown_column_reports_the_known_columns() {
+    let error = serde_json::from_str::<Columns<WidgetColumn>>(r#"["password"]"#).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("unknown column `password`"), "{message}");
+    assert!(message.contains("email_verified_at"), "{message}");
+}
+
+#[test]
+fn a_flattened_column_is_named_in_an_unknown_column_error() {
+    let error = serde_json::from_str::<Columns<FrameColumn>>(r#"["password"]"#).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("width"), "{message}");
+    assert!(message.contains("height"), "{message}");
 }
 
 #[test]
@@ -220,8 +241,8 @@ fn pg_types_follow_the_selection_order() {
 fn metadata_columns_are_the_enum_variants() {
     let meta = Widget::meta();
 
-    assert_eq!(meta.columns().len(), WidgetColumn::ALL.len());
-    for (column, variant) in meta.columns().iter().zip(WidgetColumn::ALL) {
+    assert_eq!(meta.columns().len(), WidgetColumn::all().len());
+    for (column, variant) in meta.columns().iter().zip(WidgetColumn::all()) {
         assert_eq!(column.name(), variant.name());
         assert_eq!(column.pg_type(), variant.pg_type());
         assert_eq!(column.pg_default(), variant.pg_default());
@@ -242,21 +263,65 @@ fn a_column_is_found_by_name() {
 }
 
 #[test]
-fn a_flattened_table_splices_columns_into_metadata_only() {
-    let meta = Frame::meta();
-
+fn a_flattened_table_names_the_fragment_columns_through_its_variant() {
     assert_eq!(
-        meta.columns()
+        FrameColumn::all(),
+        &[
+            FrameColumn::Id,
+            FrameColumn::Size(SizeColumn::Width),
+            FrameColumn::Size(SizeColumn::Height),
+            FrameColumn::Label,
+        ]
+    );
+    assert_eq!(
+        FrameColumn::all()
             .iter()
             .map(|column| column.name())
             .collect::<Vec<_>>(),
         ["id", "width", "height", "label"]
     );
+}
+
+#[test]
+fn a_flattened_table_matches_the_metadata_columns() {
+    let meta = Frame::meta();
+
+    assert_eq!(meta.columns().len(), FrameColumn::all().len());
+    for (column, variant) in meta.columns().iter().zip(FrameColumn::all()) {
+        assert_eq!(column.name(), variant.name());
+        assert_eq!(column.pg_type(), variant.pg_type());
+        assert_eq!(column.nullable(), variant.nullable());
+    }
+}
+
+#[test]
+fn a_flattened_column_is_selectable() {
+    let columns: Columns<FrameColumn> = serde_json::from_str(r#"["width","label"]"#).unwrap();
+
+    assert_eq!(columns.names().collect::<Vec<_>>(), ["width", "label"]);
+    assert!(columns.contains(FrameColumn::Size(SizeColumn::Width)));
+    assert!(!columns.contains(FrameColumn::Size(SizeColumn::Height)));
     assert_eq!(
-        FrameColumn::ALL
-            .iter()
-            .map(|column| column.name())
-            .collect::<Vec<_>>(),
-        ["id", "label"]
+        serde_json::to_string(&columns).unwrap(),
+        r#"["width","label"]"#
     );
+}
+
+#[test]
+fn a_flattened_column_resolves_by_name() {
+    assert_eq!(
+        FrameColumn::from_name("height"),
+        Some(FrameColumn::Size(SizeColumn::Height))
+    );
+    assert_eq!(FrameColumn::from_name("depth"), None);
+}
+
+#[test]
+fn a_column_keeps_its_fragment_metadata() {
+    let column = FrameColumn::Size(SizeColumn::Width);
+
+    assert_eq!(column.pg_type(), "int4");
+    assert_eq!(column.pg_default(), None);
+    assert!(!column.nullable());
+    assert!(column.query_ops().is_empty());
 }

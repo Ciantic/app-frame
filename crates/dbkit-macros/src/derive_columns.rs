@@ -1,16 +1,19 @@
 //! Generation of a model's selectable columns.
 //!
 //! The generated enum has one variant per column declared on the model, named
-//! in PascalCase and carrying the column name as its serde representation, so
-//! a request names a column as the database spells it and an unknown name fails
-//! to deserialize. A variant is the only proof that a column exists, and its
-//! name is a `&'static str`, so a query layer can build SQL from it without
-//! ever formatting a request string into the statement.
+//! in PascalCase. A `#[db(flatten)]` field contributes a variant wrapping the
+//! fragment's own enum, so the fragment's columns stay typed and selectable as
+//! `<Model>Column::<Field>(<Fragment>Column::<Column>)` even though the parent
+//! enum cannot name them.
+//!
+//! Serde is written by hand rather than derived: the wire form of a column is
+//! its database name, which a wrapped variant only knows at runtime, and an
+//! unknown name must report the column list. A variant is the only proof that a
+//! column exists, and its name is a `&'static str`, so a query layer can build
+//! SQL from it without ever formatting a request string into the statement.
 //!
 //! Role columns are selectable too: a patch never touches the key, the version
-//! or the audit columns, but a read needs them. A `#[db(flatten)]` field adds
-//! no variants, because its type's columns are unknown at macro expansion; they
-//! are spliced into the model's metadata at runtime instead.
+//! or the audit columns, but a read needs them.
 
 use crate::annotations;
 use crate::annotations::Column;
@@ -35,121 +38,150 @@ pub(crate) fn expand(
     let name = &input.ident;
     let visibility = &input.vis;
     let columns = format_ident!("{name}Column");
-    let doc = format!("A selectable column of [`{name}`].");
-    let all_doc = "Every column declared on the model itself, in declaration order.";
-    let name_doc = "The column name as the database spells it.";
-    let type_doc = "The column type as DDL spells it.";
-    let default_doc = "The column default as DDL spells it, or `None` when the column has none.";
-    let nullable_doc = "Whether the column is nullable.";
-    let ops_doc = "The comparisons the column may be queried with, in declaration order.";
 
     let mut variants = Vec::new();
-    let mut all = Vec::new();
     let mut names = Vec::new();
     let mut types = Vec::new();
     let mut defaults = Vec::new();
     let mut nullability = Vec::new();
     let mut operators = Vec::new();
+    let mut literals = Vec::new();
+    let mut flattened = Vec::new();
 
     for column in &annotations.columns {
-        let Column::Scalar {
-            name,
-            ty,
-            nullable,
-            pg_type,
-            pg_default,
-            query_ops,
-        } = column
-        else {
-            continue;
-        };
+        match column {
+            Column::Scalar {
+                name: field,
+                ty,
+                nullable,
+                pg_type,
+                pg_default,
+                query_ops,
+            } => {
+                let variant = variant(field);
+                let literal = column_name(field);
+                let ty = annotations::underlying(ty);
+                let pg_type = match pg_type {
+                    annotations::PgType::Declared(pg_type) => quote!(#pg_type),
+                    annotations::PgType::Inherited => quote!(<#ty as ::dbkit::DbType>::PG_TYPE),
+                };
+                let pg_default = match pg_default {
+                    annotations::PgDefault::Declared(default) => {
+                        quote!(::core::option::Option::Some(#default))
+                    }
+                    annotations::PgDefault::None => quote!(::core::option::Option::None),
+                    annotations::PgDefault::Inherited => {
+                        quote!(<#ty as ::dbkit::DbType>::PG_DEFAULT)
+                    }
+                };
+                let query_ops: Vec<TokenStream> = query_ops
+                    .iter()
+                    .map(|operator| {
+                        let operator =
+                            Ident::new(operator.variant(), proc_macro2::Span::call_site());
+                        quote!(::dbkit::FilterOperator::#operator)
+                    })
+                    .collect();
 
-        let variant = variant(name);
-        let column_name = column_name(name);
-        let ty = annotations::underlying(ty);
-        let pg_type = match pg_type {
-            annotations::PgType::Declared(pg_type) => quote!(#pg_type),
-            annotations::PgType::Inherited => quote!(<#ty as ::dbkit::DbType>::PG_TYPE),
-        };
-        let pg_default = match pg_default {
-            annotations::PgDefault::Declared(default) => {
-                quote!(::core::option::Option::Some(#default))
+                variants.push(quote!(#variant));
+                names.push(quote!(Self::#variant => #literal));
+                literals.push(quote!(#literal => ::core::option::Option::Some(Self::#variant)));
+                types.push(quote!(Self::#variant => #pg_type));
+                defaults.push(quote!(Self::#variant => #pg_default));
+                nullability.push(quote!(Self::#variant => #nullable));
+                operators.push(quote!(Self::#variant => &[#(#query_ops),*]));
             }
-            annotations::PgDefault::None => quote!(::core::option::Option::None),
-            annotations::PgDefault::Inherited => quote!(<#ty as ::dbkit::DbType>::PG_DEFAULT),
-        };
-        let query_ops: Vec<TokenStream> = query_ops
-            .iter()
-            .map(|operator| {
-                let variant = Ident::new(operator.variant(), proc_macro2::Span::call_site());
-                quote!(::dbkit::FilterOperator::#variant)
-            })
-            .collect();
+            Column::Flattened { name: field, ty } => {
+                let variant = variant(field);
+                let ty = column_type(ty);
 
-        variants.push(quote! {
-            #[serde(rename = #column_name)]
-            #variant
-        });
-        all.push(quote!(Self::#variant));
-        names.push(quote!(Self::#variant => #column_name));
-        types.push(quote!(Self::#variant => #pg_type));
-        defaults.push(quote!(Self::#variant => #pg_default));
-        nullability.push(quote!(Self::#variant => #nullable));
-        operators.push(quote!(Self::#variant => &[#(#query_ops),*]));
+                variants.push(quote!(#variant(#ty)));
+                names.push(quote!(Self::#variant(inner) => ::dbkit::Column::name(inner)));
+                types.push(quote!(Self::#variant(inner) => ::dbkit::Column::pg_type(inner)));
+                defaults.push(quote!(Self::#variant(inner) => ::dbkit::Column::pg_default(inner)));
+                nullability.push(quote!(Self::#variant(inner) => ::dbkit::Column::nullable(inner)));
+                operators.push(quote!(Self::#variant(inner) => ::dbkit::Column::query_ops(inner)));
+                flattened.push((variant, ty));
+            }
+        }
     }
+
+    let nested_lookups: Vec<TokenStream> = flattened
+        .iter()
+        .map(|(variant, ty)| {
+            quote! {
+                if let ::core::option::Option::Some(inner) =
+                    <#ty as ::dbkit::Column>::from_name(name)
+                {
+                    return ::core::option::Option::Some(Self::#variant(inner));
+                }
+            }
+        })
+        .collect();
+
+    let all = all_function(&columns, &annotations.columns);
+
+    let doc = format!("A selectable column of [`{name}`].");
+    let all_doc = "Every column, in declaration order, with a flattened field's columns at the \
+                   field's position.";
+    let name_doc = "The column name as the database spells it.";
+    let from_name_doc = "The column of that name, or `None` when the model has no such column.";
+    let type_doc = "The column type as DDL spells it.";
+    let default_doc = "The column default as DDL spells it, or `None` when the column has none.";
+    let nullable_doc = "Whether the column is nullable.";
+    let ops_doc = "The comparisons the column may be queried with, in declaration order.";
 
     Ok(quote! {
         #[doc = #doc]
-        #[derive(
-            Debug,
-            Clone,
-            Copy,
-            PartialEq,
-            Eq,
-            Hash,
-            PartialOrd,
-            Ord,
-            ::serde::Serialize,
-            ::serde::Deserialize,
-        )]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #visibility enum #columns {
             #(#variants),*
         }
 
         impl #columns {
             #[doc = #all_doc]
-            pub const ALL: &'static [Self] = &[#(#all),*];
+            #all
 
             #[doc = #name_doc]
-            pub const fn name(self) -> &'static str {
+            pub fn name(self) -> &'static str {
                 match self {
                     #(#names),*
                 }
             }
 
+            #[doc = #from_name_doc]
+            pub fn from_name(name: &str) -> ::core::option::Option<Self> {
+                #(#nested_lookups)*
+
+                match name {
+                    #(#literals,)*
+                    _ => ::core::option::Option::None,
+                }
+            }
+
             #[doc = #type_doc]
-            pub const fn pg_type(self) -> &'static str {
+            pub fn pg_type(self) -> &'static str {
                 match self {
                     #(#types),*
                 }
             }
 
             #[doc = #default_doc]
-            pub const fn pg_default(self) -> ::core::option::Option<&'static str> {
+            pub fn pg_default(self) -> ::core::option::Option<&'static str> {
                 match self {
                     #(#defaults),*
                 }
             }
 
             #[doc = #nullable_doc]
-            pub const fn nullable(self) -> bool {
+            pub fn nullable(self) -> bool {
                 match self {
                     #(#nullability),*
                 }
             }
 
             #[doc = #ops_doc]
-            pub const fn query_ops(self) -> &'static [::dbkit::FilterOperator] {
+            pub fn query_ops(self) -> &'static [::dbkit::FilterOperator] {
                 match self {
                     #(#operators),*
                 }
@@ -159,10 +191,16 @@ pub(crate) fn expand(
         impl ::dbkit::Column for #columns {
             type Model = #name;
 
-            const ALL: &'static [Self] = #columns::ALL;
+            fn all() -> &'static [Self] {
+                #columns::all()
+            }
 
             fn name(self) -> &'static str {
                 #columns::name(self)
+            }
+
+            fn from_name(name: &str) -> ::core::option::Option<Self> {
+                #columns::from_name(name)
             }
 
             fn pg_type(self) -> &'static str {
@@ -181,7 +219,127 @@ pub(crate) fn expand(
                 #columns::query_ops(self)
             }
         }
+
+        impl ::serde::Serialize for #columns {
+            fn serialize<S: ::serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.name())
+            }
+        }
+
+        impl<'de> ::serde::Deserialize<'de> for #columns {
+            fn deserialize<D: ::serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> ::core::result::Result<Self, D::Error> {
+                struct ColumnVisitor;
+
+                impl<'de> ::serde::de::Visitor<'de> for ColumnVisitor {
+                    type Value = #columns;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut ::core::fmt::Formatter<'_>,
+                    ) -> ::core::fmt::Result {
+                        formatter.write_str("a column name")
+                    }
+
+                    fn visit_str<E: ::serde::de::Error>(
+                        self,
+                        name: &str,
+                    ) -> ::core::result::Result<#columns, E> {
+                        #columns::from_name(name).ok_or_else(|| {
+                            let known: ::std::vec::Vec<&'static str> = #columns::all()
+                                .iter()
+                                .map(|column| ::dbkit::Column::name(*column))
+                                .collect();
+
+                            E::custom(::std::format_args!(
+                                "unknown column `{name}`; expected one of: {}",
+                                known.join(", "),
+                            ))
+                        })
+                    }
+                }
+
+                deserializer.deserialize_str(ColumnVisitor)
+            }
+        }
     })
+}
+
+/// `all()` is a promoted slice when the model has no flattened field, and a
+/// cached `Vec` when it does: a nested enum's variants cannot be listed at
+/// expansion, so those columns are appended at run time.
+fn all_function(columns: &Ident, annotations: &[Column]) -> TokenStream {
+    let flattened = annotations
+        .iter()
+        .any(|column| matches!(column, Column::Flattened { .. }));
+
+    if !flattened {
+        let variants: Vec<TokenStream> = annotations
+            .iter()
+            .filter_map(|column| match column {
+                Column::Scalar { name, .. } => Some(variant(name)),
+                Column::Flattened { .. } => None,
+            })
+            .map(|variant| quote!(#columns::#variant))
+            .collect();
+
+        return quote! {
+            pub fn all() -> &'static [Self] {
+                &[#(#variants),*]
+            }
+        };
+    }
+
+    let entries: Vec<TokenStream> = annotations
+        .iter()
+        .map(|column| match column {
+            Column::Scalar { name, .. } => {
+                let variant = variant(name);
+                quote!(all.push(#columns::#variant);)
+            }
+            Column::Flattened { name, ty } => {
+                let variant = variant(name);
+                let ty = column_type(ty);
+                quote! {
+                    all.extend(
+                        <#ty as ::dbkit::Column>::all().iter().copied().map(#columns::#variant),
+                    );
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        pub fn all() -> &'static [Self] {
+            static ALL: ::std::sync::OnceLock<::std::vec::Vec<#columns>> =
+                ::std::sync::OnceLock::new();
+
+            ALL.get_or_init(|| {
+                let mut all: ::std::vec::Vec<#columns> = ::std::vec::Vec::new();
+                #(#entries)*
+                all
+            })
+        }
+    }
+}
+
+/// The column enum of a flattened field's type: the type with `Column`
+/// appended to its last path segment, so `size: Size` becomes `SizeColumn`.
+fn column_type(ty: &syn::Type) -> syn::Type {
+    let syn::Type::Path(path) = ty else {
+        return ty.clone();
+    };
+
+    let mut path = path.clone();
+    if let Some(segment) = path.path.segments.last_mut() {
+        segment.ident = format_ident!("{}Column", segment.ident);
+    }
+
+    syn::Type::Path(path)
 }
 
 /// The column name as the database spells it, without a raw-identifier prefix.

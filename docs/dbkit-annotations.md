@@ -611,20 +611,18 @@ pub struct Widget {
 
 // generated
 pub enum WidgetColumn {
-    #[serde(rename = "id")]
     Id,
-    #[serde(rename = "name")]
     Name,
-    #[serde(rename = "email_verified_at")]
     EmailVerifiedAt,
-    #[serde(rename = "version")]
     Version,
 }
 
 impl WidgetColumn {
-    pub const ALL: &'static [Self] = &[Self::Id, Self::Name, Self::EmailVerifiedAt, Self::Version];
+    pub fn all() -> &'static [Self] {
+        &[Self::Id, Self::Name, Self::EmailVerifiedAt, Self::Version]
+    }
 
-    pub const fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Id => "id",
             Self::Name => "name",
@@ -633,34 +631,67 @@ impl WidgetColumn {
         }
     }
 
-    pub const fn pg_type(self) -> &'static str { /* "uuid", "text", ... */ }
-    pub const fn pg_default(self) -> Option<&'static str> { /* Some("uuidv7()"), ... */ }
-    pub const fn nullable(self) -> bool { /* ... */ }
-    pub const fn query_ops(self) -> &'static [FilterOperator] { /* ... */ }
+    pub fn from_name(name: &str) -> Option<Self> { /* inverse of name() */ }
+    pub fn pg_type(self) -> &'static str { /* "uuid", "text", ... */ }
+    pub fn pg_default(self) -> Option<&'static str> { /* Some("uuidv7()"), ... */ }
+    pub fn nullable(self) -> bool { /* ... */ }
+    pub fn query_ops(self) -> &'static [FilterOperator] { /* ... */ }
 }
+
+impl Serialize for WidgetColumn { /* serialize_str(self.name()) */ }
+impl<'de> Deserialize<'de> for WidgetColumn { /* from_name(), else E::custom(...) */ }
 ```
 
 - A variant is the only proof that a column exists, and `name()` returns a
   `&'static str`, so a query layer builds SQL from the enum and never formats a
   request string into the statement. A name that is not a column fails to
   deserialize, and the SQL identifier cannot be bound as a parameter.
-- Variants are PascalCase, and `#[serde(rename = "...")]` carries the column
-  spelling, so the wire form is `["id", "email_verified_at"]` rather than the
-  Rust name.
+- Variants are PascalCase. Serde is written by hand: a column serializes as its
+  database name, and an unknown name reports the column list, so the wire form
+  is `["id", "email_verified_at"]` rather than the Rust name.
 - Role columns are selectable: a patch exposes business columns only, but a read
   needs the key, the version and the audit columns.
 - `dbkit::Columns<C>` is the selection set. It deserializes from an array of
   column names, iterates in declaration order, and offers `all()`, `insert`,
   `remove`, `contains`, `names()`, `pg_types()` and `len()`.
+- `Column::all()` is a promoted slice when the model has no flattened field and
+  a cached `Vec` when it does, because a nested enum's variants cannot be listed
+  at expansion time.
 - A `#[db(fragment)]` struct gets its own `<Fragment>Column`. A table with
-  `#[db(flatten)]` gets an enum of its own columns only: the fragment's columns
-  are unknown at expansion, so they appear in the table's metadata but not as
-  variants. `Column::ALL` therefore means "columns declared on this struct".
+  `#[db(flatten)]` gets a variant wrapping it:
+
+  ```rust
+  #[derive(DbModel)]
+  #[db(table = "frame")]
+  pub struct Frame {
+      #[db(primary_key)]
+      #[db(pgtype = "uuid")]
+      pub id: Uuid,
+      #[db(flatten)]
+      pub size: Size,
+      #[db(pgtype = "text")]
+      pub label: String,
+  }
+
+  // generated: the fragment's columns are selected through the wrapper
+  pub enum FrameColumn {
+      Id,
+      Size(SizeColumn),
+      Label,
+  }
+
+  FrameColumn::Size(SizeColumn::Width).name(); // "width"
+  ```
+
+  `all()` places the wrapped columns at the field's position, so `FrameColumn`
+  lists `id`, `width`, `height`, `label`. `from_name("width")` returns
+  `Some(FrameColumn::Size(SizeColumn::Width))`, and a request picks a flattened
+  column like any other.
 
 ### Column metadata
 
 The enum is the only description of a column. It carries the value and default
-inline, so these are `const fn`s with no lookup:
+inline, so these are plain lookups with no metadata search:
 
 ```rust
 WidgetColumn::Id.pg_type();                // "uuid", from the field type's DbType
@@ -778,10 +809,9 @@ These are deliberately out of scope until a model needs them:
   restriction is the macro's, not the type's: a fragment's `meta()` could
   splice a sibling's columns at runtime, but fragments are meant to stay leaf
   groups.
-- Fragments in `<Model>Column`: a table with `#[db(flatten)]` gets variants for
-  its own columns only. Naming the fragment's columns in the parent enum would
-  need a variant carrying `<Fragment>Column` and a hand-written serde
-  representation, which no model needs yet.
+- A fragment flattened twice in one table: both fields contribute a variant, and
+  `from_name` returns the first match, so a duplicate column name resolves to
+  one of them. The schema test reports the duplicate.
 - Marking a column unselectable: every column becomes a `<Model>Column`
   variant today, so restricting a sensitive column such as a token hash needs a
   new annotation.

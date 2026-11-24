@@ -34,9 +34,10 @@ mod derive_patch;
 /// The same expansion also emits the model's selectable column enum,
 /// `<Model>Column`, whose variants carry the column metadata; the model's
 /// `TableMeta` holds those same values erased as `dbkit::ErasedColumn`, so the
-/// two cannot disagree. A `#[db(flatten)]` field adds no variants: its type's
-/// columns are unknown at expansion and are spliced into the metadata at
-/// runtime instead.
+/// two cannot disagree. A `#[db(flatten)]` field contributes a variant that
+/// wraps the fragment's own enum, so a flattened column stays selectable as
+/// `<Model>Column::<Field>(<Fragment>Column::<Column>)` and its columns follow
+/// the field's position in `all()`.
 ///
 /// `query_ops` records which comparisons a column supports in
 /// `Column::query_ops`; it is metadata, not query code.
