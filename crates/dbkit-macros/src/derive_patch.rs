@@ -21,6 +21,15 @@ use syn::Type;
 
 pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let annotations = annotations::parse(input)?;
+
+    if let annotations::Shape::SubQuery(_) = annotations.shape {
+        return Err(syn::Error::new_spanned(
+            input,
+            "`DbPatch` cannot be derived for a `#[db(subquery = \"...\")]` struct; a subquery is \
+             read-only",
+        ));
+    }
+
     let name = &input.ident;
     let version = annotations.version.as_ref();
 
@@ -152,4 +161,27 @@ fn carries_rules(ty: &Type) -> bool {
             | "Uuid"
             | "DateTime"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_a_subquery() {
+        let input = syn::parse_str::<DeriveInput>(
+            r#"
+            #[db(subquery = "SELECT id FROM widget")]
+            struct WidgetSummary {
+                #[db(pgtype = "uuid")]
+                id: Uuid,
+            }
+        "#,
+        )
+        .unwrap();
+
+        let message = expand(&input).unwrap_err().to_string();
+
+        assert!(message.contains("a subquery is read-only"), "{message}");
+    }
 }

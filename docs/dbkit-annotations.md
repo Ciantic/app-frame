@@ -8,10 +8,13 @@ comparisons each column may be queried with. Every field carries a `pgtype`
 unless it is flattened or its type declares one with `#[derive(DbType)]`, and
 a table row needs a primary key; the other annotations are opt-in.
 
-A struct is one of two shapes:
+A struct is one of three shapes:
 
 - A table row, `#[db(table = "...")]`, which generates `impl dbkit::Model`
   with `Model::meta()`.
+- A subquery row, `#[db(subquery = "...")]`, whose row source is a query
+  rather than a table. It generates `impl dbkit::Model` returning
+  `Meta::SubQuery(&SubQuery { sql, columns })` and is read-only.
 - A fragment, `#[db(fragment)]`, which is a group of columns with no table of
   its own. It generates `impl dbkit::Model` returning
   `Meta::Fragment(&TableFragment { columns })`, and another model embeds it
@@ -72,8 +75,9 @@ generated patch would expose; role-annotated fields never are.
 
 ## Where annotations may appear
 
-- `#[db(table = "...")]` or `#[db(fragment)]` on the struct, exactly once.
-  They are mutually exclusive; `table` makes the struct a table row and
+- `#[db(table = "...")]`, `#[db(subquery = "...")]` or `#[db(fragment)]` on
+  the struct, exactly once. They are mutually exclusive; `table` makes the
+  struct a table row, `subquery` makes its rows the output of a query, and
   `fragment` makes it a column group.
 - `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`, unless
   the field type implements `dbkit::DbType`, exactly once.
@@ -84,7 +88,7 @@ generated patch would expose; role-annotated fields never are.
   `#[db(updated_at)]` on a field of a table row.
 - `#[db(query_ops(...))]` on a field, at most once; the parentheses hold a
   comma-separated operator list.
-- `#[db(flatten)]` on a field of a table row, at most once.
+- `#[db(flatten)]` on a field of a table row or a subquery row, at most once.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
   collected across all of them.
 - All attributes in the accepted vocabulary are listed here. Anything else is a
@@ -124,6 +128,49 @@ Names the table the row belongs to.
 - A table cannot have generic parameters, because the metadata cache is one
   `static` per type.
 
+## `subquery`
+
+Makes the struct's rows the output of a query, read as if they were a table.
+
+- Legal on: the struct, exactly once, as an alternative to `table` and
+  `fragment`.
+- Value: a non-empty string literal holding a `SELECT`, optionally preceded by
+  a `WITH` clause.
+- The value is not quoted or rewritten. A query of the model renders it as a
+  derived table, `SELECT ... FROM (<sql>) AS "subquery"`, so projections,
+  filters and paging apply to the query's output columns. PostgreSQL allows a
+  `WITH` clause inside a parenthesized `FROM` item, so a CTE takes the same
+  annotation.
+- Write the SQL without a trailing semicolon: the string is a derived table,
+  not a statement.
+- The SQL carries no bound parameters: the builder numbers its own filters
+  from `$1`, so a placeholder in the annotation would collide.
+- The struct declares the columns the query returns. It has no primary key,
+  version or audit columns, and role annotations are rejected.
+- `pgtype` and `query_ops` per field work as usual.
+- A subquery row is read-only: `#[derive(DbPatch)]` rejects it.
+- A subquery cannot have generic parameters, because the metadata cache is one
+  `static` per type.
+- Subqueries are not listed in `MODELS`, because they are not tables.
+
+```rust
+#[derive(DbModel, DbSelect, sqlx::FromRow)]
+#[db(subquery = "SELECT status, max(total) AS total FROM orders GROUP BY status")]
+pub struct StatusTotal {
+    #[db(pgtype = "varchar(20)")]
+    #[db(query_ops(eq))]
+    pub status: String,
+
+    #[db(pgtype = "int8")]
+    #[db(query_ops(gte))]
+    pub total: i64,
+}
+```
+
+`StatusTotal::query()` renders `SELECT * FROM (SELECT status, max(total) AS
+total FROM orders GROUP BY status) AS "subquery"`, and a filter on `total`
+becomes a `WHERE` on the aggregate.
+
 ## `fragment`
 
 Makes the struct a group of columns instead of a table row.
@@ -158,17 +205,17 @@ pub struct Size {
 
 ## `flatten`
 
-Splices the columns of a fragment into the enclosing table.
+Splices the columns of a fragment into the enclosing table or subquery.
 
-- Legal on: a field of a table row, at most once.
+- Legal on: a field of a table row or a subquery row, at most once.
 - Value: none; it is a bare annotation.
 - The field type must derive `DbModel` with `#[db(fragment)]`. The derive
   cannot inspect the type, so it matches on `<Type as dbkit::Model>::meta()`
   and, on `Meta::Fragment`, extends the column list with its `columns`. A type
-  that does not derive `DbModel` fails to compile; a table panics on the first
-  `meta()` call, naming the field and the table it found.
-- The fragment's columns take the field's position in the table's column list,
-  so declaration order is preserved across plain and flattened fields.
+  that does not derive `DbModel` fails to compile; a table or a subquery panics
+  on the first `meta()` call, naming the field and what it found.
+- The fragment's columns take the field's position in the enclosing column
+  list, so declaration order is preserved across plain and flattened fields.
 - A flattened field is not a column itself: it must not carry `pgtype`,
   `pgdefault`, `query_ops` or a role, and it must not be `Option`. An optional
   group is expressed by nullable columns inside the fragment.
@@ -377,13 +424,15 @@ Every rule below produces a compile error.
 
 - The target must be a struct, not an enum or a union.
 - The struct must have named fields.
-- The struct must carry `#[db(table = "...")]` or `#[db(fragment)]`, exactly
-  one of the two.
-- `table` must be a non-empty string literal, and `table` and `fragment` cannot
-  both be present.
-- A table must not have generic parameters.
-- A table row must declare `primary_key` at least once; a fragment must not
-  carry it or any other role.
+- The struct must carry `#[db(table = "...")]`, `#[db(subquery = "...")]` or
+  `#[db(fragment)]`, exactly one of the three.
+- `table` and `subquery` must each be a non-empty string literal, and the three
+  shapes cannot be combined.
+- A subquery must not end with a semicolon.
+- A table or a subquery must not have generic parameters.
+- A table row must declare `primary_key` at least once; a subquery and a
+  fragment must not carry it or any other role.
+- `DbPatch` cannot be derived for a subquery row.
 - Every field that is not `#[db(flatten)]` must carry `#[db(pgtype = "...")]`
   or have a type that implements `dbkit::DbType`.
 - `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`
@@ -407,10 +456,10 @@ Every rule below produces a compile error.
 - `query_ops` appears at most once per field, holds at least one operator, and
   every operator must be in the accepted list; repeating an operator is an
   error.
-- The `DbModel` struct attribute accepts only `table` and `fragment`; the
-  field-level attribute accepts only `pgtype`, `pgdefault`, `query_ops`,
-  `flatten` and the four roles. The `DbType` struct attribute accepts only
-  `pgtype` and `pgdefault`.
+- The `DbModel` struct attribute accepts only `table`, `subquery` and
+  `fragment`; the field-level attribute accepts only `pgtype`, `pgdefault`,
+  `query_ops`, `flatten` and the four roles. The `DbType` struct attribute
+  accepts only `pgtype` and `pgdefault`.
 - A `DbType` struct must not annotate its fields, and it must carry `pgtype`.
 
 ## How field types are matched
@@ -439,13 +488,18 @@ For reference when reading a compile failure:
 
 - `` `DbModel` can only be derived for structs ``
 - `` `DbModel` requires named fields ``
-- `` missing `#[db(table = "...")]` or `#[db(fragment)]` ``
-- ``unknown attribute; the struct accepts `table` or `fragment` ``
+- `` missing `#[db(table = "...")]`, `#[db(subquery = "...")]` or `#[db(fragment)]` ``
+- ``unknown attribute; the struct accepts `table`, `subquery` or `fragment` ``
 - `` `table` must not be empty ``
+- `` `subquery` must not be empty ``
+- `` `subquery` must not end with a semicolon; the query is wrapped in parentheses ``
 - `` duplicate `table` ``
+- `` duplicate `subquery` ``
 - `` duplicate `#[db(fragment)]` ``
-- `` `table` and `fragment` are mutually exclusive ``
-- `` `DbModel` on a table cannot have generic parameters; ... ``
+- `` `table`, `subquery` and `fragment` are mutually exclusive ``
+- `` `DbModel` on a table or a subquery cannot have generic parameters; ... ``
+- `` a subquery cannot carry `#[db(...)]` roles ``
+- `` `DbPatch` cannot be derived for a `#[db(subquery = "...")]` struct; a subquery is read-only ``
 - ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at`, `flatten`, `pgtype`, `pgdefault` or `query_ops` ``
 - `` a fragment cannot carry `#[db(...)]` roles ``
 - `` a fragment cannot `#[db(flatten)]` another struct ``
@@ -478,11 +532,12 @@ A field with neither `pgtype` nor a type that implements `DbType` is not caught
 by the derive, because it cannot resolve types; rustc reports the unsatisfied
 `dbkit::DbType` bound on the field type instead.
 
-One check is not a compile error. `#[db(flatten)]` on a table type compiles,
-because a table and a fragment are both `dbkit::Model`; the generated `meta()`
-matches `Meta` and panics on the table variant:
+One check is not a compile error. `#[db(flatten)]` on a table or a subquery
+type compiles, because all shapes are `dbkit::Model`; the generated `meta()`
+matches `Meta` and panics on the other variants:
 
 - `` `#[db(flatten)]` field `size` has type `<table>`, which is a table; flattened fields must be `#[db(fragment)]` structs ``
+- `` `#[db(flatten)]` field `size` has type `<type>`, which is a subquery; flattened fields must be `#[db(fragment)]` structs ``
 
 ## Generated metadata
 
@@ -502,9 +557,13 @@ matches `Meta` and panics on the table variant:
   type's `PG_DEFAULT`, or `None`, and `query_ops` is the `query_ops` list in
   declaration order or an empty slice.
 
-A `#[db(fragment)]` struct emits `Meta::Fragment(&TableFragment { columns })`
-instead, where `columns` is the same erased list and there are no table, key or
-role fields to fill in.
+A `#[db(subquery = "...")]` struct emits
+`Meta::SubQuery(&SubQuery { sql, columns })` instead, where `sql` is the
+annotation's string and `columns` is the same erased list. There is no table,
+key or role to fill in.
+
+A `#[db(fragment)]` struct emits `Meta::Fragment(&TableFragment { columns })`,
+again with the same erased list and no table, key or role fields.
 
 The list holds trait objects because a `#[db(flatten)]` field splices another
 type's columns, so one table's description can mix columns from several models
@@ -513,21 +572,25 @@ variants the same expansion emits; the macro pushes each variant's reference
 and extends the list from each flattened field's `Meta::Fragment` columns, then
 leaks the slice into a `static OnceLock<TableMeta>`. The first call does the
 allocation; every later call returns the same `Meta::Table`, pointing at the
-cached `TableMeta`. A fragment uses the same shape with a
-`OnceLock<TableFragment>`, so both shapes build their columns one way.
+cached `TableMeta`. A subquery uses a `OnceLock<SubQuery>` and a fragment a
+`OnceLock<TableFragment>`, so every shape builds its columns one way.
 
-`Meta` is an enum, so a fragment's value has no table name or key to lie about.
-`Meta::column(name)` looks a column up by name. Both shapes implement
-`Model`, so the type system still cannot tell them apart at the trait level;
-`flatten` matches the `Meta` variant at runtime, and `Meta::into_table()`
-panics if a fragment is listed in `MODELS`.
+`Meta` is an enum, so a fragment's value has no table name or key to lie about
+and a subquery carries its SQL where a table carries its name.
+`Meta::column(name)` looks a column up by name; `Meta::table()` and
+`Meta::subquery()` narrow the shape. All shapes implement `Model`, so the type
+system cannot tell them apart at the trait level; `flatten` matches the `Meta`
+variant at runtime, and `Meta::into_table()` panics if a subquery or a fragment
+is listed in `MODELS`.
 
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
 
 ## Generated patch
 
-`#[derive(DbPatch)]` on a model emits a `<Model>Patch` struct next to it:
+`#[derive(DbPatch)]` on a model emits a `<Model>Patch` struct next to it. A
+subquery row cannot derive it: there is no table to update and no key to name
+a row with.
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, DbModel, DbPatch)]
@@ -790,13 +853,13 @@ pub static MODELS: LazyLock<Vec<TableMeta>> =
 ```
 
 `Meta::into_table()` unwraps the `Meta::Table` variant into an owned
-`TableMeta` (`TableMeta` is `Copy`), and panics for a fragment. A `LazyLock`
-keeps the list a single shared value instead of rebuilding it per call.
-`&MODELS` coerces to `&[TableMeta]`, which is what the schema check and the
-tests take. Tests iterate `MODELS.iter()`; omitting a model from the list is
-caught by the schema test, which fails on any table without a model. Fragments
-are not tables, so they are not listed — and listing one panics instead of
-silently checking a table named `""`. A schema test that covers a model with
+`TableMeta` (`TableMeta` is `Copy`), and panics for a subquery or a fragment.
+A `LazyLock` keeps the list a single shared value instead of rebuilding it per
+call. `&MODELS` coerces to `&[TableMeta]`, which is what the schema check and
+the tests take. Tests iterate `MODELS.iter()`; omitting a model from the list
+is caught by the schema test, which fails on any table without a model.
+Subqueries and fragments are not tables, so they are not listed — and listing
+one panics instead of silently checking a table named `""`. A schema test that covers a model with
 `#[db(flatten)]` covers its fragment's columns through the model's
 `meta().columns()`.
 

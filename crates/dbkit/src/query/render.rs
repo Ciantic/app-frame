@@ -2,6 +2,8 @@
 
 use crate::Column;
 use crate::FilterOperator;
+use crate::Meta;
+use crate::model::Model;
 use crate::query::Bind;
 use crate::query::Combinator;
 use crate::query::Error;
@@ -86,8 +88,11 @@ fn needs_array_column(operator: FilterOperator) -> bool {
     )
 }
 
+/// The alias a `#[db(subquery = "...")]` model's derived table is given.
+/// PostgreSQL requires every table in `FROM` to have one.
+const SUBQUERY_ALIAS: &str = "subquery";
+
 pub(crate) fn render<C: Column>(query: &Query<C>) -> Result<Rendered, Error> {
-    let table = query.table()?;
     let mut renderer = Renderer::default();
 
     renderer.sql.push_str("SELECT ");
@@ -108,7 +113,7 @@ pub(crate) fn render<C: Column>(query: &Query<C>) -> Result<Rendered, Error> {
     }
 
     renderer.sql.push_str(" FROM ");
-    push_identifier(&mut renderer.sql, table);
+    push_source::<C>(&mut renderer.sql)?;
 
     if !query.filters.is_empty() {
         renderer.sql.push_str(" WHERE ");
@@ -383,6 +388,23 @@ fn symbol(operator: FilterOperator) -> &'static str {
         FilterOperator::NotILike => "NOT ILIKE",
         _ => unreachable!("only the symbolic and the pattern operators reach here"),
     }
+}
+
+/// The row source of a query: a quoted table, or a subquery wrapped in
+/// parentheses with the alias PostgreSQL requires.
+fn push_source<C: Column>(sql: &mut String) -> Result<(), Error> {
+    match C::Model::meta() {
+        Meta::Table(meta) => push_identifier(sql, meta.table),
+        Meta::SubQuery(subquery) => {
+            sql.push('(');
+            sql.push_str(subquery.sql);
+            sql.push_str(") AS ");
+            push_identifier(sql, SUBQUERY_ALIAS);
+        }
+        Meta::Fragment(_) => return Err(Error::NotATable),
+    }
+
+    Ok(())
 }
 
 /// Quotes an identifier, doubling an embedded `"`.

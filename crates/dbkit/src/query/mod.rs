@@ -1,6 +1,6 @@
-//! A `WHERE` clause as data: a query type tailored to one table, built from
-//! typed Rust values or parsed from succinct JSON, that renders to the
-//! `(sql, params)` pair `sqlx` executes.
+//! A `WHERE` clause as data: a query type tailored to one model's row source,
+//! built from typed Rust values or parsed from succinct JSON, that renders to
+//! the `(sql, params)` pair `sqlx` executes.
 //!
 //! Both faces converge on one [`Query<C>`], so a Rust-built query serializes
 //! to the JSON that rebuilds it, and neither face formats a request string into
@@ -9,9 +9,7 @@
 use crate::Column;
 use crate::Columns;
 use crate::FilterOperator;
-use crate::Meta;
 use crate::Selectable;
-use crate::model::Model;
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::PgArguments;
 use sqlx::postgres::PgRow;
@@ -52,7 +50,7 @@ pub const MAX_LIST: usize = 100;
 pub type SelectedQuery<C> =
     QueryAs<'static, Postgres, <<C as Column>::Model as Selectable>::Select, PgArguments>;
 
-/// One query of one table.
+/// One query of one model.
 ///
 /// `filters` is the top-level conjunction: it appends, and it never nests, so
 /// a group is only ever the explicit [`Filter::and`] or [`Filter::or`].
@@ -201,14 +199,6 @@ impl<C: Column> Query<C> {
             ),
         )
     }
-
-    /// The table the query reads, or an error when the model is a fragment.
-    pub(crate) fn table(&self) -> Result<&'static str, Error> {
-        match C::Model::meta() {
-            Meta::Table(meta) => Ok(meta.table),
-            Meta::Fragment(_) => Err(Error::NotATable),
-        }
-    }
 }
 
 impl<C: Column> Default for Query<C> {
@@ -328,7 +318,7 @@ pub enum Error {
     Nodes,
     /// More than [`MAX_LIMIT`].
     Limit,
-    /// The model is a fragment, which has no table to read.
+    /// The model is a fragment, which has no row source to read.
     NotATable,
     /// A selection with no columns, which is neither `SELECT *` nor valid SQL.
     EmptySelection,

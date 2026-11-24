@@ -76,11 +76,12 @@ impl FilterOperator {
     }
 }
 
-/// What the struct describes: a table row, or a group of columns embedded in
-/// another model with `#[db(flatten)]`.
+/// What the struct describes: a table row, rows a query produces, or a group
+/// of columns embedded in another model with `#[db(flatten)]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shape {
     Table(String),
+    SubQuery(String),
     Fragment,
 }
 
@@ -193,12 +194,13 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let mut errors = Vec::new();
     let shape = shape(&input.attrs, input.span(), &mut errors);
     let fragment = matches!(shape, Some(Shape::Fragment));
+    let subquery = matches!(shape, Some(Shape::SubQuery(_)));
 
     if !fragment && !input.generics.params.is_empty() {
         errors.push(syn::Error::new(
             input.generics.span(),
-            "`DbModel` on a table cannot have generic parameters; the metadata cache is one \
-             static per type",
+            "`DbModel` on a table or a subquery cannot have generic parameters; the metadata \
+             cache is one static per type",
         ));
     }
 
@@ -272,6 +274,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                 "a fragment cannot carry `#[db(...)]` roles",
             ));
         }
+        if subquery && !field_roles.is_empty() {
+            errors.push(syn::Error::new(
+                field.span(),
+                "a subquery cannot carry `#[db(...)]` roles",
+            ));
+        }
 
         for &role in field_roles {
             check_field_type(role, field, &mut errors);
@@ -311,7 +319,9 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let created_at = unique(&roles, Role::CreatedAt, &mut errors);
     let updated_at = unique(&roles, Role::UpdatedAt, &mut errors);
 
-    if !fragment && !roles.iter().any(|(role, _, _)| *role == Role::PrimaryKey) {
+    if matches!(shape, Some(Shape::Table(_)))
+        && !roles.iter().any(|(role, _, _)| *role == Role::PrimaryKey)
+    {
         errors.push(syn::Error::new(
             input.span(),
             "missing `#[db(primary_key)]`",
@@ -425,27 +435,36 @@ fn shape(
                 if value.value().is_empty() {
                     return Err(meta.error("`table` must not be empty"));
                 }
-                match &shape {
-                    None => shape = Some(Shape::Table(value.value())),
-                    Some(Shape::Table(_)) => return Err(meta.error("duplicate `table`")),
-                    Some(Shape::Fragment) => {
-                        return Err(meta.error("`table` and `fragment` are mutually exclusive"));
-                    }
+                if shape.is_some() {
+                    return Err(meta.error(shape_conflict(&shape, "table")));
                 }
+                shape = Some(Shape::Table(value.value()));
+            } else if meta.path.is_ident("subquery") {
+                let value: LitStr = meta.value()?.parse()?;
+                let sql = value.value();
+                let trimmed = sql.trim();
+                if trimmed.is_empty() {
+                    return Err(meta.error("`subquery` must not be empty"));
+                }
+                if trimmed.ends_with(';') {
+                    return Err(meta.error(
+                        "`subquery` must not end with a semicolon; the query is wrapped in \
+                         parentheses",
+                    ));
+                }
+                if shape.is_some() {
+                    return Err(meta.error(shape_conflict(&shape, "subquery")));
+                }
+                shape = Some(Shape::SubQuery(sql));
             } else if meta.path.is_ident("fragment") {
-                match &shape {
-                    None => shape = Some(Shape::Fragment),
-                    Some(Shape::Table(_)) => {
-                        return Err(meta.error("`table` and `fragment` are mutually exclusive"));
-                    }
-                    Some(Shape::Fragment) => {
-                        return Err(meta.error("duplicate `#[db(fragment)]`"));
-                    }
+                if shape.is_some() {
+                    return Err(meta.error(shape_conflict(&shape, "fragment")));
                 }
+                shape = Some(Shape::Fragment);
             } else {
-                return Err(
-                    meta.error("unknown attribute; the struct accepts `table` or `fragment`")
-                );
+                return Err(meta.error(
+                    "unknown attribute; the struct accepts `table`, `subquery` or `fragment`",
+                ));
             }
 
             Ok(())
@@ -459,11 +478,21 @@ fn shape(
     if shape.is_none() {
         errors.push(syn::Error::new(
             span,
-            "missing `#[db(table = \"...\")]` or `#[db(fragment)]`",
+            "missing `#[db(table = \"...\")]`, `#[db(subquery = \"...\")]` or `#[db(fragment)]`",
         ));
     }
 
     shape
+}
+
+/// The error for a repeated or a conflicting shape annotation.
+fn shape_conflict(shape: &Option<Shape>, attribute: &str) -> String {
+    match (shape, attribute) {
+        (Some(Shape::Table(_)), "table") => "duplicate `table`".to_owned(),
+        (Some(Shape::SubQuery(_)), "subquery") => "duplicate `subquery`".to_owned(),
+        (Some(Shape::Fragment), "fragment") => "duplicate `#[db(fragment)]`".to_owned(),
+        _ => "`table`, `subquery` and `fragment` are mutually exclusive".to_owned(),
+    }
 }
 
 fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnotations {
@@ -1000,7 +1029,10 @@ mod tests {
         );
 
         assert!(
-            message.contains("missing `#[db(table = \"...\")]` or `#[db(fragment)]`"),
+            message.contains(
+                "missing `#[db(table = \"...\")]`, `#[db(subquery = \"...\")]` or \
+                 `#[db(fragment)]`"
+            ),
             "{message}"
         );
     }
@@ -1034,6 +1066,103 @@ mod tests {
         assert!(fragment.version.is_none());
         assert_eq!(column_names(&fragment.columns), ["street", "city"]);
         assert!(scalar(&fragment.columns[1]).nullable);
+    }
+
+    #[test]
+    fn reads_a_subquery() {
+        let model = parse_model(
+            r#"
+            #[db(subquery = "SELECT id, name FROM widget")]
+            struct WidgetSummary {
+                #[db(pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text")]
+                name: String,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.shape,
+            Shape::SubQuery("SELECT id, name FROM widget".to_owned())
+        );
+        assert!(model.primary_key.is_empty());
+        assert!(model.version.is_none());
+        assert_eq!(column_names(&model.columns), ["id", "name"]);
+    }
+
+    #[test]
+    fn rejects_an_empty_subquery() {
+        let message = error(
+            r#"
+            #[db(subquery = "  ")]
+            struct WidgetSummary {
+                #[db(pgtype = "uuid")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`subquery` must not be empty"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_subquery_with_a_trailing_semicolon() {
+        let message = error(
+            r#"
+            #[db(subquery = "SELECT id FROM widget;")]
+            struct WidgetSummary {
+                #[db(pgtype = "uuid")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`subquery` must not end with a semicolon"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_subquery_with_another_shape() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            #[db(subquery = "SELECT id FROM widget")]
+            struct WidgetSummary {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`table`, `subquery` and `fragment` are mutually exclusive"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_roles_in_a_subquery() {
+        let message = error(
+            r#"
+            #[db(subquery = "SELECT id FROM widget")]
+            struct WidgetSummary {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("a subquery cannot carry `#[db(...)]` roles"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -1071,7 +1200,7 @@ mod tests {
         );
 
         assert!(
-            message.contains("`table` and `fragment` are mutually exclusive"),
+            message.contains("`table`, `subquery` and `fragment` are mutually exclusive"),
             "{message}"
         );
     }

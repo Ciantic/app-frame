@@ -1,8 +1,8 @@
 # Query builder
 
-A `WHERE` clause as data: a query type tailored to one table, built from typed
-Rust values or parsed from succinct JSON, that renders to the `(sql, params)`
-pair `sqlx` executes.
+A `WHERE` clause as data: a query type tailored to one model's row source,
+built from typed Rust values or parsed from succinct JSON, that renders to the
+`(sql, params)` pair `sqlx` executes.
 
 The code lives in `crates/dbkit/src/query/`, and `#[derive(DbModel)]` generates
 the per-model parts: `<Model>Column`, the column tags, the capability impls,
@@ -11,7 +11,7 @@ the per-model parts: `<Model>Column`, the column tags, the capability impls,
 
 ## Goal
 
-One query type per table, `Query<OrderColumn>`, with three faces:
+One query type per model, `Query<OrderColumn>`, with three faces:
 
 ```mermaid
 graph LR
@@ -1458,7 +1458,9 @@ Two consequences worth stating:
 ### Rendering
 
 - Start with `SELECT `, then `*` or the `Columns<C>` names, then ` FROM ` and
-  the quoted table from `TableMeta::table`.
+  the row source: the quoted table from `TableMeta::table`, or, for a
+  `#[db(subquery = "...")]` model, the annotated SQL in parentheses with the
+  alias `"subquery"`.
 - An empty `filters` list skips the `WHERE` entirely.
 - A list renders its entries joined by ` AND ` or ` OR `.
 - A group always renders as `(`, its children, `)`; parenthesizing every group
@@ -1565,7 +1567,9 @@ without reaching into them.
 ### Identifiers
 
 - Table and column names come from `TableMeta` and `Column::name()`, both
-  `&'static str` from the model, never from the request.
+  `&'static str` from the model, never from the request. A subquery's SQL is
+  `SubQuery::sql`, a compile-time literal from the annotation, also never from
+  the request.
 - They are still quoted defensively, with an embedded `"` doubled, because
   `#[db(table = "...")]` is a free-form literal and the helper costs nothing.
 - A reserved JSON key never becomes an identifier: it is matched against
@@ -1578,7 +1582,7 @@ Checks, in the order a request hits them:
 - Shape: a top-level key that is not `select`, `filters`, `limit` or `offset`.
 - Key syntax inside `filters`: unknown column (with the column list), unknown
   operator (with the operator list), duplicate key, wrong value shape.
-- Table: `C::Model` must be a table, not a fragment.
+- Row source: `C::Model` must be a table or a subquery; a fragment has none.
 - Projection: an empty selection is `Error::EmptySelection`; `None` is every
   column and stays `SELECT *`.
 - Model decoding: `build()` rejects a selection that leaves a column out with
@@ -1846,6 +1850,8 @@ Against `pgtest-server`, in `crates/dbkit/tests/query_live.rs`:
   rows on `{rust,sql}`, `{rust}`, `{go}` and `{}`, so the empty-array case that
   `not_contains` matches is covered.
 - The JSON face and the Rust face return the same rows for the same predicate.
+- A subquery model reads the rows its query produces, with a filter applied to
+  an aggregate output column.
 
 In `crates/dbkit/src/query/value.rs`, unit tests pin the JSON table: every alias
 sqlx accepts for `String` parses as one, each type name maps to its own type,
@@ -1945,7 +1951,9 @@ Built in steps that each compiled and passed their tests on their own.
 
 - `ORDER BY`: the natural next field, and the prerequisite for keyset paging.
   `LIMIT` and `OFFSET` are in scope now, bound as parameters.
-- Joins, subqueries, aggregates and `GROUP BY`.
+- Joins, aggregates and `GROUP BY`. A `#[db(subquery = "...")]` model wraps a
+  hand-written query, including a `WITH` clause, but the builder does not
+  construct one.
 - `not` as a group prefix: a group could gain a negation flag.
 - Cross-table queries: one `Query<C>` is one table.
 - Projection-aware decoding is in place: `#[derive(DbSelect)]` generates a row

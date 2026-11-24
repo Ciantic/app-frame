@@ -24,10 +24,12 @@ mod derive_value;
 /// Reads the `#[db(...)]` annotations of a model struct and generates
 /// `impl dbkit::Model for ...`, carrying them as `Model::meta()`.
 ///
-/// Accepted on the struct: `#[db(table = "...")]` for a table row, or
-/// `#[db(fragment)]` for a group of columns that another model embeds. The two
-/// generate different `Model::meta()` values, `Meta::Table` and
-/// `Meta::Fragment`, so a fragment never carries a table name or key.
+/// Accepted on the struct: `#[db(table = "...")]` for a table row,
+/// `#[db(subquery = "...")]` for rows a query produces, or `#[db(fragment)]`
+/// for a group of columns that another model embeds. The three generate
+/// different `Model::meta()` values, `Meta::Table`, `Meta::SubQuery` and
+/// `Meta::Fragment`, so a fragment never carries a table name or key and a
+/// subquery carries its SQL instead of a table.
 /// Accepted on a field: `#[db(pgtype = "...")]`, `#[db(pgdefault = "...")]`,
 /// `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
 /// `#[db(updated_at)]`, `#[db(query_ops(eq, neq, ...))]`, and
@@ -50,8 +52,10 @@ mod derive_value;
 /// that spells out `pgtype` keeps only the `pgdefault` it declares itself;
 /// a bare `#[db(pgdefault)]` states that the column has no default.
 ///
-/// `table`, `primary_key` and a column type per field are required; a table
-/// without a version or audit column omits those role annotations. `pgtype`
+/// `table` or `subquery`, a column type per field and, for a table,
+/// `primary_key` are required; a table without a version or audit column omits
+/// those role annotations. A subquery is read-only: it takes no roles and no
+/// `DbPatch`. `pgtype`
 /// is the column type as DDL spells it (`uuid`, `text`, `bigint`,
 /// `timestamptz`, `varchar(255)`, `numeric(10,2)`, `text[]`), so it can be
 /// checked against the database and later generate `schema.sql`. `pgdefault`
@@ -96,7 +100,8 @@ pub fn derive_db_type(input: TokenStream) -> TokenStream {
 /// model has one; every other business column becomes a `dbkit::Patch<T>`
 /// field, so a missing key leaves the column unchanged and an explicit `null`
 /// clears a nullable one. Audit columns (`created_at`, `updated_at`) are not
-/// patchable and are omitted.
+/// patchable and are omitted. A `#[db(subquery = "...")]` model is read-only
+/// and rejected.
 ///
 /// The generated struct is `Serialize + Deserialize + garde::Validate`. A
 /// patch field whose payload type can carry rules derives a `#[garde(dive)]`,
@@ -180,6 +185,12 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         ::core::stringify!(#name),
                         meta.table,
                     ),
+                    ::dbkit::Meta::SubQuery(_) => panic!(
+                        "`#[db(flatten)]` field `{}` has type `{}`, which is a subquery; \
+                         flattened fields must be `#[db(fragment)]` structs",
+                        ::core::stringify!(#name),
+                        ::core::stringify!(#ty),
+                    ),
                 }
             },
         })
@@ -196,6 +207,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 #(#push_columns)*
 
                 ::dbkit::TableFragment {
+                    columns: ::std::boxed::Box::leak(columns.into_boxed_slice()),
+                }
+            }))
+        },
+        annotations::Shape::SubQuery(sql) => quote! {
+            static META: ::std::sync::OnceLock<::dbkit::SubQuery> =
+                ::std::sync::OnceLock::new();
+
+            ::dbkit::Meta::SubQuery(META.get_or_init(|| {
+                let mut columns: ::std::vec::Vec<&'static dyn ::dbkit::ErasedColumn> =
+                    ::std::vec::Vec::new();
+                #(#push_columns)*
+
+                ::dbkit::SubQuery {
+                    sql: #sql,
                     columns: ::std::boxed::Box::leak(columns.into_boxed_slice()),
                 }
             }))

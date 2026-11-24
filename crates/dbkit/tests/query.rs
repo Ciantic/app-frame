@@ -84,6 +84,27 @@ struct Odd {
     weight: f64,
 }
 
+/// A model whose row source is a query, written with a `WITH` clause.
+#[derive(DbModel, DbSelect, sqlx::FromRow)]
+#[expect(dead_code, reason = "the fields exist only to derive the row metadata")]
+#[db(
+    subquery = "WITH vip AS (SELECT status, total FROM orders WHERE vip) SELECT status, total \
+                FROM vip"
+)]
+struct VipOrder {
+    #[db(pgtype = "varchar(20)")]
+    #[db(query_ops(eq, any))]
+    status: String,
+
+    #[db(pgtype = "int8")]
+    #[db(query_ops(gte))]
+    total: i64,
+}
+
+fn vip() -> VipOrderColumns {
+    VipOrder::columns()
+}
+
 fn c() -> OrderColumns {
     Order::columns()
 }
@@ -117,6 +138,42 @@ fn build_error(query: &Query<OrderColumn>) -> String {
         .render()
         .expect_err("the query is rejected")
         .to_string()
+}
+
+#[test]
+fn a_subquery_model_renders_its_query_as_a_derived_table() {
+    let query = VipOrder::query()
+        .select(vip().total)
+        .filters([vip().status.eq("open"), vip().total.gte(100)])
+        .limit(5);
+    let rendered = query.render().expect("the query renders");
+
+    assert_eq!(
+        rendered.sql,
+        "SELECT \"total\" FROM (WITH vip AS (SELECT status, total FROM orders WHERE vip) SELECT \
+         status, total FROM vip) AS \"subquery\" WHERE \"status\" = $1 AND \"total\" >= $2 LIMIT \
+         $3"
+    );
+    assert_eq!(
+        rendered.values_json(),
+        vec![json!("open"), json!(100), json!(5)]
+    );
+}
+
+#[test]
+fn a_subquery_model_supports_both_query_faces() {
+    let parsed =
+        Query::<VipOrderColumn>::parse(r#"{"filters": {"status": "open"}, "limit": 3}"#).unwrap();
+    let rust = VipOrder::query()
+        .filters([vip().status.eq("open")])
+        .limit(3);
+
+    assert_eq!(parsed, rust);
+    let _ = VipOrder::query().build().unwrap();
+    let _ = VipOrder::query()
+        .select(vip().status)
+        .build_selected()
+        .unwrap();
 }
 
 #[test]

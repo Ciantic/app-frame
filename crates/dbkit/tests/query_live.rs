@@ -42,6 +42,19 @@ struct OrderLive {
     deleted_at: Option<DateTime<Utc>>,
 }
 
+/// A model whose rows come from a query rather than a table.
+#[derive(DbModel, DbSelect, sqlx::FromRow)]
+#[db(subquery = "SELECT status, max(total) AS total FROM orders_live GROUP BY status")]
+struct StatusTotal {
+    #[db(pgtype = "varchar(20)")]
+    #[db(query_ops(eq))]
+    status: String,
+
+    #[db(pgtype = "int8")]
+    #[db(query_ops(gte))]
+    total: i64,
+}
+
 const SCHEMA: &str = r#"
     create table "orders_live" (
         "id" uuid not null default uuidv7(),
@@ -344,6 +357,66 @@ async fn build_returns_a_query_that_decodes_selected_rows() {
     assert_eq!(rows[1].total, Selected::Set(250));
     assert!(rows[0].id.is_absent(), "the projection left it out");
     assert!(rows[0].tags.is_absent());
+}
+
+#[tokio::test]
+async fn a_subquery_model_reads_the_rows_its_query_produces() {
+    let db = seeded().await;
+    let columns = StatusTotal::columns();
+
+    let mut rows: Vec<StatusTotal> = StatusTotal::query()
+        .filters([columns.total.gte(400)])
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    rows.sort_by(|left, right| left.status.cmp(&right.status));
+
+    let summary: Vec<(&str, i64)> = rows
+        .iter()
+        .map(|row| (row.status.as_str(), row.total))
+        .collect();
+
+    assert_eq!(summary, [("paid", 500), ("void", 500)]);
+    assert_eq!(
+        StatusTotal::query()
+            .filters([columns.status.eq("open")])
+            .build()
+            .unwrap()
+            .fetch_one(&db)
+            .await
+            .unwrap()
+            .total,
+        250
+    );
+}
+
+#[tokio::test]
+async fn a_subquery_model_projects_and_pages_like_a_table() {
+    let db = seeded().await;
+    let columns = StatusTotal::columns();
+
+    let query = StatusTotal::query()
+        .select(columns.status)
+        .filters([columns.total.gte(250)])
+        .limit(1);
+
+    assert_eq!(
+        query.render().unwrap().sql,
+        "SELECT \"status\" FROM (SELECT status, max(total) AS total FROM orders_live GROUP BY \
+         status) AS \"subquery\" WHERE \"total\" >= $1 LIMIT $2"
+    );
+
+    let row: StatusTotalSelect = query
+        .build_selected()
+        .unwrap()
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+    assert!(row.status.is_set());
+    assert!(row.total.is_absent(), "the projection left it out");
 }
 
 #[tokio::test]

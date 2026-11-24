@@ -45,6 +45,18 @@ struct WidgetLog {
     note: Option<String>,
 }
 
+/// A read-only row source that is a query rather than a table.
+#[derive(DbModel)]
+#[db(subquery = "SELECT status, total FROM orders WHERE vip")]
+#[expect(dead_code, reason = "the fields exist only to derive the row metadata")]
+struct VipOrders {
+    #[db(pgtype = "varchar(20)")]
+    #[db(query_ops(eq))]
+    status: String,
+    #[db(pgtype = "int8")]
+    total: i64,
+}
+
 /// A column group embedded in another model rather than a table of its own.
 #[derive(DbModel)]
 #[db(fragment)]
@@ -53,6 +65,15 @@ struct Size {
     width: i32,
     #[db(pgtype = "int4")]
     height: i32,
+}
+
+/// A subquery splices a fragment's columns the same way a table does.
+#[derive(DbModel)]
+#[db(subquery = "SELECT width, height FROM sizes")]
+#[expect(dead_code, reason = "the field exists only to derive the row metadata")]
+struct SizeRow {
+    #[db(flatten)]
+    size: Size,
 }
 
 /// A value type that carries its column type and default.
@@ -210,6 +231,37 @@ fn fragment_metadata_has_no_table() {
     );
 }
 
+/// A subquery is a `Model` too, but describes no table and carries its SQL.
+#[test]
+fn subquery_metadata_has_sql_and_no_table() {
+    let meta = VipOrders::meta();
+    let subquery = meta.subquery().expect("a subquery");
+
+    assert_eq!(meta.table(), None);
+    assert_eq!(subquery.sql, "SELECT status, total FROM orders WHERE vip");
+    assert_eq!(
+        meta.columns()
+            .iter()
+            .map(|column| column.name())
+            .collect::<Vec<_>>(),
+        ["status", "total"]
+    );
+}
+
+#[test]
+fn a_subquery_splices_flattened_columns_in_place() {
+    let meta = SizeRow::meta();
+
+    assert_eq!(
+        meta.columns()
+            .iter()
+            .map(|column| column.name())
+            .collect::<Vec<_>>(),
+        ["width", "height"]
+    );
+    assert_eq!(meta.columns(), Size::meta().columns());
+}
+
 #[test]
 fn metadata_is_built_once() {
     let first = Widget::meta().table().expect("a table");
@@ -318,4 +370,10 @@ fn flattening_a_table_panics() {
 #[should_panic(expected = "is not a table and cannot be listed in `MODELS`")]
 fn listing_a_fragment_in_models_panics() {
     let _ = Size::meta().into_table();
+}
+
+#[test]
+#[should_panic(expected = "is not a table and cannot be listed in `MODELS`")]
+fn listing_a_subquery_in_models_panics() {
+    let _ = VipOrders::meta().into_table();
 }
