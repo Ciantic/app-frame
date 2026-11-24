@@ -115,6 +115,8 @@ impl UserInsert {
 
 - `new` takes the required fields in declaration order. A model with no required
   fields gets `new()` with no arguments.
+- A required field is taken with `impl Into<T>`, so `String` accepts `"text"`
+  while a newtype still takes its own type.
 - Optional fields start as `None`.
 - `set_<field>(value)` sets an optional field to `Some(value)` or replaces a
   required field.
@@ -184,6 +186,82 @@ transaction.commit().await?;
 A `&mut Transaction` makes the batch use a savepoint. A failing nested batch
 restores its savepoint and leaves the outer transaction usable.
 
+## Generated insert surface
+
+`#[derive(DbInsert)]` implements `dbkit::InsertRow` for `<Model>Insert`:
+
+```rust
+impl InsertRow for UserInsert {
+    type Model = User;
+
+    fn columns(&self) -> Vec<Assignment<'_>>;
+}
+```
+
+- `columns` lists the provided columns in declaration order. An optional field
+  left `None` is not listed, and every listed column has a value.
+- A flattened fragment's insert implements the same trait; the parent extends
+  its columns. A fragment insert cannot be applied on its own, so `::insert()`
+  is generated only for tables.
+- `Assignment` is the same `{ column, value }` pair the patch builder uses.
+
+The query type mirrors `PatchQuery`:
+
+```rust
+pub struct InsertQuery<P: InsertRow> {
+    // private
+}
+
+impl<P: InsertRow> InsertQuery<P> {
+    pub fn new(entries: impl IntoIterator<Item = P>) -> Self;
+    pub fn render(&self) -> Result<Vec<RenderedInsert>, InsertError>;
+
+    pub async fn execute<'c, A>(
+        self,
+        acquirer: A,
+    ) -> Result<Vec<P::Model>, InsertError>
+    where
+        A: Acquire<'c, Database = Postgres>,
+        P::Model: for<'r> FromRow<'r, PgRow> + Send + Unpin;
+}
+```
+
+The insert struct follows the model's visibility. A private model gets a
+private insert type.
+
+The derive also adds the constructor and setters described above and, for a
+table, the entry point:
+
+```rust
+impl User {
+    pub fn insert(
+        entries: impl IntoIterator<Item = UserInsert>,
+    ) -> dbkit::InsertQuery<UserInsert> {
+        dbkit::InsertQuery::new(entries)
+    }
+}
+```
+
+## Rendering without executing
+
+`render()` returns one `RenderedInsert` per entry, for assertions and logs:
+
+```rust
+let rendered = User::insert([user]).render()?;
+
+assert_eq!(
+    rendered[0].sql,
+    "INSERT INTO \"user\" (\"email\") VALUES ($1) RETURNING *"
+);
+assert_eq!(rendered[0].values, vec![json!("new@example.com")]);
+```
+
+- `RenderedInsert::sql` is the statement text.
+- `RenderedInsert::arguments` is the assembled `PgArguments`.
+- `RenderedInsert::values` is the same values as JSON, in placeholder order.
+
+Rendering does not touch the database, and an empty batch renders nothing.
+
 ## SQL
 
 A required column renders its value:
@@ -228,7 +306,12 @@ RETURNING *
   timestamps and versions.
 - Every entry is its own `INSERT`, because entries can provide different
   optional columns and a single multi-row statement would need one uniform
-  column list.
+  column list. Filling the differences with `NULL` would defeat the column
+  defaults.
+- Separate statements also preserve the input order of the returned rows, and
+  the transaction makes the batch all-or-nothing. Grouping entries with
+  identical columns into one multi-row `INSERT` is a possible later
+  optimization.
 
 ### Imported timestamps
 
@@ -249,7 +332,8 @@ pub enum InsertError {
 
 - `NotATable` — the model is a fragment or a subquery. The generated table
   method cannot reach it.
-- `NotInserted` — an `INSERT ... RETURNING *` returned no row.
+- `NotInserted` — an `INSERT ... RETURNING *` returned no row; `index` names the
+  entry. A successful insert of one row returns exactly one row.
 - `Sqlx` — encoding, execution, decoding, savepoint or commit failed. Unique,
   foreign-key, check and not-null violations stay wrapped here; a handler
   inspects `sqlx::Error::Database` to map a constraint to a status.
