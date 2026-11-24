@@ -38,6 +38,7 @@ pub use query::ColumnRef;
 pub use query::Combinator;
 pub use query::Filter;
 pub use query::Group;
+pub use query::IntoColumns;
 pub use query::Leaf;
 pub use query::Operand;
 pub use query::Query;

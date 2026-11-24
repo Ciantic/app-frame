@@ -196,7 +196,8 @@ Because of the first point, an empty `in` list is an error rather than a silent
 
 ### The JSON grammar
 
-A query object holds `filters`, `limit` and `offset`, and nothing else:
+A query object holds `select`, `filters`, `limit` and `offset`, and nothing
+else:
 
 ```json
 {
@@ -206,6 +207,9 @@ A query object holds `filters`, `limit` and `offset`, and nothing else:
 }
 ```
 
+- `select` is the projection: an array of column names. It is absent when every
+  column is wanted, and an empty array is an error rather than a second
+  spelling of "every column".
 - `filters` is the filter tree. It is absent when there is nothing to filter,
   which is why `{"limit": 20}` is a valid request for the first page of every
   row; an empty object is the same as absent.
@@ -246,7 +250,7 @@ A query object holds `filters`, `limit` and `offset`, and nothing else:
   That filters on the `limit` column and then takes 20 rows. The combinators
   `and` and `or` are the only reserved keys left inside a level, and a column
   of that name wins there — see [Arbitrary nesting](#arbitrary-nesting).
-- A key beside `filters` that is none of the three is an error naming them, so
+- A key beside `filters` that is none of the four is an error naming them, so
   a payload in the older flat shape is rejected with a message rather than
   silently matching nothing.
 - `null` is the short form of `is_null`: `{"deleted_at": null}` renders
@@ -268,6 +272,9 @@ A query object holds `filters`, `limit` and `offset`, and nothing else:
   table. Cross-table queries are out of scope.
 - `limit` and `offset` hold a non-negative integer. A negative or fractional
   value is a syntax error rather than a clamp.
+- `select` keeps its order: an unknown name is an error naming the column list,
+  a repeated name is one column, and `["total", "id"]` prints and renders in
+  that order rather than being reordered to declaration order.
 
 ### Arbitrary nesting
 
@@ -610,11 +617,13 @@ one of the six that takes a scalar.
 ### Projection
 
 ```rust
-let columns: Columns<OrderColumn> = [OrderColumn::Id, OrderColumn::Total]
-    .into_iter()
-    .collect();
+Order::query()
+    .select(&[c.id.column(), c.total.column()])
+    .filters([c.status.eq("open")])
+```
 
-Order::query().select(columns).filters([c.status.eq("open")])
+```json
+{ "select": ["id", "total"], "filters": { "status": "open" } }
 ```
 
 ```sql
@@ -622,8 +631,13 @@ SELECT "id", "total" FROM "orders" WHERE "status" = $1
 -- params: ["open"]
 ```
 
-`Columns<C>` is the existing selection type, so the column order is declaration
-order rather than request order, and an unknown name is a parse error.
+`select` takes anything that reduces to `Columns<C>`: one handle, one enum
+variant, a prebuilt set, or a list of columns, owned or borrowed. A list holds
+one type, so a list of handles spells `.column()` on each; a single handle
+needs nothing. Column order is the caller's — declaration order for
+`Columns::all()`, request order otherwise — and an unknown name is a parse
+error. See [plan-select.md](plan-select.md) for why
+the forms are what they are.
 
 ### Paging
 
@@ -809,11 +823,18 @@ Each rejected request names what is wrong. The payloads below show only the
   gt, gte, lt, lte
 ```
 
-A key beside `filters` is rejected with the three that belong there:
+A key beside `filters` is rejected with the four that belong there:
 
 ```text
 { "vip": true }
-  unknown key `vip`; a query takes `filters`, `limit` and `offset`
+  unknown key `vip`; a query takes `select`, `filters`, `limit` and `offset`
+```
+
+An empty projection is rejected rather than reading every column:
+
+```text
+{ "select": [] }
+  a selection needs at least one column; omit `select` to read every column
 ```
 
 The Rust face catches the value type and the unlisted operator at compile time
@@ -1493,10 +1514,12 @@ without reaching into them.
 
 Checks, in the order a request hits them:
 
-- Shape: a top-level key that is not `filters`, `limit` or `offset`.
+- Shape: a top-level key that is not `select`, `filters`, `limit` or `offset`.
 - Key syntax inside `filters`: unknown column (with the column list), unknown
   operator (with the operator list), duplicate key, wrong value shape.
 - Table: `C::Model` must be a table, not a fragment.
+- Projection: an empty selection is `Error::EmptySelection`; `None` is every
+  column and stays `SELECT *`.
 - Operator allowed, Rust face: enforced by the compiler. A column's handle only
   has methods for the operators its `#[db(query_ops(...))]` lists, so
   `c.total.like(..)` on a column without `like` does not compile at all. This
@@ -1549,7 +1572,8 @@ The numbers are constants in one place.
 ```rust
 impl<C: Column> Query<C> {
     pub fn new() -> Self;
-    pub fn select(self, columns: Columns<C>) -> Self;
+    /// Replaces the selection; without it the query reads every column.
+    pub fn select(self, columns: impl IntoColumns<C>) -> Self;
     /// Appends to the top-level conjunction; it never nests.
     pub fn filters(self, filters: impl IntoIterator<Item = Filter<C>>) -> Self;
     pub fn parse(json: &str) -> Result<Self, Error>;
@@ -1641,9 +1665,15 @@ sparse; that constraint from the `Columns` work is unchanged.
 - `{"filters": {"vip": true}}` equals `{"filters": {"vip__eq": true}}`;
   `{"deleted_at": null}` and `{"deleted_at__neq": null}` render `IS NULL` and
   `IS NOT NULL`; `{"deleted_at__is_null": true}` is the same request.
-- The wrapper is load-bearing: a key beside `filters` is rejected with the three
+- The wrapper is load-bearing: a key beside `filters` is rejected with the four
   that belong there, `{"filters": 5}` says it expects an object, and
   `{"filters": {}}` builds a query with no `WHERE`.
+- Every selection shape builds its columns in the order it was given; a second
+  `select` replaces the first; an empty selection is `Error::EmptySelection`
+  from both faces.
+- `{"select": ["id", "total"]}` parses and round-trips, `["total", "id"]`
+  parses to a different query that renders in its own order, an unknown name
+  reports the column list, and a repeated name is one column.
 - `A AND B AND (C OR (D AND E AND F))` from both faces, and each face's output
   parses into the other.
 - Nesting is structural: `filters([and([a, and([b, c])])])` renders
@@ -1680,7 +1710,8 @@ Against `pgtest-server`, in `crates/dbkit/tests/query_live.rs`:
 - A two-element and a fifty-element `in` list produce the same statement text.
 - Paging returns the expected window, and `limit` 0 returns no rows.
 - `uuid`, `varchar`, `int8`, `bool` and `timestamptz` values each bind.
-- A sparse projection returns the requested columns.
+- A projection built from handles returns the requested columns, and a row
+  decoded from it reports the columns it lacks as `ColumnNotFound`.
 - `contains`, `overlaps`, `contains_all` and `not_contains` return the expected
   rows on `{rust,sql}`, `{rust}`, `{go}` and `{}`, so the empty-array case that
   `not_contains` matches is covered.
@@ -1757,10 +1788,9 @@ Each step compiled and passed its tests on its own; all six are done.
   use `like` even though its pg type is `text`. A `Textual` marker trait, derived
   for transparent newtypes, would lift that without letting `like` reach an
   `i64`.
-- Should `select` be expressible in JSON? It is a reserved key away, but
-  `"select": [...]` would shadow a column of that name, and the ordering rules
-  for it differ from filters. Paging, by contrast, is in: `limit` and `offset`
-  are integers with no per-column typing to do.
+- Should `select` be expressible in JSON? It is, as `"select": ["id"]`; the
+  `filters` wrapper means it shadows no column, and the list keeps the request's
+  order, so the payload round-trips byte for byte.
 - Should `offset` be expressible but discouraged? Large offsets scan and
   discard rows, so a service with deep pages wants keyset paging from
   `ORDER BY`. Keeping the field is still the lesser evil: a client that cannot
@@ -1777,5 +1807,5 @@ Each step compiled and passed its tests on its own; all six are done.
 - `not` as a group prefix: a group could gain a negation flag.
 - Cross-table queries: one `Query<C>` is one table.
 - Projection-aware decoding: `SELECT *` with a sparse selection still needs a
-  design beyond `sqlx::FromRow`.
+  design beyond `sqlx::FromRow`; see [plan-select.md](plan-select.md).
 - Applying `garde` rules to filter values: the newtype is bypassed by JSON.

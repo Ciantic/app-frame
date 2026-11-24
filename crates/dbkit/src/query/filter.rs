@@ -2,6 +2,7 @@
 //! through.
 
 use crate::Column;
+use crate::Columns;
 use crate::FilterOperator;
 use crate::query::Bind;
 use crate::query::capability::HasBetween;
@@ -497,5 +498,73 @@ where
         let values: Vec<T> = values.into_iter().map(Into::into).collect();
 
         self.leaf(FilterOperator::NotContainsAll, Operand::list(values))
+    }
+}
+
+/// What a selection may be built from: one column, one handle, a prebuilt set,
+/// or a list of columns, owned or borrowed.
+///
+/// The element types differ, because a handle is one type per column, so the
+/// trait is what lets `select` take a mix of them. Only the array form needs a
+/// single element type, and a handle reduces to its column with
+/// [`column()`](ColumnRef::column).
+pub trait IntoColumns<C: Column> {
+    fn into_columns(self) -> Columns<C>;
+}
+
+impl<C: Column> IntoColumns<C> for C {
+    fn into_columns(self) -> Columns<C> {
+        [self].into_iter().collect()
+    }
+}
+
+impl<Tag, C: Column, T> IntoColumns<C> for ColumnRef<Tag, C, T> {
+    fn into_columns(self) -> Columns<C> {
+        [self.column].into_iter().collect()
+    }
+}
+
+impl<C: Column> IntoColumns<C> for Columns<C> {
+    fn into_columns(self) -> Columns<C> {
+        self
+    }
+}
+
+impl<C: Column, const N: usize> IntoColumns<C> for [C; N] {
+    fn into_columns(self) -> Columns<C> {
+        self.into_iter().collect()
+    }
+}
+
+// Through a reference, so a caller can pass a list it does not own. These do
+// not overlap the impls above: `Column` is this crate's trait, and none of
+// these reference types implements it.
+impl<C: Column, const N: usize> IntoColumns<C> for &[C; N] {
+    fn into_columns(self) -> Columns<C> {
+        self.iter().copied().collect()
+    }
+}
+
+impl<C: Column> IntoColumns<C> for &[C] {
+    fn into_columns(self) -> Columns<C> {
+        self.iter().copied().collect()
+    }
+}
+
+impl<C: Column> IntoColumns<C> for Vec<C> {
+    fn into_columns(self) -> Columns<C> {
+        self.into_iter().collect()
+    }
+}
+
+impl<C: Column> IntoColumns<C> for &Vec<C> {
+    fn into_columns(self) -> Columns<C> {
+        self.iter().copied().collect()
+    }
+}
+
+impl<C: Column> IntoColumns<C> for &Columns<C> {
+    fn into_columns(self) -> Columns<C> {
+        self.iter().collect()
     }
 }

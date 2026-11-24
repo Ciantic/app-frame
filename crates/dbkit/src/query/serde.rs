@@ -11,6 +11,7 @@
 //! has to outrank one.
 
 use crate::Column;
+use crate::Columns;
 use crate::FilterOperator;
 use crate::query::Combinator;
 use crate::query::Error;
@@ -35,6 +36,11 @@ impl<C: Column> Serialize for Query<C> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(None)?;
 
+        if let Some(select) = &self.select {
+            let names: Vec<&'static str> = select.names().collect();
+
+            map.serialize_entry("select", &names)?;
+        }
         if !self.filters.is_empty() {
             map.serialize_entry("filters", &Level(&self.filters))?;
         }
@@ -201,7 +207,7 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
     type Value = Result<Query<C>, Error>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a query object, holding `filters`, `limit` and `offset`")
+        formatter.write_str("a query object, holding `select`, `filters`, `limit` and `offset`")
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
@@ -229,6 +235,10 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
             seen.push(key.clone());
 
             match key.as_str() {
+                "select" => match select::<C>(map.next_value()?) {
+                    Ok(selected) => query.select = Some(selected),
+                    Err(error) => rejected = Some(error),
+                },
                 "filters" => match map.next_value::<ParsedLevel<C>>()? {
                     ParsedLevel(Ok(LevelOwned(filters))) => query.filters = filters,
                     ParsedLevel(Err(error)) => rejected = Some(error),
@@ -247,6 +257,32 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
             None => Ok(query),
         })
     }
+}
+
+/// Reads the `select` list, resolving each name through the column enum so an
+/// unknown one reports the column list.
+///
+/// `Columns<C>` implements `Deserialize` for the request types, but reading the
+/// names here keeps this visitor on `C: Column` alone, without asking every
+/// caller to spell out a serde bound.
+fn select<C: Column>(requested: Vec<String>) -> Result<Columns<C>, Error> {
+    let mut columns = Columns::default();
+
+    for name in requested {
+        match C::from_name(&name) {
+            Some(column) => {
+                columns.insert(column);
+            }
+            None => {
+                return Err(Error::UnknownColumn {
+                    name,
+                    known: names::<C>(),
+                });
+            }
+        }
+    }
+
+    Ok(columns)
 }
 
 /// One filter object, for the `filters` value and for a level inside an

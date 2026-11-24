@@ -85,7 +85,11 @@ pub(crate) fn build<C: Column>(query: &Query<C>) -> Result<Built, Error> {
 
     renderer.sql.push_str("SELECT ");
     match &query.select {
-        Some(columns) if !columns.is_empty() => {
+        Some(columns) => {
+            if columns.is_empty() {
+                return Err(Error::EmptySelection);
+            }
+
             for (index, name) in columns.names().enumerate() {
                 if index > 0 {
                     renderer.sql.push_str(", ");
@@ -93,7 +97,7 @@ pub(crate) fn build<C: Column>(query: &Query<C>) -> Result<Built, Error> {
                 push_identifier(&mut renderer.sql, name);
             }
         }
-        _ => renderer.sql.push('*'),
+        None => renderer.sql.push('*'),
     }
 
     renderer.sql.push_str(" FROM ");

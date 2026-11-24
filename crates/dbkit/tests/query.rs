@@ -360,16 +360,158 @@ fn the_array_operators_mirror_in() {
 }
 
 #[test]
-fn a_projection_lists_the_selected_columns_in_declaration_order() {
-    let columns: Columns<OrderColumn> = [OrderColumn::Total, OrderColumn::Id].into_iter().collect();
-
+fn a_projection_lists_the_selected_columns_in_the_order_they_were_given() {
     let query = Order::query()
-        .select(columns)
+        .select([OrderColumn::Total, OrderColumn::Id])
         .filters([c().status.eq("open")]);
 
     assert_eq!(
         built(&query).0,
-        "SELECT \"id\", \"total\" FROM \"orders\" WHERE \"status\" = $1"
+        "SELECT \"total\", \"id\" FROM \"orders\" WHERE \"status\" = $1"
+    );
+}
+
+#[test]
+fn every_selection_shape_builds_its_columns_in_its_own_order() {
+    let projected = "SELECT \"id\", \"total\" FROM \"orders\"";
+
+    assert_eq!(
+        built(&Order::query().select(c().id)).0,
+        "SELECT \"id\" FROM \"orders\""
+    );
+    assert_eq!(
+        built(&Order::query().select(OrderColumn::Id)).0,
+        "SELECT \"id\" FROM \"orders\""
+    );
+    assert_eq!(
+        built(&Order::query().select([c().id.column(), c().total.column()])).0,
+        projected
+    );
+    // A list of variants keeps its own order.
+    assert_eq!(
+        built(&Order::query().select([OrderColumn::Total, OrderColumn::Id])).0,
+        "SELECT \"total\", \"id\" FROM \"orders\""
+    );
+    assert_eq!(
+        built(&Order::query().select(Columns::all())).0,
+        "SELECT \"id\", \"status\", \"total\", \"vip\", \"tags\", \"deleted_at\" FROM \"orders\""
+    );
+    assert_eq!(built(&Order::query()).0, "SELECT * FROM \"orders\"");
+}
+
+#[test]
+fn a_handle_list_keeps_one_element_type() {
+    // Two handles are two types, so the list holds the column each names.
+    let handles = [c().id.column(), c().total.column()];
+
+    assert_eq!(handles.len(), 2);
+}
+
+#[test]
+fn a_named_list_can_be_selected_by_reference() {
+    let projected = "SELECT \"id\", \"total\" FROM \"orders\"";
+    let array = [OrderColumn::Id, OrderColumn::Total];
+    let owned = vec![OrderColumn::Id, OrderColumn::Total];
+    let set: Columns<OrderColumn> = array.into_iter().collect();
+
+    // Each of these leaves its binding usable afterwards.
+    assert_eq!(built(&Order::query().select(&array[..])).0, projected);
+    assert_eq!(built(&Order::query().select(&owned)).0, projected);
+    assert_eq!(built(&Order::query().select(&set)).0, projected);
+
+    assert_eq!(array.len(), 2);
+    assert_eq!(owned.len(), 2);
+    assert_eq!(set.len(), 2);
+}
+
+#[test]
+fn a_second_select_replaces_the_first() {
+    let query = Order::query().select(c().id).select(c().total);
+
+    assert_eq!(built(&query).0, "SELECT \"total\" FROM \"orders\"");
+}
+
+#[test]
+fn an_empty_selection_is_an_error() {
+    assert_eq!(
+        build_error(&Order::query().select(Columns::default())),
+        "a selection needs at least one column; omit `select` to read every column"
+    );
+    // The JSON face parses it, because only `build()` knows the projection is
+    // rendered; the rejection is the same either way.
+    let query = Query::<OrderColumn>::parse(r#"{"select": []}"#).unwrap();
+
+    assert_eq!(
+        build_error(&query),
+        "a selection needs at least one column; omit `select` to read every column"
+    );
+}
+
+#[test]
+fn the_select_key_parses_and_serializes() {
+    let query = Query::<OrderColumn>::parse(r#"{"select": ["id", "total"]}"#).unwrap();
+
+    assert_eq!(built(&query).0, "SELECT \"id\", \"total\" FROM \"orders\"");
+    assert_eq!(
+        serde_json::to_string(&query).unwrap(),
+        r#"{"select":["id","total"]}"#
+    );
+
+    // Request order is kept, and it is part of equality: the two render
+    // different SQL.
+    let reversed = Query::<OrderColumn>::parse(r#"{"select": ["total", "id"]}"#).unwrap();
+
+    assert_ne!(reversed, query);
+    assert_eq!(
+        serde_json::to_string(&reversed).unwrap(),
+        r#"{"select":["total","id"]}"#
+    );
+    assert_eq!(
+        built(&reversed).0,
+        "SELECT \"total\", \"id\" FROM \"orders\""
+    );
+}
+
+#[test]
+fn select_must_be_a_list_of_names() {
+    let message = Query::<OrderColumn>::parse(r#"{"select": "id"}"#)
+        .expect_err("the projection is not a list")
+        .to_string();
+
+    assert!(message.contains("invalid type: string"), "{message}");
+}
+
+#[test]
+fn an_unknown_selected_column_names_the_columns() {
+    let message = Query::<OrderColumn>::parse(r#"{"select": ["nope"]}"#)
+        .expect_err("the column is unknown")
+        .to_string();
+
+    assert!(
+        message.starts_with(
+            "unknown column `nope`; expected one of: id, status, total, vip, tags, deleted_at"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_duplicate_selected_column_is_one_column() {
+    let query = Query::<OrderColumn>::parse(r#"{"select": ["id", "id"]}"#).unwrap();
+
+    assert_eq!(built(&query).0, "SELECT \"id\" FROM \"orders\"");
+}
+
+#[test]
+fn select_serializes_before_filters_and_paging() {
+    let query = Order::query()
+        .select(c().total)
+        .filters([c().status.eq("open")])
+        .limit(20);
+
+    assert_eq!(
+        serde_json::to_string(&query).unwrap(),
+        r#"{"select":["total"],"filters":{"status":"open"},"limit":20}"#
     );
 }
 
@@ -513,7 +655,7 @@ fn a_filter_at_the_top_level_says_where_filters_go() {
 
     assert_eq!(
         message,
-        "unknown key `vip`; a query takes `filters`, `limit` and `offset`"
+        "unknown key `vip`; a query takes `select`, `filters`, `limit` and `offset`"
     );
 }
 

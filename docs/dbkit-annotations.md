@@ -678,8 +678,9 @@ the API asks a caller to name them.
 - Role columns are selectable: a patch exposes business columns only, but a read
   needs the key, the version and the audit columns.
 - `dbkit::Columns<C>` is the selection set. It deserializes from an array of
-  column names, iterates in declaration order, and offers `all()`, `insert`,
-  `remove`, `contains`, `names()`, `pg_types()` and `len()`.
+  column names, iterates in the order the columns were added, and offers
+  `all()`, `insert`, `remove`, `contains`, `names()`, `pg_types()` and `len()`.
+  `all()` adds them in declaration order; a request keeps its own.
 - `Column::all()` is a promoted slice when the model has no flattened field and
   a cached `Vec` when it does, because a nested enum's variants cannot be listed
   at expansion time.

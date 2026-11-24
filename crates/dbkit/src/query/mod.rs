@@ -23,6 +23,7 @@ pub use filter::ColumnRef;
 pub use filter::Combinator;
 pub use filter::Filter;
 pub use filter::Group;
+pub use filter::IntoColumns;
 pub use filter::Leaf;
 pub use filter::Operand;
 pub use render::Built;
@@ -64,9 +65,10 @@ impl<C: Column> Query<C> {
         }
     }
 
-    /// Selects the given columns instead of every column.
-    pub fn select(mut self, columns: Columns<C>) -> Self {
-        self.select = Some(columns);
+    /// Selects the given columns instead of every column. Calling it again
+    /// replaces the selection rather than adding to it.
+    pub fn select(mut self, columns: impl IntoColumns<C>) -> Self {
+        self.select = Some(columns.into_columns());
         self
     }
 
@@ -247,6 +249,8 @@ pub enum Error {
     Limit,
     /// The model is a fragment, which has no table to read.
     NotATable,
+    /// A selection with no columns, which is neither `SELECT *` nor valid SQL.
+    EmptySelection,
     /// sqlx refused a value while the arguments were assembled.
     Encode(sqlx::Error),
     Json(serde_json::Error),
@@ -354,7 +358,7 @@ impl fmt::Display for Error {
             ),
             Error::UnknownKey { key } => write!(
                 formatter,
-                "unknown key `{key}`; a query takes `filters`, `limit` and `offset`"
+                "unknown key `{key}`; a query takes `select`, `filters`, `limit` and `offset`"
             ),
             Error::Depth => write!(formatter, "filters nest deeper than {MAX_DEPTH} levels"),
             Error::Nodes => write!(
@@ -365,6 +369,9 @@ impl fmt::Display for Error {
             Error::NotATable => {
                 formatter.write_str("the model is a `#[db(fragment)]`, which has no table to query")
             }
+            Error::EmptySelection => formatter.write_str(
+                "a selection needs at least one column; omit `select` to read every column",
+            ),
             Error::Encode(error) => error.fmt(formatter),
             Error::Json(error) => error.fmt(formatter),
         }

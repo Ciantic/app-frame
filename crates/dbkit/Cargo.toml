@@ -7,6 +7,7 @@ edition.workspace = true
 chrono.workspace = true
 dbkit-macros = { path = "../dbkit-macros" }
 garde.workspace = true
+indexmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

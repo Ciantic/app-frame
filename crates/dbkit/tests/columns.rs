@@ -133,8 +133,8 @@ fn a_selection_deserializes_from_column_names() {
 
     assert_eq!(
         columns.names().collect::<Vec<_>>(),
-        ["id", "name"],
-        "the set iterates in declaration order, not request order"
+        ["name", "id"],
+        "the set keeps request order"
     );
 }
 
@@ -146,7 +146,7 @@ fn a_selection_serializes_to_column_names() {
 
     assert_eq!(
         serde_json::to_string(&columns).unwrap(),
-        r#"["id","version"]"#
+        r#"["version","id"]"#
     );
 }
 
@@ -229,12 +229,38 @@ fn a_column_carries_its_query_operators() {
 }
 
 #[test]
+fn selections_compare_by_order() {
+    let forward: Columns<WidgetColumn> =
+        [WidgetColumn::Id, WidgetColumn::Name].into_iter().collect();
+    let backward: Columns<WidgetColumn> =
+        [WidgetColumn::Name, WidgetColumn::Id].into_iter().collect();
+
+    assert_ne!(
+        forward, backward,
+        "the two render different SQL, so they are different selections"
+    );
+}
+
+#[test]
+fn all_columns_are_in_declaration_order() {
+    let columns = Columns::<WidgetColumn>::all();
+
+    assert_eq!(
+        columns.names().collect::<Vec<_>>(),
+        WidgetColumn::all()
+            .iter()
+            .map(|column| column.name())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn pg_types_follow_the_selection_order() {
     let columns: Columns<WidgetColumn> = [WidgetColumn::Version, WidgetColumn::Id]
         .into_iter()
         .collect();
 
-    assert_eq!(columns.pg_types().collect::<Vec<_>>(), ["uuid", "bigint"]);
+    assert_eq!(columns.pg_types().collect::<Vec<_>>(), ["bigint", "uuid"]);
 }
 
 #[test]

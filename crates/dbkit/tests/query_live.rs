@@ -245,12 +245,8 @@ async fn every_scalar_type_binds() {
 async fn a_sparse_selection_returns_its_columns() {
     let db = seeded().await;
 
-    let columns: dbkit::Columns<OrderLiveColumn> =
-        [OrderLiveColumn::Status, OrderLiveColumn::Total]
-            .into_iter()
-            .collect();
     let query = OrderLive::query()
-        .select(columns)
+        .select([OrderLiveColumn::Status, OrderLiveColumn::Total])
         .filters([c().total.eq(100)]);
     let built = query.build().unwrap();
 
@@ -266,6 +262,48 @@ async fn a_sparse_selection_returns_its_columns() {
 
     assert_eq!(row.get::<String, _>("status"), "open");
     assert_eq!(row.get::<i64, _>("total"), 100);
+}
+
+#[tokio::test]
+async fn the_handles_build_a_projection_that_runs() {
+    let db = seeded().await;
+
+    let query = OrderLive::query()
+        .select(c().status)
+        .filters([c().total.eq(100)]);
+    let built = query.build().unwrap();
+
+    assert_eq!(
+        built.sql,
+        "SELECT \"status\" FROM \"orders_live\" WHERE \"total\" = $1"
+    );
+
+    let row = sqlx::query_with(AssertSqlSafe(built.sql), built.arguments)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(row.get::<String, _>("status"), "open");
+}
+
+#[tokio::test]
+async fn a_projected_row_reports_the_columns_it_lacks() {
+    use sqlx::Column as _;
+    use sqlx::Row as _;
+
+    let db = seeded().await;
+
+    let query = OrderLive::query().select([c().status.column(), c().total.column()]);
+    let built = query.build().unwrap();
+    let row = sqlx::query_with(AssertSqlSafe(built.sql), built.arguments)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+    let names: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
+
+    assert_eq!(names, ["status", "total"]);
+    assert!(row.try_get::<Uuid, _>("id").is_err());
 }
 
 #[tokio::test]
