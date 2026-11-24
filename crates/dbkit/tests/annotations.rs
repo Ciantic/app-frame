@@ -127,10 +127,10 @@ fn derive_generates_table_metadata() {
         .iter()
         .map(|column| {
             (
-                column.name,
-                column.nullable,
-                column.pg_type,
-                column.pg_default,
+                column.name(),
+                column.nullable(),
+                column.pg_type(),
+                column.pg_default(),
             )
         })
         .collect();
@@ -147,7 +147,7 @@ fn derive_generates_table_metadata() {
     );
 
     assert_eq!(
-        meta.columns[1].query_ops,
+        meta.columns[1].query_ops(),
         [
             FilterOperator::Eq,
             FilterOperator::Neq,
@@ -155,7 +155,7 @@ fn derive_generates_table_metadata() {
             FilterOperator::In,
         ]
     );
-    assert!(meta.columns[0].query_ops.is_empty());
+    assert!(meta.columns[0].query_ops().is_empty());
 }
 
 #[test]
@@ -167,10 +167,10 @@ fn derive_inherits_pgtype_and_pgdefault_from_the_field_type() {
         .iter()
         .map(|column| {
             (
-                column.name,
-                column.nullable,
-                column.pg_type,
-                column.pg_default,
+                column.name(),
+                column.nullable(),
+                column.pg_type(),
+                column.pg_default(),
             )
         })
         .collect();
@@ -190,7 +190,7 @@ fn derive_inherits_pgtype_and_pgdefault_from_the_field_type() {
 fn derive_splices_flattened_columns_in_place() {
     let meta = Frame::meta();
 
-    let columns: Vec<&str> = meta.columns().iter().map(|column| column.name).collect();
+    let columns: Vec<&str> = meta.columns().iter().map(|column| column.name()).collect();
     assert_eq!(columns, ["id", "width", "height", "label"]);
     assert_eq!(&meta.columns()[1..3], Size::meta().columns());
 }
@@ -204,7 +204,7 @@ fn fragment_metadata_has_no_table() {
     assert_eq!(
         meta.columns()
             .iter()
-            .map(|column| column.name)
+            .map(|column| column.name())
             .collect::<Vec<_>>(),
         ["width", "height"]
     );
@@ -229,12 +229,12 @@ fn derive_omits_absent_roles_and_marks_optionals() {
     assert!(
         meta.columns
             .iter()
-            .any(|column| column.name == "note" && column.nullable)
+            .any(|column| column.name() == "note" && column.nullable())
     );
     assert!(
         meta.columns
             .iter()
-            .all(|column| column.query_ops.is_empty())
+            .all(|column| column.query_ops().is_empty())
     );
 }
 

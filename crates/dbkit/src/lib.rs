@@ -6,16 +6,22 @@
 //! runtime, and [`schema::check_live_schema_against_models`] compares a list of
 //! them with a live database. [`DbType`] records the column type and default of
 //! a value type, so a model field of that type needs no `pgtype` of its own.
+//! [`Column`] and [`Columns`] name the selectable columns of a model;
+//! `#[derive(DbModel)]` generates the enum and [`ErasedColumn`] is the erased
+//! view a [`TableMeta`] holds.
 
+mod columns;
 mod model;
 mod patch;
 pub mod schema;
 
+pub use columns::Column;
+pub use columns::Columns;
 pub use dbkit_macros::DbModel;
 pub use dbkit_macros::DbPatch;
 pub use dbkit_macros::DbType;
-pub use model::ColumnMeta;
 pub use model::DbType;
+pub use model::ErasedColumn;
 pub use model::FilterOperator;
 pub use model::Meta;
 pub use model::Model;

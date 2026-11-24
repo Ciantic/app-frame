@@ -20,7 +20,8 @@ A struct is one of two shapes:
 `#[derive(DbPatch)]` reads the same annotations to generate the model's patch
 input type, which `garde` validates; insert implementations do not exist yet,
 so the insert sections describe a contract rather than code you can call today.
-The accepted syntax stays as documented here.
+The same `#[derive(DbModel)]` expansion also generates the model's selectable
+column enum, `<Model>Column`. The accepted syntax stays as documented here.
 
 ## Example
 
@@ -304,7 +305,7 @@ Declares which comparisons a column may be queried with.
   `dbkit::FilterOperator`.
 - Order is preserved and duplicates are an error.
 - Metadata only: the derive records the operators in
-  `ColumnMeta::query_ops` and nothing else. No SQL is generated, no operator is
+  `Column::query_ops` and nothing else. No SQL is generated, no operator is
   validated against the column type, and the annotation does not change how a
   row is read or written. A query layer is expected to look the list up to
   reject an operator a column does not support.
@@ -488,29 +489,30 @@ matches `Meta` and panics on the table variant:
 - `primary_key`, `version`, `created_at`, `updated_at` — the annotated field
   names, or `None` for absent optional roles.
 - `columns` — every column in declaration order as
-  `ColumnMeta { name, nullable, pg_type, pg_default, query_ops }`, where
-  `nullable` is true exactly when the field type is `Option<_>`, `pg_type` is
-  the field's `pgtype` annotation or its `DbType` type's `PG_TYPE`,
-  `pg_default` is its `pgdefault` annotation, its `DbType` type's
-  `PG_DEFAULT`, or `None`, and `query_ops` is the `query_ops` list in
+  `&'static dyn dbkit::ErasedColumn`, whose `name()`, `nullable()`,
+  `pg_type()`, `pg_default()` and `query_ops()` answer like the generated
+  `<Model>Column` variants. `nullable` is true exactly when the field type is
+  `Option<_>`, `pg_type` is the field's `pgtype` annotation or its `DbType`
+  type's `PG_TYPE`, `pg_default` is its `pgdefault` annotation, its `DbType`
+  type's `PG_DEFAULT`, or `None`, and `query_ops` is the `query_ops` list in
   declaration order or an empty slice.
 
 A `#[db(fragment)]` struct emits `Meta::Fragment(&TableFragment { columns })`
-instead, where `columns` is the same `ColumnMeta` list and there are no table,
-key or role fields to fill in.
+instead, where `columns` is the same erased list and there are no table, key or
+role fields to fill in.
 
-`meta()` is a function rather than a const for one reason: a `const` array
-cannot splice another type's columns (`&[ColumnMeta { .. }, Size::meta().columns()]`
-does not compile, because a `const` item cannot spread a slice). The generated
-body builds a `Vec<ColumnMeta>`, pushes each plain column and extends the list
-from each flattened field's `Meta::Fragment` columns, then leaks the slice into
-a `static OnceLock<TableMeta>`. The first call does the allocation; every later
-call returns the same `Meta::Table`, pointing at the cached `TableMeta`.
+The list holds trait objects because a `#[db(flatten)]` field splices another
+type's columns, so one table's description can mix columns from several models
+and no single enum can name them all. The columns are the `<Model>Column`
+variants the same expansion emits; the macro pushes each variant's reference
+and extends the list from each flattened field's `Meta::Fragment` columns, then
+leaks the slice into a `static OnceLock<TableMeta>`. The first call does the
+allocation; every later call returns the same `Meta::Table`, pointing at the
+cached `TableMeta`. A fragment uses the same shape with a
+`OnceLock<TableFragment>`, so both shapes build their columns one way.
 
-A `#[db(fragment)]` struct needs no splicing, so its `meta()` returns a
-promoted `static Meta = Meta::Fragment(&TableFragment { columns: &[..] })`; the
-whole value is a constant with no `OnceLock`. `Meta` is an enum, so a
-fragment's value has no table name or key to lie about. Both shapes implement
+`Meta` is an enum, so a fragment's value has no table name or key to lie about.
+`Meta::column(name)` looks a column up by name. Both shapes implement
 `Model`, so the type system still cannot tell them apart at the trait level;
 `flatten` matches the `Meta` variant at runtime, and `Meta::into_table()`
 panics if a fragment is listed in `MODELS`.
@@ -584,6 +586,111 @@ pub struct UserPatch {
   one attribute covers all three states.
 - `garde` is not tied to a web framework: a handler deserializes the patch and
   calls `patch.validate()`, mapping an error to `422 Unprocessable Entity`.
+
+## Generated columns
+
+`#[derive(DbModel)]` on a model emits a `<Model>Column` enum naming every
+column, in declaration order, plus the `dbkit::Column` implementation that
+`dbkit::Columns` selects from:
+
+```rust
+#[derive(DbModel)]
+#[db(table = "widget")]
+pub struct Widget {
+    #[db(primary_key)]
+    #[db(pgtype = "uuid")]
+    pub id: WidgetId,
+    #[db(pgtype = "text")]
+    pub name: String,
+    #[db(pgtype = "text")]
+    pub email_verified_at: Option<String>,
+    #[db(version)]
+    #[db(pgtype = "bigint")]
+    pub version: i64,
+}
+
+// generated
+pub enum WidgetColumn {
+    #[serde(rename = "id")]
+    Id,
+    #[serde(rename = "name")]
+    Name,
+    #[serde(rename = "email_verified_at")]
+    EmailVerifiedAt,
+    #[serde(rename = "version")]
+    Version,
+}
+
+impl WidgetColumn {
+    pub const ALL: &'static [Self] = &[Self::Id, Self::Name, Self::EmailVerifiedAt, Self::Version];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Name => "name",
+            Self::EmailVerifiedAt => "email_verified_at",
+            Self::Version => "version",
+        }
+    }
+
+    pub const fn pg_type(self) -> &'static str { /* "uuid", "text", ... */ }
+    pub const fn pg_default(self) -> Option<&'static str> { /* Some("uuidv7()"), ... */ }
+    pub const fn nullable(self) -> bool { /* ... */ }
+    pub const fn query_ops(self) -> &'static [FilterOperator] { /* ... */ }
+}
+```
+
+- A variant is the only proof that a column exists, and `name()` returns a
+  `&'static str`, so a query layer builds SQL from the enum and never formats a
+  request string into the statement. A name that is not a column fails to
+  deserialize, and the SQL identifier cannot be bound as a parameter.
+- Variants are PascalCase, and `#[serde(rename = "...")]` carries the column
+  spelling, so the wire form is `["id", "email_verified_at"]` rather than the
+  Rust name.
+- Role columns are selectable: a patch exposes business columns only, but a read
+  needs the key, the version and the audit columns.
+- `dbkit::Columns<C>` is the selection set. It deserializes from an array of
+  column names, iterates in declaration order, and offers `all()`, `insert`,
+  `remove`, `contains`, `names()`, `pg_types()` and `len()`.
+- A `#[db(fragment)]` struct gets its own `<Fragment>Column`. A table with
+  `#[db(flatten)]` gets an enum of its own columns only: the fragment's columns
+  are unknown at expansion, so they appear in the table's metadata but not as
+  variants. `Column::ALL` therefore means "columns declared on this struct".
+
+### Column metadata
+
+The enum is the only description of a column. It carries the value and default
+inline, so these are `const fn`s with no lookup:
+
+```rust
+WidgetColumn::Id.pg_type();                // "uuid", from the field type's DbType
+WidgetColumn::EmailVerifiedAt.nullable();  // true
+WidgetColumn::Id.pg_default();             // Some("uuidv7()")
+WidgetColumn::Name.query_ops();            // [Eq, Neq, Like], from #[db(query_ops(...))]
+```
+
+A model's `TableMeta::columns` holds the same values as
+`&'static dyn ErasedColumn`; `dbkit` implements `ErasedColumn` for every
+`Column`, so the erased view is a forward, not a second description. That is
+what a query builder needs to cast a parameter (`$1::text`) or to reject an
+operator the column does not declare.
+
+A request type holds `Option<Columns<C>>`: absent means every column, and an
+explicitly empty list is an error rather than a second spelling of "all".
+
+```rust
+let columns = request.select.unwrap_or_else(Columns::all);
+let mut builder = QueryBuilder::new("SELECT ");
+let mut separated = builder.separated(", ");
+for name in columns.names() {
+    separated.push(format_ident!("\"{}\"", name));
+}
+builder.push(" FROM \"widget\"");
+```
+
+`sqlx::FromRow` cannot decode a partial projection: the derived implementation
+reads every field by name. A sparse selection therefore only suits a response
+built dynamically or a projection type that matches the requested columns.
 
 ## Collecting models
 
@@ -671,3 +778,10 @@ These are deliberately out of scope until a model needs them:
   restriction is the macro's, not the type's: a fragment's `meta()` could
   splice a sibling's columns at runtime, but fragments are meant to stay leaf
   groups.
+- Fragments in `<Model>Column`: a table with `#[db(flatten)]` gets variants for
+  its own columns only. Naming the fragment's columns in the parent enum would
+  need a variant carrying `<Fragment>Column` and a hand-written serde
+  representation, which no model needs yet.
+- Marking a column unselectable: every column becomes a `<Model>Column`
+  variant today, so restricting a sensitive column such as a token hash needs a
+  new annotation.

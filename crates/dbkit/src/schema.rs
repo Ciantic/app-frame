@@ -34,11 +34,12 @@ pub async fn check_live_schema_against_models(
         let mut declared = BTreeSet::new();
         let mut duplicates = false;
         for column in meta.columns {
-            if !declared.insert(column.name) {
+            if !declared.insert(column.name()) {
                 duplicates = true;
                 problems.push(format!(
                     "{}: column \"{}\" is declared more than once",
-                    meta.table, column.name
+                    meta.table,
+                    column.name()
                 ));
             }
         }
@@ -56,23 +57,25 @@ pub async fn check_live_schema_against_models(
             .collect();
 
         for (column, nullable) in &schema_columns {
-            match meta.columns.iter().find(|model| model.name == column) {
+            match meta.columns.iter().find(|model| model.name() == column) {
                 None => problems.push(format!(
                     "table \"{}\" has column \"{column}\" without a model field",
                     meta.table
                 )),
-                Some(model) if model.nullable != *nullable => problems.push(format!(
+                Some(model) if model.nullable() != *nullable => problems.push(format!(
                     "{}: column \"{column}\" is nullable = {nullable}, the model says {}",
-                    meta.table, model.nullable
+                    meta.table,
+                    model.nullable()
                 )),
                 Some(_) => {}
             }
         }
         for column in meta.columns {
-            if !schema_columns.contains_key(column.name) {
+            if !schema_columns.contains_key(column.name()) {
                 problems.push(format!(
                     "{}: field \"{}\" has no column",
-                    meta.table, column.name
+                    meta.table,
+                    column.name()
                 ));
             }
         }
@@ -102,15 +105,19 @@ async fn column_mismatches(
     let definition: Vec<String> = meta
         .columns
         .iter()
-        .map(|column| match column.pg_default {
-            Some(default) => format!("\"{}\" {} DEFAULT {default}", column.name, column.pg_type),
-            None => format!("\"{}\" {}", column.name, column.pg_type),
+        .map(|column| match column.pg_default() {
+            Some(default) => format!(
+                "\"{}\" {} DEFAULT {default}",
+                column.name(),
+                column.pg_type()
+            ),
+            None => format!("\"{}\" {}", column.name(), column.pg_type()),
         })
         .collect();
     let type_definition: Vec<String> = meta
         .columns
         .iter()
-        .map(|column| format!("\"{}\" {}", column.name, column.pg_type))
+        .map(|column| format!("\"{}\" {}", column.name(), column.pg_type()))
         .collect();
 
     let drop = format!("DROP TABLE IF EXISTS pg_temp.\"{probe}\"");
@@ -173,7 +180,7 @@ async fn column_mismatches(
     .await?;
 
     for column in meta.columns {
-        let Some(probe_column) = columns.iter().find(|probe| probe.name == column.name) else {
+        let Some(probe_column) = columns.iter().find(|probe| probe.name == column.name()) else {
             continue;
         };
         let Some(real_type) = &probe_column.real_type else {
@@ -183,7 +190,9 @@ async fn column_mismatches(
         if &probe_column.probe_type != real_type {
             problems.push(format!(
                 "{}: column \"{}\" is {real_type}, the model says {}",
-                meta.table, column.name, column.pg_type
+                meta.table,
+                column.name(),
+                column.pg_type()
             ));
         }
 
@@ -191,7 +200,7 @@ async fn column_mismatches(
             problems.push(format!(
                 "{}: column \"{}\" default is {}, the model says {}",
                 meta.table,
-                column.name,
+                column.name(),
                 probe_column.real_default.as_deref().unwrap_or("none"),
                 probe_column.probe_default.as_deref().unwrap_or("none"),
             ));
