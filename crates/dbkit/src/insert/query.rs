@@ -1,4 +1,5 @@
-//! Inserting rows: one `INSERT` per entry, all in one transaction.
+//! Inserting rows: one `INSERT` per entry, all in one transaction, returning
+//! the inserted primary keys.
 
 use crate::Assignment;
 use crate::Meta;
@@ -18,6 +19,9 @@ use std::fmt;
 pub trait InsertRow {
     type Model: Model;
 
+    /// The row an insert returns: the model's primary key.
+    type Key: for<'r> FromRow<'r, PgRow> + Send + Unpin;
+
     /// Provided columns in declaration order. An absent optional column is not
     /// listed; `value: None` writes SQL `NULL`.
     fn columns(&self) -> Vec<Assignment<'_>>;
@@ -27,7 +31,7 @@ pub trait InsertRow {
 ///
 /// [`render`](Self::render) produces one `INSERT` per entry;
 /// [`execute`](Self::execute) runs them in one transaction and returns the
-/// inserted rows.
+/// inserted primary keys.
 pub struct InsertQuery<P: InsertRow> {
     entries: Vec<P>,
 }
@@ -66,10 +70,9 @@ impl<P: InsertRow> InsertQuery<P> {
     /// A pool or a plain connection opens a transaction; a `&mut Transaction`
     /// creates a savepoint. A failure rolls the whole batch back. An empty
     /// batch is a no-op.
-    pub async fn execute<'c, A>(self, acquirer: A) -> Result<Vec<P::Model>, InsertError>
+    pub async fn execute<'c, A>(self, acquirer: A) -> Result<Vec<P::Key>, InsertError>
     where
         A: Acquire<'c, Database = Postgres>,
-        P::Model: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
         if self.entries.is_empty() {
             return Ok(Vec::new());
@@ -80,7 +83,7 @@ impl<P: InsertRow> InsertQuery<P> {
         let mut rows = Vec::with_capacity(statements.len());
 
         for (index, statement) in statements.into_iter().enumerate() {
-            let row = sqlx::query_as_with::<_, P::Model, _>(
+            let row = sqlx::query_as_with::<_, P::Key, _>(
                 AssertSqlSafe(statement.sql),
                 statement.arguments,
             )
@@ -107,7 +110,7 @@ impl<P: InsertRow> InsertQuery<P> {
 pub enum InsertError {
     /// The model is a fragment or a subquery and has no table.
     NotATable,
-    /// An `INSERT ... RETURNING *` did not return exactly one row.
+    /// An `INSERT ... RETURNING <primary key>` did not return exactly one row.
     NotInserted { index: usize },
     /// Encode, execute, decode, savepoint or commit failure.
     Sqlx(sqlx::Error),
@@ -119,7 +122,7 @@ impl fmt::Display for InsertError {
             InsertError::NotATable => formatter
                 .write_str("an insert batch needs a table model, not a fragment or subquery"),
             InsertError::NotInserted { index } => {
-                write!(formatter, "insert entry {index} returned no row")
+                write!(formatter, "insert entry {index} returned no primary key")
             }
             InsertError::Sqlx(error) => error.fmt(formatter),
         }
@@ -151,7 +154,8 @@ fn render_entry<P: InsertRow>(meta: &TableMeta, entry: &P) -> Result<RenderedIns
     push_identifier(&mut renderer.sql, meta.table);
 
     if provided.is_empty() {
-        renderer.sql.push_str(" DEFAULT VALUES RETURNING *");
+        renderer.sql.push_str(" DEFAULT VALUES");
+        push_returning(meta, &mut renderer.sql);
 
         return Ok(RenderedInsert {
             sql: renderer.sql,
@@ -195,13 +199,27 @@ fn render_entry<P: InsertRow>(meta: &TableMeta, entry: &P) -> Result<RenderedIns
         }
     }
 
-    renderer.sql.push_str(") RETURNING *");
+    renderer.sql.push(')');
+    push_returning(meta, &mut renderer.sql);
 
     Ok(RenderedInsert {
         sql: renderer.sql,
         arguments: renderer.arguments,
         values: renderer.values,
     })
+}
+
+/// The inserted row is identified by its primary key, so `RETURNING` names
+/// those columns instead of the whole row.
+fn push_returning(meta: &TableMeta, sql: &mut String) {
+    sql.push_str(" RETURNING ");
+
+    for (position, column) in meta.primary_key.iter().enumerate() {
+        if position > 0 {
+            sql.push_str(", ");
+        }
+        push_identifier(sql, column);
+    }
 }
 
 /// An imported row supplies `created_at` but not `updated_at`; use the same

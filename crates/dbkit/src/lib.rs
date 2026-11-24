@@ -5,9 +5,9 @@
 //! it with `garde`, and [`PatchQuery`] applies a batch of patches as one
 //! transaction. `#[derive(DbInsert)]` generates an insert input whose required
 //! fields are plain values and whose defaulted or nullable fields are optional,
-//! and [`InsertQuery`] inserts a batch and returns the rows. [`Model`] and its
-//! [`TableMeta`] describe a table at runtime, [`SubQuery`] describes a model
-//! whose row source is a query, and
+//! and [`InsertQuery`] inserts a batch and returns the inserted primary keys.
+//! [`Model`] and its [`TableMeta`] describe a table at runtime, [`SubQuery`]
+//! describes a model whose row source is a query, and
 //! [`schema::check_live_schema_against_models`] compares a list of tables with
 //! a live database. [`DbType`] records the column type and default of a value
 //! type, so a model field can take its `pgtype` and opt into its default.

@@ -4,4 +4,4 @@ error[E0599]: no method named `like` found for struct `ColumnRef<OrderTotalTag, 
 9 |     let _ = Order::query().filters([c.total.like("5%")]);
   |                                             ^^^^ method not found in `ColumnRef<OrderTotalTag, OrderColumn, i64>`
   |
-  = note: the method was found for `ColumnRef<Tag, C, String>`
+  = note: the method was found for `ColumnRef<Tag, C, std::string::String>`

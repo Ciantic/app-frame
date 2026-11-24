@@ -645,6 +645,31 @@ is listed in `MODELS`.
 The emitted code names `::dbkit::...`, so the deriving crate depends on
 `dbkit` (which re-exports the derive).
 
+## Generated primary key
+
+`#[derive(DbModel)]` on a table also emits `<Model>PrimaryKey`, holding exactly
+the primary key fields:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPrimaryKey {
+    pub id: UserId,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for UserPrimaryKey {
+    // decodes by the primary key column names
+}
+```
+
+- Fields follow `TableMeta::primary_key`, which is model declaration order. A
+  composite key contributes one field per key column.
+- The struct has the model's visibility and derives `Debug`, `Clone`,
+  `Serialize` and `Deserialize`. It implements `sqlx::FromRow`, so the
+  `RETURNING` list of an insert decodes into it.
+- A fragment or a subquery has no primary key and gets no key struct.
+- `DbInsert` uses it as `InsertRow::Key`, so an insert returns the key rather
+  than the whole row.
+
 ## Generated patch
 
 `#[derive(DbPatch)]` on a model emits a `<Model>Patch` struct next to it. A
@@ -807,16 +832,18 @@ For a table, the derive also adds:
 let insert = UserInsert::new(Email("new@example.com".to_owned()))
     .set_email_verified_at(Utc::now());
 
-let inserted: Vec<User> = User::insert([insert]).execute(&pool).await?;
+let inserted: Vec<UserPrimaryKey> = User::insert([insert]).execute(&pool).await?;
 ```
 
 - `InsertQuery::render()` returns one `RenderedInsert` per entry, each an
-  `INSERT ... RETURNING *`.
+  `INSERT ... RETURNING <primary key>`.
 - `InsertQuery::execute` renders every entry, runs them in one transaction and
-  returns the inserted rows in input order. A `&mut Transaction` creates a
-  savepoint; an empty batch is a no-op.
+  returns the inserted primary keys in input order. A `&mut Transaction`
+  creates a savepoint; an empty batch is a no-op.
 - An entry with every optional column `None` renders
-  `INSERT INTO "table" DEFAULT VALUES RETURNING *`.
+  `INSERT INTO "table" DEFAULT VALUES RETURNING <primary key>`.
+- The `RETURNING` list names the primary key columns, so the result decodes into
+  `<Model>PrimaryKey`. Other generated columns are read back by key.
 - A supplied `created_at` also supplies `updated_at` when the latter is omitted,
   so imported rows keep their creation time.
 - A constraint violation is `InsertError::Sqlx`; the whole batch rolls back.

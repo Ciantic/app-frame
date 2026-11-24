@@ -107,29 +107,39 @@ async fn count(db: &PgPool) -> i64 {
         .unwrap()
 }
 
+async fn row(db: &PgPool, id: WidgetLiveId) -> WidgetLive {
+    sqlx::query_as(r#"select * from "widget_live" where "id" = $1"#)
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn one_row_takes_the_database_defaults() {
     let db = database().await;
 
-    let rows = WidgetLive::insert([WidgetLiveInsert::new("one")])
+    let keys = WidgetLive::insert([WidgetLiveInsert::new("one")])
         .execute(&db)
         .await
         .unwrap();
 
-    assert_eq!(rows.len(), 1);
-    assert_ne!(rows[0].id.0, Uuid::nil());
-    assert_eq!(rows[0].name, "one");
-    assert_eq!(rows[0].note, None);
-    assert_eq!(rows[0].version, 0);
-    assert!(rows[0].created_at <= Utc::now());
-    assert!(rows[0].updated_at <= Utc::now());
+    assert_eq!(keys.len(), 1);
+    let inserted = row(&db, keys[0].id).await;
+
+    assert_ne!(inserted.id.0, Uuid::nil());
+    assert_eq!(inserted.name, "one");
+    assert_eq!(inserted.note, None);
+    assert_eq!(inserted.version, 0);
+    assert!(inserted.created_at <= Utc::now());
+    assert!(inserted.updated_at <= Utc::now());
 }
 
 #[tokio::test]
-async fn several_rows_return_in_input_order() {
+async fn several_keys_return_in_input_order() {
     let db = database().await;
 
-    let rows = WidgetLive::insert([
+    let keys = WidgetLive::insert([
         WidgetLiveInsert::new("one"),
         WidgetLiveInsert::new("two").set_note("kept"),
     ])
@@ -137,11 +147,13 @@ async fn several_rows_return_in_input_order() {
     .await
     .unwrap();
 
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].name, "one");
-    assert_eq!(rows[0].note, None);
-    assert_eq!(rows[1].name, "two");
-    assert_eq!(rows[1].note.as_deref(), Some("kept"));
+    assert_eq!(keys.len(), 2);
+    let first = row(&db, keys[0].id).await;
+    let second = row(&db, keys[1].id).await;
+    assert_eq!(first.name, "one");
+    assert_eq!(first.note, None);
+    assert_eq!(second.name, "two");
+    assert_eq!(second.note.as_deref(), Some("kept"));
 }
 
 #[tokio::test]
@@ -150,7 +162,7 @@ async fn explicit_values_are_preserved() {
     let id = id(1);
     let at = old_time();
 
-    let rows = WidgetLive::insert([WidgetLiveInsert::new("one")
+    let keys = WidgetLive::insert([WidgetLiveInsert::new("one")
         .set_id(id)
         .set_created_at(at)
         .set_updated_at(at)
@@ -159,10 +171,12 @@ async fn explicit_values_are_preserved() {
     .await
     .unwrap();
 
-    assert_eq!(rows[0].id, id);
-    assert_eq!(rows[0].created_at, at);
-    assert_eq!(rows[0].updated_at, at);
-    assert_eq!(rows[0].version, 7);
+    assert_eq!(keys[0].id, id);
+
+    let inserted = row(&db, id).await;
+    assert_eq!(inserted.created_at, at);
+    assert_eq!(inserted.updated_at, at);
+    assert_eq!(inserted.version, 7);
 }
 
 #[tokio::test]
@@ -170,13 +184,14 @@ async fn a_supplied_created_at_also_supplies_updated_at() {
     let db = database().await;
     let at = old_time();
 
-    let rows = WidgetLive::insert([WidgetLiveInsert::new("one").set_created_at(at)])
+    let keys = WidgetLive::insert([WidgetLiveInsert::new("one").set_created_at(at)])
         .execute(&db)
         .await
         .unwrap();
 
-    assert_eq!(rows[0].created_at, at);
-    assert_eq!(rows[0].updated_at, at);
+    let inserted = row(&db, keys[0].id).await;
+    assert_eq!(inserted.created_at, at);
+    assert_eq!(inserted.updated_at, at);
 }
 
 #[tokio::test]
@@ -228,17 +243,27 @@ async fn a_nested_batch_uses_a_savepoint() {
 }
 
 #[tokio::test]
-async fn a_composite_key_inserts_and_returns_its_row() {
+async fn a_composite_key_inserts_and_returns_its_key() {
     let db = database().await;
 
-    let rows = TranslationLive::insert([TranslationLiveInsert::new("en", "greeting", "hi")])
+    let keys = TranslationLive::insert([TranslationLiveInsert::new("en", "greeting", "hi")])
         .execute(&db)
         .await
         .unwrap();
 
-    assert_eq!(rows[0].lang, "en");
-    assert_eq!(rows[0].key, "greeting");
-    assert_eq!(rows[0].value, "hi");
+    assert_eq!(keys[0].lang, "en");
+    assert_eq!(keys[0].key, "greeting");
+
+    let inserted: TranslationLive =
+        sqlx::query_as(r#"select * from "translation_live" where "lang" = $1 and "key" = $2"#)
+            .bind(&keys[0].lang)
+            .bind(&keys[0].key)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(inserted.lang, "en");
+    assert_eq!(inserted.key, "greeting");
+    assert_eq!(inserted.value, "hi");
 }
 
 #[tokio::test]

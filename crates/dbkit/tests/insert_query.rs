@@ -137,7 +137,7 @@ fn a_required_only_insert_renders_every_required_column() {
 
     assert_eq!(
         rendered[0].sql,
-        "INSERT INTO \"append_only\" (\"id\", \"note\") VALUES ($1, $2) RETURNING *"
+        "INSERT INTO \"append_only\" (\"id\", \"note\") VALUES ($1, $2) RETURNING \"id\""
     );
     assert_eq!(
         rendered[0].values,
@@ -153,7 +153,7 @@ fn omitting_pgdefault_makes_an_inherited_type_required() {
 
     assert_eq!(
         rendered[0].sql,
-        "INSERT INTO \"inherited_required\" (\"id\") VALUES ($1) RETURNING *"
+        "INSERT INTO \"inherited_required\" (\"id\") VALUES ($1) RETURNING \"id\""
     );
     assert_eq!(rendered[0].values, vec![json!(id())]);
 }
@@ -166,7 +166,7 @@ fn an_optional_field_left_none_is_omitted() {
 
     assert_eq!(
         rendered[0].sql,
-        "INSERT INTO \"widget\" (\"name\") VALUES ($1) RETURNING *"
+        "INSERT INTO \"widget\" (\"name\") VALUES ($1) RETURNING \"id\""
     );
     assert_eq!(rendered[0].values, vec![json!("abc")]);
 }
@@ -179,7 +179,7 @@ fn an_optional_field_set_adds_a_column() {
 
     assert_eq!(
         rendered[0].sql,
-        "INSERT INTO \"widget\" (\"name\", \"note\") VALUES ($1, $2) RETURNING *"
+        "INSERT INTO \"widget\" (\"name\", \"note\") VALUES ($1, $2) RETURNING \"id\""
     );
     assert_eq!(rendered[0].values, vec![json!("abc"), json!("kept")]);
 }
@@ -192,7 +192,7 @@ fn an_all_optional_entry_renders_default_values() {
 
     assert_eq!(
         rendered[0].sql,
-        "INSERT INTO \"all_defaults\" DEFAULT VALUES RETURNING *"
+        "INSERT INTO \"all_defaults\" DEFAULT VALUES RETURNING \"id\""
     );
     assert!(rendered[0].values.is_empty());
 }
@@ -205,7 +205,8 @@ fn a_composite_key_can_default_one_column() {
 
     assert_eq!(
         rendered[0].sql,
-        "INSERT INTO \"translation\" (\"lang\", \"value\") VALUES ($1, $2) RETURNING *"
+        "INSERT INTO \"translation\" (\"lang\", \"value\") VALUES ($1, $2) RETURNING \"lang\", \
+         \"key\""
     );
     assert_eq!(rendered[0].values, vec![json!("en"), json!("hi")]);
 }
@@ -219,7 +220,7 @@ fn setting_a_defaulted_key_includes_it() {
     assert_eq!(
         rendered[0].sql,
         "INSERT INTO \"translation\" (\"lang\", \"key\", \"value\") VALUES ($1, $2, $3) RETURNING \
-         *"
+         \"lang\", \"key\""
     );
     assert_eq!(
         rendered[0].values,
@@ -237,7 +238,7 @@ fn a_flattened_fragment_contributes_columns_in_order() {
     assert_eq!(
         rendered[0].sql,
         "INSERT INTO \"frame\" (\"id\", \"width\", \"note\", \"label\") VALUES ($1, $2, $3, $4) \
-         RETURNING *"
+         RETURNING \"id\""
     );
     assert_eq!(
         rendered[0].values,
@@ -260,7 +261,7 @@ fn a_supplied_created_at_also_supplies_updated_at() {
     assert_eq!(
         rendered[0].sql,
         "INSERT INTO \"widget\" (\"name\", \"created_at\", \"updated_at\") VALUES ($1, $2, $3) \
-         RETURNING *"
+         RETURNING \"id\""
     );
     assert_eq!(rendered[0].values, vec![json!("abc"), json!(at), json!(at)]);
 }
@@ -277,7 +278,7 @@ fn a_synthesized_updated_at_keeps_model_order() {
     assert_eq!(
         rendered[0].sql,
         "INSERT INTO \"widget\" (\"name\", \"created_at\", \"updated_at\", \"version\") VALUES \
-         ($1, $2, $3, $4) RETURNING *"
+         ($1, $2, $3, $4) RETURNING \"id\""
     );
     assert_eq!(
         rendered[0].values,
@@ -311,14 +312,27 @@ fn every_entry_is_its_own_statement() {
     assert_eq!(rendered.len(), 2);
     assert_eq!(
         rendered[0].sql,
-        "INSERT INTO \"widget\" (\"name\") VALUES ($1) RETURNING *"
+        "INSERT INTO \"widget\" (\"name\") VALUES ($1) RETURNING \"id\""
     );
     assert_eq!(
         rendered[1].sql,
-        "INSERT INTO \"widget\" (\"name\", \"note\") VALUES ($1, $2) RETURNING *"
+        "INSERT INTO \"widget\" (\"name\", \"note\") VALUES ($1, $2) RETURNING \"id\""
     );
     assert_eq!(rendered[0].values, vec![json!("one")]);
     assert_eq!(rendered[1].values, vec![json!("two"), json!("kept")]);
+}
+
+#[test]
+fn the_primary_key_struct_holds_only_key_columns() {
+    let key = TranslationPrimaryKey {
+        lang: "en".to_owned(),
+        key: "greeting".to_owned(),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&key).unwrap(),
+        json!({ "lang": "en", "key": "greeting" })
+    );
 }
 
 #[test]

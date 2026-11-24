@@ -1,8 +1,8 @@
-error[E0599]: the method `eq` exists for struct `ColumnRef<OrderTagsTag, OrderColumn, Vec<String>>`, but its trait bounds were not satisfied
+error[E0599]: the method `eq` exists for struct `ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>`, but its trait bounds were not satisfied
   --> tests/ui/fail_eq_on_array.rs:10:44
    |
 10 |     let _ = Order::query().filters([c.tags.eq("rust")]);
-   |                                            ^^ method cannot be called on `ColumnRef<OrderTagsTag, OrderColumn, Vec<String>>` due to unsatisfied trait bounds
+   |                                            ^^ method cannot be called due to unsatisfied trait bounds
    |
   ::: tests/ui/support.rs
    |
@@ -16,8 +16,8 @@ error[E0599]: the method `eq` exists for struct `ColumnRef<OrderTagsTag, OrderCo
    |
    = note: the following trait bounds were not satisfied:
            `OrderTagsTag: HasEq<OrderColumn>`
-           `ColumnRef<OrderTagsTag, OrderColumn, Vec<String>>: Iterator`
-           which is required by `&mut ColumnRef<OrderTagsTag, OrderColumn, Vec<String>>: Iterator`
+           `ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>: Iterator`
+           which is required by `&mut ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>: Iterator`
 note: the trait `HasEq` must be implemented
   --> src/query/capability.rs
    |

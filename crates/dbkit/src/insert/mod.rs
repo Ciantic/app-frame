@@ -1,4 +1,4 @@
-//! Insert inputs: the builder that inserts rows and returns them.
+//! Insert inputs: the builder that inserts rows and returns their primary keys.
 
 mod query;
 

@@ -77,10 +77,10 @@ struct SizeRow {
 }
 
 /// A value type that carries its column type and default.
-#[derive(DbType)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::Type, DbType)]
 #[db(pgtype = "uuid")]
 #[db(pgdefault = "uuidv7()")]
-#[expect(dead_code, reason = "the type exists only to derive column metadata")]
+#[sqlx(transparent)]
 struct GadgetId(Uuid);
 
 #[derive(DbModel)]

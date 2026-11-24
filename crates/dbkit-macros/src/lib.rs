@@ -19,6 +19,7 @@ mod annotations;
 mod derive_columns;
 mod derive_insert;
 mod derive_patch;
+mod derive_primary_key;
 mod derive_select;
 mod derive_value;
 
@@ -44,7 +45,8 @@ mod derive_value;
 /// two cannot disagree. A `#[db(flatten)]` field contributes a variant that
 /// wraps the fragment's own enum, so a flattened column stays selectable as
 /// `<Model>Column::<Field>(<Fragment>Column::<Column>)` and its columns follow
-/// the field's position in `all()`.
+/// the field's position in `all()`. A table also gets `<Model>PrimaryKey`,
+/// holding only the key fields, which an insert returns.
 ///
 /// `query_ops` records which comparisons a column supports in
 /// `Column::query_ops`, and `orderable` whether it may be sorted, in
@@ -141,8 +143,8 @@ pub fn derive_db_patch(input: TokenStream) -> TokenStream {
 ///
 /// The expansion implements `dbkit::InsertRow` and, for a table, adds
 /// `Model::insert(entries)`, which returns a `dbkit::InsertQuery`. The query
-/// renders one `INSERT ... RETURNING *` per entry and runs them in one
-/// transaction, returning the inserted rows.
+/// renders one `INSERT ... RETURNING <primary key>` per entry and runs them in
+/// one transaction, returning the inserted keys.
 #[proc_macro_derive(DbInsert, attributes(db))]
 pub fn derive_db_insert(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
@@ -295,6 +297,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     let columns = derive_columns::expand(input, &annotations)?;
+    let primary_key = derive_primary_key::expand(input, &annotations)?;
 
     Ok(quote! {
         #[automatically_derived]
@@ -303,6 +306,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 #metadata
             }
         }
+
+        #primary_key
 
         #columns
     })

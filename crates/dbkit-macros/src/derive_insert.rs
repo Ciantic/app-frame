@@ -34,6 +34,13 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let generics = &input.generics;
 
     let insert = format_ident!("{name}Insert");
+    let key = match &annotations.shape {
+        annotations::Shape::Table(_) => {
+            let key = format_ident!("{name}PrimaryKey");
+            quote!(#key)
+        }
+        annotations::Shape::SubQuery(_) | annotations::Shape::Fragment => quote!(()),
+    };
     let doc = format!(
         "Insert input of [`{name}`]. Required columns are plain fields, and columns with a \
          default or a nullable column are `Option` fields. `new` takes the required fields and \
@@ -176,7 +183,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let insert_method = match annotations.shape {
         annotations::Shape::Table(_) => quote! {
             impl #impl_generics #name #type_generics #where_clause {
-                #[doc = "A transaction that inserts the given rows and returns them."]
+                #[doc = "A transaction that inserts the given rows and returns their primary keys."]
                 pub fn insert(
                     entries: impl ::core::iter::IntoIterator<Item = #insert #type_generics>,
                 ) -> ::dbkit::InsertQuery<#insert #type_generics> {
@@ -208,6 +215,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         #[automatically_derived]
         impl #impl_generics ::dbkit::InsertRow for #insert #type_generics #where_clause {
             type Model = #name #type_generics;
+            type Key = #key;
 
             fn columns(&self) -> ::std::vec::Vec<::dbkit::Assignment<'_>> {
                 let mut columns = ::std::vec::Vec::new();

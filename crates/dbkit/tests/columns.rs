@@ -9,9 +9,10 @@ use dbkit::FilterOperator;
 use dbkit::Model;
 use uuid::Uuid;
 
-#[derive(DbType)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::Type, DbType)]
 #[db(pgtype = "uuid")]
 #[db(pgdefault = "uuidv7()")]
+#[sqlx(transparent)]
 pub struct WidgetId(pub Uuid);
 
 #[derive(DbModel)]
