@@ -13,8 +13,11 @@ use uuid::Uuid;
 pub struct WidgetId(pub Uuid);
 
 /// A newtype that carries a rule, so its patch field dives into it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, garde::Validate)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type, garde::Validate,
+)]
 #[serde(transparent)]
+#[sqlx(transparent)]
 #[garde(transparent)]
 pub struct Label(#[garde(length(min = 3))] pub String);
 

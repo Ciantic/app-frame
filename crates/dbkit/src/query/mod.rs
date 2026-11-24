@@ -20,7 +20,7 @@ use std::fmt;
 pub mod capability;
 mod filter;
 mod order;
-mod render;
+pub(crate) mod render;
 mod serde;
 mod value;
 

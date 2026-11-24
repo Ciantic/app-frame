@@ -109,6 +109,11 @@ pub fn derive_db_type(input: TokenStream) -> TokenStream {
 /// patch field whose payload type can carry rules derives a `#[garde(dive)]`,
 /// so `Patch::Set` values are validated while `Patch::Absent` and
 /// `Patch::Null` pass.
+///
+/// The expansion also implements `dbkit::PatchRow` and, for a table, adds
+/// `Model::patch(entries)`, which returns a `dbkit::PatchQuery`. The query
+/// renders one `UPDATE` per entry, checks the primary key and version, bumps
+/// the version and `updated_at`, and runs the batch in one transaction.
 #[proc_macro_derive(DbPatch, attributes(db))]
 pub fn derive_db_patch(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);

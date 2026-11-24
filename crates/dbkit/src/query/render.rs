@@ -426,7 +426,7 @@ fn push_source<C: Column>(sql: &mut String) -> Result<(), Error> {
 }
 
 /// Quotes an identifier, doubling an embedded `"`.
-fn push_identifier(sql: &mut String, name: &str) {
+pub(crate) fn push_identifier(sql: &mut String, name: &str) {
     sql.push('"');
 
     for character in name.chars() {

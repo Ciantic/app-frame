@@ -1,3 +1,14 @@
+//! Update inputs: the [`Patch`] value and the builder that applies a batch of
+//! them.
+
+mod query;
+
+pub use query::Assignment;
+pub use query::PatchError;
+pub use query::PatchQuery;
+pub use query::PatchRow;
+pub use query::RenderedPatch;
+
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;

@@ -699,6 +699,43 @@ pub struct UserPatch {
 - `garde` is not tied to a web framework: a handler deserializes the patch and
   calls `patch.validate()`, mapping an error to `422 Unprocessable Entity`.
 
+## Generated update
+
+The same derive implements `dbkit::PatchRow` and, for a table, adds
+`Model::patch(entries)`, which returns a `dbkit::PatchQuery`:
+
+```rust
+let patch = UserPatch {
+    id,
+    version: 3,
+    email: Patch::Set(Email::parse("new@example.com")?),
+    email_verified_at: Patch::Null,
+};
+
+User::patch([patch]).execute(&pool).await?;
+```
+
+- `PatchQuery::render()` returns one `dbkit::RenderedPatch` per entry; each is
+  an `UPDATE` whose identifiers come from `TableMeta`.
+- `Patch::Absent` columns are omitted, `Patch::Set` binds a value and
+  `Patch::Null` writes SQL `NULL`.
+- The primary key is the `WHERE` clause. A model with a version gets
+  `"version" = $n` there and `"version" = "version" + 1` in `SET`; a model with
+  `updated_at` gets `"updated_at" = now()`.
+- `PatchQuery::execute` renders every entry before opening a transaction. A
+  pool or plain connection starts one; a `&mut Transaction` creates a savepoint,
+  so the caller can nest the batch.
+- Every entry must update exactly one row. A missing row or a stale version is
+  `PatchError::NotUpdated`, and the whole batch rolls back.
+- An entry with no changed business column is `PatchError::Empty`; it would
+  otherwise bump the version without changing anything.
+- Patch payload types are exposed as `&dyn dbkit::Bind`, so a field type must
+  implement `Bind` (`Type + Encode + Serialize + PartialEq`), like every query
+  value.
+
+See [Patch builder](patch-builder.md) for the transaction behavior, SQL shape
+and error cases.
+
 ## Generated columns
 
 `#[derive(DbModel)]` on a model emits a `<Model>Column` enum naming every

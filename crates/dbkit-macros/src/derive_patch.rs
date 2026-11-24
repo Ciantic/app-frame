@@ -31,7 +31,9 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     }
 
     let name = &input.ident;
+    let visibility = &input.vis;
     let version = annotations.version.as_ref();
+    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
 
     let patch = format_ident!("{name}Patch");
     let doc = format!(
@@ -41,6 +43,9 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let generics = &input.generics;
 
     let mut definitions = Vec::new();
+    let mut assignments = Vec::new();
+    let mut keys = Vec::new();
+    let mut expected_version = quote!(::core::option::Option::None);
 
     for column in &annotations.columns {
         let (field_name, ty) = match column {
@@ -52,6 +57,11 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                     #[garde(dive)]
                     pub #name: #nested
                 });
+                assignments.push(quote! {
+                    assignments.extend(
+                        <#nested as ::dbkit::PatchRow>::assignments(&self.#name),
+                    );
+                });
                 continue;
             }
         };
@@ -62,32 +72,94 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             continue;
         }
 
-        if annotations.primary_key.contains(field_name) || version == Some(field_name) {
+        if annotations.primary_key.contains(field_name) {
             definitions.push(quote! {
                 #[garde(skip)]
                 pub #field_name: #ty
             });
-        } else {
-            let inner = non_optional(ty);
-            let garde = if carries_rules(inner) {
-                quote!(#[garde(dive)])
-            } else {
-                quote!(#[garde(skip)])
-            };
-            definitions.push(quote! {
-                #[serde(default, skip_serializing_if = "::dbkit::Patch::is_absent")]
-                #garde
-                pub #field_name: ::dbkit::Patch<#inner>
-            });
+            keys.push(quote!(&self.#field_name));
+            continue;
         }
+
+        if version == Some(field_name) {
+            definitions.push(quote! {
+                #[garde(skip)]
+                pub #field_name: #ty
+            });
+            expected_version = quote!(::core::option::Option::Some(&self.#field_name));
+            continue;
+        }
+
+        let inner = non_optional(ty);
+        let garde = if carries_rules(inner) {
+            quote!(#[garde(dive)])
+        } else {
+            quote!(#[garde(skip)])
+        };
+        definitions.push(quote! {
+            #[serde(default, skip_serializing_if = "::dbkit::Patch::is_absent")]
+            #garde
+            pub #field_name: ::dbkit::Patch<#inner>
+        });
+
+        let field = field_name.to_string();
+        let column = syn::LitStr::new(field.trim_start_matches("r#"), field_name.span());
+        assignments.push(quote! {
+            match &self.#field_name {
+                ::dbkit::Patch::Absent => {}
+                ::dbkit::Patch::Set(value) => assignments.push(::dbkit::Assignment {
+                    column: #column,
+                    value: ::core::option::Option::Some(value),
+                }),
+                ::dbkit::Patch::Null => assignments.push(::dbkit::Assignment {
+                    column: #column,
+                    value: ::core::option::Option::None,
+                }),
+            }
+        });
     }
+
+    let patch_method = match annotations.shape {
+        annotations::Shape::Table(_) => quote! {
+            impl #impl_generics #name #type_generics #where_clause {
+                #[doc = "A transaction that applies the given patches."]
+                pub fn patch(
+                    entries: impl ::core::iter::IntoIterator<Item = #patch #type_generics>,
+                ) -> ::dbkit::PatchQuery<#patch #type_generics> {
+                    ::dbkit::PatchQuery::new(entries)
+                }
+            }
+        },
+        annotations::Shape::SubQuery(_) | annotations::Shape::Fragment => quote!(),
+    };
 
     Ok(quote! {
         #[doc = #doc]
         #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize, ::garde::Validate)]
-        pub struct #patch #generics {
+        #visibility struct #patch #generics {
             #(#definitions),*
         }
+
+        #[automatically_derived]
+        impl #impl_generics ::dbkit::PatchRow for #patch #type_generics #where_clause {
+            type Model = #name #type_generics;
+
+            fn assignments(&self) -> ::std::vec::Vec<::dbkit::Assignment<'_>> {
+                let mut assignments = ::std::vec::Vec::new();
+                #(#assignments)*
+                assignments
+            }
+
+            fn key(&self) -> ::std::vec::Vec<&dyn ::dbkit::Bind> {
+                ::std::vec![#(#keys),*]
+            }
+
+            fn version(&self) -> ::core::option::Option<&dyn ::dbkit::Bind> {
+                #expected_version
+            }
+        }
+
+        #patch_method
     })
 }
 

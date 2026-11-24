@@ -2,7 +2,8 @@
 //!
 //! [`Patch`] is the update input that tells "not given" apart from "set to
 //! `NULL`"; `#[derive(DbPatch)]` generates the patch of a model and validates
-//! it with `garde`. [`Model`] and its [`TableMeta`] describe a table at
+//! it with `garde`, and [`PatchQuery`] applies a batch of patches as one
+//! transaction. [`Model`] and its [`TableMeta`] describe a table at
 //! runtime, [`SubQuery`] describes a model whose row source is a query, and
 //! [`schema::check_live_schema_against_models`] compares a list of tables with
 //! a live database. [`DbType`] records the column type and default of
@@ -38,7 +39,12 @@ pub use model::Selectable;
 pub use model::SubQuery;
 pub use model::TableFragment;
 pub use model::TableMeta;
+pub use patch::Assignment;
 pub use patch::Patch;
+pub use patch::PatchError;
+pub use patch::PatchQuery;
+pub use patch::PatchRow;
+pub use patch::RenderedPatch;
 pub use query::Bind;
 pub use query::ColumnRef;
 pub use query::Combinator;
