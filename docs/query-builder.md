@@ -633,13 +633,35 @@ SELECT "id", "total" FROM "orders" WHERE "status" = $1
 -- params: ["open"]
 ```
 
-`select` takes anything that reduces to `Columns<C>`: one handle, one enum
-variant, a prebuilt set, or a list of columns, owned or borrowed. A list holds
-one type, so a list of handles spells `.column()` on each; a single handle
-needs nothing. Column order is the caller's — declaration order for
-`Columns::all()`, request order otherwise — and an unknown name is a parse
-error. See [plan-select.md](plan-select.md) for why the forms are what they
-are.
+`select` takes anything that reduces to `Columns<C>`, through one trait:
+
+```rust
+pub trait IntoColumns<C: Column> {
+    fn into_columns(self) -> Columns<C>;
+}
+
+impl<C: Column> IntoColumns<C> for C {}                          // a variant
+impl<Tag, C: Column, T> IntoColumns<C> for ColumnRef<Tag, C, T> {} // a handle
+impl<C: Column> IntoColumns<C> for Columns<C> {}                 // all(), a request
+impl<C: Column, const N: usize> IntoColumns<C> for [C; N] {}     // a list
+// and the borrowed forms of each list and of the set
+```
+
+The trait exists because handles are one type per column: `[c.id, c.total]` is
+two different types, so the only step that erases the tag and the value type is
+`column()`. Hence `.column()` on each element of a list, and nothing at all for
+a single handle.
+
+A tuple — `select((c.id, c.total))` — would remove the `.column()` and cannot
+coexist with the single-column form: the blanket impl a tuple needs overlaps
+the array, `Columns` and `&Columns` impls, and coherence rejects it. Choosing
+tuples means writing `select((c.id,))` for one column, which is worse than the
+`.column()` it saves.
+
+Column order is the caller's — declaration order for `Columns::all()`, request
+order otherwise — and two selections with the same columns in different orders
+are not equal, because they render different SQL. An unknown name is a parse
+error.
 
 ### Decoding a projection
 
@@ -1127,9 +1149,8 @@ implements for a tag only when the column declares that operator:
 pub trait HasEq<C: Column> {}
 pub trait HasLike<C: Column> {}
 pub trait HasBetween<C: Column> {}
-// ...one per query_ops-eligible FilterOperator variant: the 16 that take a
-// value today, plus the 4 array operators the plan adds (22 total). `is_null`
-// and `is_not_null` need no trait because they take no value.
+// ...one per query_ops-eligible FilterOperator variant: the 20 that take a
+// value. `is_null` and `is_not_null` need no trait because they take none.
 
 impl<Tag: HasEq<C>, C: Column, T: Bind> ColumnRef<Tag, C, T> {
     pub fn eq(self, value: impl Into<T>) -> Filter<C>;
@@ -1787,9 +1808,9 @@ sqlx accepts for `String` parses as one, each type name maps to its own type,
 `text[]` parses as one value, `numeric(10,2)` reports `UnsupportedType`, and a
 wrong JSON kind is reported as the column type.
 
-## How it was built
+## History
 
-Each step compiled and passed its tests on its own; all six are done.
+Built in steps that each compiled and passed their tests on their own.
 
 1. Renamed `FilterOperator::Any`/`NotAny` to `Contains`/`NotContains`, added the
    four overlap/superset variants, and gave the enum `as_str`, `from_name` and
@@ -1807,11 +1828,14 @@ Each step compiled and passed its tests on its own; all six are done.
    `offset` beside it, plus round-trip tests. A rejected request keeps its own
    `Error` variant, so a handler can map it to a status; a syntactically broken
    payload is `Error::Json`.
-6. This document, and the annotations doc now points here.
+6. `select`, `IntoColumns`, and the `select` JSON key.
+7. `Selected<T>`, `Selectable` and `#[derive(DbSelect)]`, so a projection
+   decodes into a row that says which columns it carries; then `render()`,
+   `build()` and the `SelectedQuery` alias.
 
 ## Open questions
 
-- How many capability traits is too many? One per operator (22) keeps the
+- How many capability traits is too many? One per operator (20) keeps the
   `FilterOperator` enum and the trait list in step, and `macro_rules!` can
   declare them together, but it is a lot of near-empty traits to read.
   Per-column traits would read better in the error (`OrderTotalHasBetween`) but
@@ -1824,8 +1848,8 @@ Each step compiled and passed its tests on its own; all six are done.
   require at least one key and set a default `limit`.
 - Should `limit` default to a number in the builder rather than in each service?
   A builder default would surprise a caller that wanted every row, and a
-  service default is one line, so the plan leaves `None` meaning "no limit" and
-  documents the footgun instead.
+  service default is one line, so the builder leaves `None` meaning "no limit"
+  and documents the footgun instead.
 - Keyset paging (`WHERE (created_at, id) < ($1, $2)`) is the scalable
   alternative to `OFFSET`, which scans and discards the skipped rows. It needs
   ordering, so it comes with `ORDER BY`, not with `offset`.
@@ -1833,7 +1857,7 @@ Each step compiled and passed its tests on its own; all six are done.
   Rust gives `&` higher precedence than `|`, matching SQL's `AND` over `OR`, so
   `a & b | (c & d)` would read like the SQL it produces. It hides the tree
   shape, though, and makes `Filter::and`/`or` redundant rather than primary; the
-  plan keeps the named constructors and treats the operators as optional sugar.
+  named constructors stay primary and the operators are optional sugar.
 - Should `normalize()` be the default on `render()`? Flattening `and([and([..])])`
   and dropping single-child groups makes output canonical but rewrites the
   caller's structure, which breaks structural round-trip of the JSON. It stays
@@ -1856,6 +1880,9 @@ Each step compiled and passed its tests on its own; all six are done.
 - Should `select` be expressible in JSON? It is, as `"select": ["id"]`; the
   `filters` wrapper means it shadows no column, and the list keeps the request's
   order, so the payload round-trips byte for byte.
+- Does a response want an `Absent` field omitted or written as `null`? Omitted
+  is the rule today and matches "empty values are omitted", but a client cannot
+  then tell "not asked for" from "asked for but missing".
 - Should `offset` be expressible but discouraged? Large offsets scan and
   discard rows, so a service with deep pages wants keyset paging from
   `ORDER BY`. Keeping the field is still the lesser evil: a client that cannot
@@ -1872,8 +1899,10 @@ Each step compiled and passed its tests on its own; all six are done.
 - `not` as a group prefix: a group could gain a negation flag.
 - Cross-table queries: one `Query<C>` is one table.
 - Projection-aware decoding is in place: `#[derive(DbSelect)]` generates a row
-  of [`Selected<T>`] fields, and `Query::query` decodes into it; see
-  [plan-select.md](plan-select.md). `SELECT *` still needs a derived
-  `FromRow` when the caller wants the model struct rather than the select
-  struct.
+  of `Selected<T>` fields, and `Query::build` decodes into it. `SELECT *` still
+  needs a derived `FromRow` when the caller wants the model struct rather than
+  the select struct.
+- Should `DbSelect` also generate the projection, so `OrderSelect::columns()` is
+  what `select` takes? It would keep the two sides in step, at the cost of
+  coupling them.
 - Applying `garde` rules to filter values: the newtype is bypassed by JSON.
