@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: field `id` says `pgdefault = inherit`, but `WidgetId` has no default; remove the annotation or give the type a default
+  --> tests/ui/fail_insert_inherit_without_default.rs:19:19
+   |
+19 | #[derive(DbModel, DbInsert)]
+   |                   ^^^^^^^^ evaluation of `_` failed here

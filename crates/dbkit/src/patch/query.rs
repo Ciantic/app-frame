@@ -11,7 +11,7 @@ use sqlx::Postgres;
 use sqlx::postgres::PgArguments;
 use std::fmt;
 
-/// One changed column of a patch. `None` means the column is cleared.
+/// One written column of a patch or an insert. `None` means SQL `NULL`.
 #[derive(Debug, Clone, Copy)]
 pub struct Assignment<'a> {
     pub column: &'static str,

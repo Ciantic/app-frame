@@ -40,12 +40,12 @@ Docs if needed: https://docs.rs/sqlx
   reaches the wire as `null`
 - Patches are input-only and do not implement `Serialize`: a missing key leaves
   the column unchanged, `null` clears a nullable column, a value sets it
-- Insert inputs are `Option<T>`: a missing nullable column is inserted as
-  `NULL`, a missing defaulted column (`id`, timestamps, `version`) is filled in
-  by the repository
+- Insert inputs are plain `T` for required columns and `Option<T>` for columns
+  with a default or nullable columns: a missing optional column is omitted, so
+  PostgreSQL applies the default or stores `NULL`
 - `#[db(...)]` annotations go one per line and each field is separated by a
   blank line; see [dbkit annotations](docs/dbkit-annotations.md#style)
 - A column with a database default carries `#[db(pgdefault = "...")]` that
-  repeats the `schema.sql` default (`uuidv7()`, `now()`, `0`); a value type may
-  carry it with `#[derive(DbType)]` instead; the schema test fails when the two
-  disagree
+  repeats the `schema.sql` default (`uuidv7()`, `now()`, `0`); a field that uses
+  its value type's default says `#[db(pgdefault = inherit)]`; the schema test
+  fails when the two disagree

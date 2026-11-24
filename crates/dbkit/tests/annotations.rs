@@ -91,12 +91,13 @@ struct GadgetId(Uuid);
 )]
 struct Gadget {
     #[db(primary_key)]
+    #[db(pgdefault = inherit)]
     id: GadgetId,
     /// The type's default is not this column's default.
-    #[db(pgdefault)]
     parent_id: GadgetId,
     #[db(pgtype = "text")]
     label: String,
+    #[db(pgdefault = inherit)]
     deleted_id: Option<GadgetId>,
 }
 

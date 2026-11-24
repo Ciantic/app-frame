@@ -16,6 +16,7 @@ pub struct EmailId(pub Uuid);
 #[db(table = "email")]
 pub struct Email {
     #[db(primary_key)]
+    #[db(pgdefault = inherit)]
     pub id: EmailId,
 
     #[db(pgtype = "text")]

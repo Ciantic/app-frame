@@ -31,9 +31,9 @@ pub struct UserSessionId(#[garde(skip)] pub Uuid);
 #[db(table = "user_session")]
 pub struct UserSession {
     #[db(primary_key)]
+    #[db(pgdefault = inherit)]
     pub id: UserSessionId,
 
-    #[db(pgdefault)]
     pub user_id: UserId,
 
     #[db(pgtype = "text")]

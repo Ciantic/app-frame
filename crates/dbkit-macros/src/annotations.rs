@@ -129,11 +129,19 @@ pub enum PgType {
 pub enum PgDefault {
     /// Declared on the field with `#[db(pgdefault = "...")]`.
     Declared(String),
-    /// The field declares no default; a bare `#[db(pgdefault)]` guarantees
-    /// this even when the type has one.
+    /// The field declares no default by omitting `pgdefault`.
     None,
-    /// Taken from the field type's `dbkit::DbType` implementation.
+    /// Taken from the field type's `dbkit::DbType` implementation with
+    /// `#[db(pgdefault = inherit)]`.
     Inherited,
+}
+
+/// What the field's `pgdefault` annotation says, before a `PgDefault` is
+/// produced.
+#[derive(Debug)]
+enum FieldDefault {
+    Inherit,
+    Declared(String),
 }
 
 #[derive(Debug, Default)]
@@ -141,9 +149,7 @@ struct FieldAnnotations {
     roles: Vec<Role>,
     flatten: bool,
     pg_type: Option<String>,
-    pg_default: Option<String>,
-    /// A bare `#[db(pgdefault)]`, meaning "no default".
-    pg_default_none: bool,
+    pg_default: Option<FieldDefault>,
     query_ops: Vec<FilterOperator>,
     orderable: bool,
 }
@@ -238,12 +244,6 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                     "`#[db(flatten)]` cannot be combined with `pgdefault`",
                 ));
             }
-            if annotations.pg_default_none {
-                errors.push(syn::Error::new(
-                    field.span(),
-                    "`#[db(flatten)]` cannot be combined with `pgdefault`",
-                ));
-            }
             if !annotations.query_ops.is_empty() {
                 errors.push(syn::Error::new(
                     field.span(),
@@ -299,14 +299,10 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             Some(pg_type) => PgType::Declared(pg_type.clone()),
             None => PgType::Inherited,
         };
-        // Only a field that inherits its type inherits the default: a field
-        // spelling out `pgtype` keeps the default it declares itself.
         let pg_default = match &annotations.pg_default {
-            Some(default) => PgDefault::Declared(default.clone()),
-            None if annotations.pg_default_none || matches!(&pg_type, PgType::Declared(_)) => {
-                PgDefault::None
-            }
-            None => PgDefault::Inherited,
+            Some(FieldDefault::Inherit) => PgDefault::Inherited,
+            Some(FieldDefault::Declared(default)) => PgDefault::Declared(default.clone()),
+            None => PgDefault::None,
         };
 
         columns.push(Column::Scalar {
@@ -521,21 +517,35 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                     return Err(meta.error("duplicate `pgtype`"));
                 }
             } else if meta.path.is_ident("pgdefault") {
-                let duplicate = annotations.pg_default.is_some() || annotations.pg_default_none;
+                if annotations.pg_default.is_some() {
+                    return Err(meta.error("duplicate `pgdefault`"));
+                }
                 if !meta.input.peek(syn::Token![=]) {
-                    if duplicate {
-                        return Err(meta.error("duplicate `pgdefault`"));
-                    }
-                    annotations.pg_default_none = true;
-                } else {
-                    let value: LitStr = meta.value()?.parse()?;
+                    return Err(meta.error(
+                        "bare `pgdefault` is not supported; omit it for no default or use \
+                         `pgdefault = inherit`",
+                    ));
+                }
+
+                let input = meta.value()?;
+                if input.peek(LitStr) {
+                    let value: LitStr = input.parse()?;
                     if value.value().is_empty() {
                         return Err(meta.error("`pgdefault` must not be empty"));
                     }
-                    if duplicate {
-                        return Err(meta.error("duplicate `pgdefault`"));
+                    annotations.pg_default = Some(FieldDefault::Declared(value.value()));
+                } else {
+                    let value: Ident = input.parse().map_err(|_| {
+                        input.error("expected `inherit` or a string literal after `pgdefault =`")
+                    })?;
+                    if value == "inherit" {
+                        annotations.pg_default = Some(FieldDefault::Inherit);
+                    } else {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "expected `inherit` or a string literal after `pgdefault =`",
+                        ));
                     }
-                    annotations.pg_default = Some(value.value());
                 }
             } else if meta.path.is_ident("query_ops") {
                 meta.parse_nested_meta(|operator| {
@@ -1399,19 +1409,21 @@ mod tests {
     }
 
     #[test]
-    fn inherits_pgtype_and_pgdefault_from_the_field_type() {
+    fn resolves_pgtype_and_pgdefault_independently() {
         let model = parse_model(
             r#"
             #[db(table = "widget")]
             struct Widget {
                 #[db(primary_key)]
                 id: WidgetId,
-                #[db(pgdefault)]
-                cleared_id: WidgetId,
+                #[db(pgdefault = inherit)]
+                inherited_default: WidgetId,
                 #[db(pgtype = "uuid")]
                 own_type: WidgetId,
                 #[db(pgtype = "uuid", pgdefault = "gen_random_uuid()")]
                 own_type_and_default: WidgetId,
+                #[db(pgtype = "uuid", pgdefault = inherit)]
+                own_type_and_inherited_default: WidgetId,
             }
         "#,
         )
@@ -1429,10 +1441,11 @@ mod tests {
         assert_eq!(
             columns,
             [
-                (None, None),
                 (None, Some(None)),
+                (None, None),
                 (Some("uuid"), Some(None)),
                 (Some("uuid"), Some(Some("gen_random_uuid()"))),
+                (Some("uuid"), None),
             ]
         );
     }
@@ -1502,20 +1515,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bare_and_declared_pgdefault() {
+    fn rejects_bare_pgdefault() {
         let message = error(
             r#"
             #[db(table = "widget")]
             struct Widget {
                 #[db(primary_key, pgtype = "uuid")]
                 #[db(pgdefault)]
-                #[db(pgdefault = "uuidv7()")]
                 id: WidgetId,
             }
         "#,
         );
 
-        assert!(message.contains("duplicate `pgdefault`"), "{message}");
+        assert!(
+            message.contains("bare `pgdefault` is not supported"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_none_pgdefault() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid", pgdefault = none)]
+                id: WidgetId,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("expected `inherit` or a string literal"),
+            "{message}"
+        );
     }
 
     #[test]

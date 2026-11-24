@@ -18,6 +18,7 @@ pub struct WidgetId(pub Uuid);
 #[db(table = "widget")]
 pub struct Widget {
     #[db(primary_key)]
+    #[db(pgdefault = inherit)]
     pub id: WidgetId,
 
     #[db(pgtype = "text")]

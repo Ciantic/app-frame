@@ -20,11 +20,12 @@ A struct is one of three shapes:
   `Meta::Fragment(&TableFragment { columns })`, and another model embeds it
   with `#[db(flatten)]`.
 
-`#[derive(DbPatch)]` reads the same annotations to generate the model's patch
-input type, which `garde` validates; insert implementations do not exist yet,
-so the insert sections describe a contract rather than code you can call today.
-The same `#[derive(DbModel)]` expansion also generates the model's selectable
-column enum, `<Model>Column`. The accepted syntax stays as documented here.
+`#[derive(DbPatch)]` and `#[derive(DbInsert)]` read the same annotations to
+generate the model's patch and insert input types, which `garde` validates.
+[Patch builder](patch-builder.md) and [Insert builder](insert-builder.md)
+document the generated queries. The same `#[derive(DbModel)]` expansion also
+generates the model's selectable column enum, `<Model>Column`. The accepted
+syntax stays as documented here.
 
 ## Example
 
@@ -251,8 +252,9 @@ The table has columns `id`, `width`, `height` and `label`, in that order.
 
 ## `DbType`
 
-Moves the column type and its default to the value type, so a model field of
-that type repeats neither.
+Moves the column type and its default to the value type, so a model field can
+take the type from it and opt into the default with
+`#[db(pgdefault = inherit)]`.
 
 ```rust
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type, DbType)]
@@ -265,10 +267,10 @@ pub struct UserSessionId(pub Uuid);
 #[db(table = "user_session")]
 pub struct UserSession {
     #[db(primary_key)]
+    #[db(pgdefault = inherit)]
     pub id: UserSessionId,
 
     // `UserId` declares a default too, but this column has none.
-    #[db(pgdefault)]
     pub user_id: UserId,
 
     // ...
@@ -278,15 +280,15 @@ pub struct UserSession {
 - `#[db(pgtype = "...")]` on the struct is required and takes the same values
   as a field's `pgtype`; `#[db(pgdefault = "...")]` is optional.
 - Generates `impl dbkit::DbType`, whose `PG_TYPE` and `PG_DEFAULT` constants the
-  model derive reads. A field that omits `pgtype` takes both from the type;
+  model derive reads. A field that omits `pgtype` takes its type from the type;
   `Option<T>` inherits from `T` and stays nullable.
-- A field that declares its own `pgtype` keeps only the `pgdefault` it declares
-  itself. This is why plain types such as `DateTime<Utc>` and `String` need no
-  `DbType` implementation: their fields spell out `pgtype` and declare no
-  default.
+- A field inherits the type's default only with `#[db(pgdefault = inherit)]`.
+  Omitting `pgdefault` means no default, regardless of whether the field
+  declares `pgtype`.
+- This is why plain types such as `DateTime<Utc>` and `String` need no `DbType`
+  implementation: their fields spell out `pgtype` and declare no default.
 - The type-level default is a suggestion: the same value type is used for
-  foreign keys, whose columns have no default. A bare `#[db(pgdefault)]` on the
-  field states that the column has none.
+  foreign keys, whose columns have no default. Such a field omits `pgdefault`.
 - Field annotations are not accepted on a `DbType` struct; a missing `pgtype`
   is an error.
 - A field whose type does not implement `DbType` and has no `pgtype` fails to
@@ -325,15 +327,22 @@ Names the column type, written the way it is written in `schema.sql`.
 Records the column default, written the way it is written in `schema.sql`.
 
 - Legal on: a field or a `DbType` struct, optional and at most once.
-- Value: a non-empty string literal holding a default expression: `uuidv7()`,
-  `now()`, `0`, `'{}'::jsonb`. A bare `#[db(pgdefault)]` on a field declares
-  that the column has no default.
-- Omitted when the column has no default. An empty or repeated `pgdefault` is
-  an error. A field that declares no `pgtype` inherits the type's default
-  unless it carries the bare form.
+- On a field, the value is either `inherit` or a non-empty string literal:
+  - `#[db(pgdefault = inherit)]` takes the default from the field type's
+    `DbType::PG_DEFAULT`, even when the field declares its own `pgtype`;
+  - a string holds the default expression: `uuidv7()`, `now()`, `0`,
+    `'{}'::jsonb`.
+- Omitting `pgdefault` on a field means the column has no default, regardless
+  of whether the field declares `pgtype`.
+- On a `DbType` struct, the value is a non-empty string literal or omitted; the
+  keyword forms are field-only.
+- An empty, repeated, bare or unknown `pgdefault` is an error.
+- `inherit` is the only way to use a type-level default. The schema test and
+  `DbModel` read `DbType::PG_DEFAULT` for the column; a non-null insert field
+  also carries a compile-time assertion that the type really has a default.
 - Meant to mirror the database rather than change it: the model does not emit
-  the default. It tells a generated insert that the column can be omitted and
-  lets the schema test detect drift.
+  the default. It tells `DbInsert` that the column can be omitted and lets the
+  schema test detect drift.
 - A nullable column may carry a default.
 - The derive does not resolve the expression; the schema test puts it on a
   probe column and compares PostgreSQL's normalized form (`current_timestamp`
@@ -417,7 +426,8 @@ Marks a primary key column. Repeat it on every column of a composite key.
 - A single annotated field is the `Model::Id` associated type; with several, the
   associated type is a tuple of the field types in declaration order.
 - Used for the `WHERE` clause of single-row operations and for `find`.
-- A required field of the generated patch.
+- A required field of the generated patch. In the generated insert it is
+  required only when the column has no default; a defaulted key is optional.
 
 ## `version`
 
@@ -433,6 +443,8 @@ Marks the optimistic-locking field.
   error.
 - A required field of the generated patch, where the update carries it as the
   optimistic-locking token. A model without it gets a patch without a version.
+- In the generated insert it is the starting version: optional when the column
+  has a default, required otherwise.
 
 ## `created_at`
 
@@ -442,9 +454,10 @@ Marks the creation timestamp.
   timestamp handling.
 - The field must be a `DateTime` and must not be `Option`.
 - Not patchable: the update path never emits it.
-- Planned for insert: the insert input carries it as `Option<DateTime<Utc>>`
-  where `None` means "use the timestamp the caller passed in" and `Some` copies
-  an existing value, which is what importing old rows needs.
+- In the generated insert it is optional when the column has a default and
+  required when it does not. `Some` copies an existing value, which is what
+  importing old rows needs. If `created_at` is supplied and `updated_at` is not,
+  the insert also writes `updated_at` with the creation time.
 
 ## `updated_at`
 
@@ -452,11 +465,12 @@ Marks the modification timestamp.
 
 - Legal on: at most one field, optional.
 - The field must be a `DateTime` and must not be `Option`.
-- Not patchable: the update path always writes it from the `now` argument the
-  caller passes in, ignoring any value in the row.
-- Planned for insert: same `Option` semantics as `created_at`, defaulting to
-  the creation timestamp rather than to "now", so an imported row does not look
-  freshly modified.
+- Not patchable: the update path always writes it from `now()`, ignoring any
+  value in the row.
+- In the generated insert it is optional when the column has a default and
+  required when it does not. When `created_at` is supplied and `updated_at` is
+  omitted, the builder writes the creation timestamp to both, so an imported row
+  does not look freshly modified.
 
 ## Legality rules enforced by the derive
 
@@ -472,7 +486,7 @@ Every rule below produces a compile error.
 - A table or a subquery must not have generic parameters.
 - A table row must declare `primary_key` at least once; a subquery and a
   fragment must not carry it or any other role.
-- `DbPatch` cannot be derived for a subquery row.
+- `DbPatch` and `DbInsert` cannot be derived for a subquery row.
 - Every field that is not `#[db(flatten)]` must carry `#[db(pgtype = "...")]`
   or have a type that implements `dbkit::DbType`.
 - `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`,
@@ -489,10 +503,11 @@ Every rule below produces a compile error.
 - `pgtype` must be a non-empty string literal and appear only once per field or
   `DbType` struct. It is not validated at compile time; the schema test runs it
   through PostgreSQL.
-- `pgdefault` must be a non-empty string literal when it has a value, and must
-  appear at most once per field or `DbType` struct. A bare `#[db(pgdefault)]`
-  is accepted on a field only and means "no default". It is not validated at
-  compile time either.
+- `pgdefault` must be a non-empty string literal or the identifier `inherit`
+  on a field, and must appear at most once per field or `DbType` struct. A
+  `DbType` struct accepts only the string form. A bare `#[db(pgdefault)]`, an
+  unknown identifier, or `pgdefault = none` is an error. It is not validated at
+  compile time; the schema test does that.
 - `query_ops` appears at most once per field, holds at least one operator, and
   every operator must be in the accepted list; repeating an operator is an
   error.
@@ -737,6 +752,77 @@ User::patch([patch]).execute(&pool).await?;
 
 See [Patch builder](patch-builder.md) for the transaction behavior, SQL shape
 and error cases.
+
+## Generated insert
+
+`#[derive(DbInsert)]` emits `<Model>Insert`. Required columns are plain fields;
+columns with a default and nullable columns are `Option` fields.
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, DbModel, DbInsert)]
+#[db(table = "user")]
+pub struct User {
+    #[db(primary_key)]
+    #[db(pgdefault = inherit)]
+    pub id: UserId,
+
+    #[db(pgtype = "text")]
+    pub email: Email,
+
+    #[db(pgtype = "timestamptz")]
+    pub email_verified_at: Option<DateTime<Utc>>,
+
+    #[db(version)]
+    #[db(pgtype = "bigint")]
+    #[db(pgdefault = "0")]
+    pub version: i64,
+}
+
+// generated
+pub struct UserInsert {
+    pub id: Option<UserId>,
+    pub email: Email,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub version: Option<i64>,
+}
+```
+
+- A required field is non-null and has no default. An optional field is omitted
+  from the `INSERT` when it is `None`, so PostgreSQL applies the default or
+  stores `NULL`.
+- `new(...)` takes the required fields in declaration order, plus each
+  flattened fragment insert. Every optional field starts `None`.
+- `set_<field>(value)` sets one column. There is no `clear_` method: on insert,
+  “not given” means the database chooses, not SQL `NULL`.
+- A flattened field nests the fragment's insert type with `serde(flatten)`.
+- The struct derives `Serialize`, `Deserialize` and `garde::Validate`. Role
+  fields (primary key, version, timestamps) are not validated; business fields
+  whose payload type can carry rules are marked `#[garde(dive)]`.
+- An inherited default (`pgdefault = inherit`) makes the field optional and, for
+  a non-null column, adds a const assertion that the type has a default.
+
+For a table, the derive also adds:
+
+```rust
+let insert = UserInsert::new(Email("new@example.com".to_owned()))
+    .set_email_verified_at(Utc::now());
+
+let inserted: Vec<User> = User::insert([insert]).execute(&pool).await?;
+```
+
+- `InsertQuery::render()` returns one `RenderedInsert` per entry, each an
+  `INSERT ... RETURNING *`.
+- `InsertQuery::execute` renders every entry, runs them in one transaction and
+  returns the inserted rows in input order. A `&mut Transaction` creates a
+  savepoint; an empty batch is a no-op.
+- An entry with every optional column `None` renders
+  `INSERT INTO "table" DEFAULT VALUES RETURNING *`.
+- A supplied `created_at` also supplies `updated_at` when the latter is omitted,
+  so imported rows keep their creation time.
+- A constraint violation is `InsertError::Sqlx`; the whole batch rolls back.
+
+See [Insert builder](insert-builder.md) for the SQL shape, builders and error
+cases.
 
 ## Generated columns
 
