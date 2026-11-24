@@ -1,14 +1,4 @@
-//! The JSON form: a `filters` object, and the paging keys beside it.
-//!
-//! Inside `filters` a key is a column name with an optional `__operator`
-//! suffix, so one object is a level and its keys combine with `AND`. A group is
-//! the reserved key `and` or `or` holding an array of objects, one per child,
-//! which is what keeps any finite tree expressible without a positional syntax.
-//!
-//! `filters` is a wrapper rather than the whole payload because paging is not a
-//! filter. Keeping the two apart means the top level has no columns at all, so
-//! a column named `limit` or `filters` is just a column, and no reserved key
-//! has to outrank one.
+//! The JSON form: flat column keys with optional `__operator` suffixes combine with `AND` inside `filters`.
 
 use crate::Column;
 use crate::Columns;
@@ -65,9 +55,7 @@ impl<C: Column> Serialize for Query<C> {
     }
 }
 
-/// One filter object: the children of an implicit conjunction, written as flat
-/// keys, falling back to an explicit `and` list when two children would need
-/// the same key.
+/// One filter object: flat keys for an implicit conjunction, or an explicit `and` list when keys would collide.
 struct Level<'a, C: Column>(&'a [Filter<C>]);
 
 impl<C: Column> Serialize for Level<'_, C> {
@@ -107,9 +95,7 @@ impl<C: Column> Serialize for Level<'_, C> {
     }
 }
 
-/// A combinator key is unreachable when the model has a column of that name,
-/// because the column wins during deserialization; the query has no JSON form
-/// then.
+/// A combinator key a column name shadows is unreachable, so the query has no JSON form then.
 fn reserved<C: Column>(combinator: Combinator) -> Result<(), Error> {
     if C::from_name(combinator.as_str()).is_some() {
         return Err(Error::CombinatorShadowed { combinator });
@@ -154,8 +140,7 @@ impl<C: Column> Serialize for Child<'_, C> {
     }
 }
 
-/// The key a leaf is written under: the bare column for `eq` and `is_null`,
-/// `column__operator` otherwise.
+/// The key a leaf is written under: the bare column for `eq` and `is_null`, `column__operator` otherwise.
 fn leaf_key<C: Column>(leaf: &Leaf<C>) -> String {
     let name = leaf.column.name();
 
@@ -185,12 +170,7 @@ impl<'de, C: Column> Deserialize<'de> for Query<C> {
     }
 }
 
-/// A request as the visitor reports it: a syntax error is the deserializer's,
-/// and a rejected request is [`Error`].
-///
-/// `Query::parse` reads this form so a caller keeps the variant it needs to
-/// choose an HTTP status; the `Deserialize` impl above flattens both into a
-/// `serde_json::Error` for a handler that only wants the message.
+/// A request as the visitor reports it: syntax errors are serde's, rejections are `Error`.
 pub(crate) struct Parsed<C: Column>(Result<Query<C>, Error>);
 
 /// Reads the JSON form, keeping a rejected request's own variant.
@@ -226,9 +206,7 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
         let mut query = Query::new();
         let mut seen: Vec<String> = Vec::new();
 
-        // The map is drained even after a rejection: leaving it half-read
-        // would turn the first problem into a "trailing characters" syntax
-        // error.
+        // Drain the map even after a rejection: a half-read map would turn the problem into "trailing characters".
         let mut rejected = None;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -275,8 +253,7 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
     }
 }
 
-/// Reads the `order_by` list, resolving each entry through the column enum and
-/// rejecting a column that did not declare `#[db(orderable)]`.
+/// Reads `order_by`, resolving names through the column enum and rejecting columns without `#[db(orderable)]`.
 fn order_by<C: Column>(requested: Vec<String>) -> Result<Vec<OrderTerm<C>>, Error> {
     let mut order = Vec::with_capacity(requested.len());
 
@@ -289,12 +266,7 @@ fn order_by<C: Column>(requested: Vec<String>) -> Result<Vec<OrderTerm<C>>, Erro
     Ok(order)
 }
 
-/// Reads the `select` list, resolving each name through the column enum so an
-/// unknown one reports the column list.
-///
-/// `Columns<C>` implements `Deserialize` for the request types, but reading the
-/// names here keeps this visitor on `C: Column` alone, without asking every
-/// caller to spell out a serde bound.
+/// Reads `select` through the column enum, so an unknown name reports the column list and no serde bound is needed.
 fn select<C: Column>(requested: Vec<String>) -> Result<Columns<C>, Error> {
     let mut columns = Columns::default();
 
@@ -315,8 +287,7 @@ fn select<C: Column>(requested: Vec<String>) -> Result<Columns<C>, Error> {
     Ok(columns)
 }
 
-/// One filter object, for the `filters` value and for a level inside an
-/// `and`/`or` array.
+/// One filter object, for the `filters` value and for a level inside an `and`/`or` array.
 struct LevelOwned<C: Column>(Vec<Filter<C>>);
 
 struct ParsedLevel<C: Column>(Result<LevelOwned<C>, Error>);
@@ -400,16 +371,13 @@ impl<'de, C: Column> Visitor<'de> for LevelVisitor<C> {
     }
 }
 
-/// What a key inside a filter object means, resolved in the order the grammar
-/// states: the whole key as a column, then a combinator, then the last-`__`
-/// split.
+/// What a filter key means, tried in order: the whole key as a column, then a combinator, then the last `__` split.
 enum Key<C: Column> {
     Group(Combinator),
     Leaf {
         column: C,
         operator: FilterOperator,
-        /// Whether the key spelled the operator out, which decides whether
-        /// `null` may stand for `is_null`.
+        /// Whether the key spelled the operator out, which decides whether `null` may stand for `is_null`.
         suffixed: bool,
     },
 }
@@ -460,11 +428,7 @@ fn names<C: Column>() -> Vec<&'static str> {
     C::all().iter().map(|column| column.name()).collect()
 }
 
-/// Appends one `and`/`or` key to the level being read.
-///
-/// `and` is the level's own combinator, so its children join the level instead
-/// of nesting: that is what makes the serializer's `{"and": [...]}` fallback
-/// parse back to the tree it came from.
+/// Appends an `and`/`or` key; `and` joins the current level, so the serializer's fallback round-trips.
 fn children<C: Column>(
     combinator: Combinator,
     levels: Vec<Result<LevelOwned<C>, Error>>,
@@ -519,8 +483,7 @@ fn leaf<C: Column>(
 
             Operand::None
         }
-        // A bare key with `null` is the short form of `is_null`; spelling out
-        // `eq` is not, so a cleared column keeps one spelling.
+        // A bare key with `null` means `is_null`; spelling out `eq` does not, so a cleared column has one spelling.
         FilterOperator::Eq if value.is_null() => {
             if suffixed {
                 return Err(Error::NullNotAllowed { column: name });

@@ -1,9 +1,4 @@
-//! Generation of a table's key structs.
-//!
-//! `{Model}PK` holds exactly the primary key columns, which an insert returns.
-//! `{Model}PKV` adds the version column when the model has one, for operations
-//! that identify a row and check its version. Both decode from a `RETURNING`
-//! list by column name, which keeps a raw identifier working.
+//! Generation of `{Model}PK` and, with a version column, `{Model}PKV`, decoded from `RETURNING` by column name.
 
 use crate::annotations;
 use crate::annotations::Column;
@@ -65,8 +60,7 @@ pub(crate) fn expand(
     })
 }
 
-/// The key fields as written in the model: the first is the primary key and the
-/// last, when present, is the version.
+/// The key fields as written in the model: the first is the primary key and the last, when present, is the version.
 fn key_struct(
     name: &Ident,
     visibility: &Visibility,

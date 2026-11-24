@@ -1,11 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-/// A session or magic link token, stored only as its hash.
-///
-/// The type carries no construction logic: sanitization and validation are
-/// separate steps run before or after a value is built. `garde` validates the
-/// field when the struct that owns it is validated.
+/// A session or magic-link token, stored only as its hash; `garde` validates the field where it is used.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, garde::Validate,
 )]

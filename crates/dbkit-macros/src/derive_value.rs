@@ -1,10 +1,4 @@
-//! Generation of the borrow conversion of a value type.
-//!
-//! A column handle takes `impl Into<T>`, so `c.id.eq(&id)` needs
-//! `From<&OrderId> for OrderId`. The orphan rule rejects a blanket
-//! `impl<T: Clone> From<&T> for T`, so the newtype declares the conversion with
-//! this derive instead. The conversion clones, so the type must be `Clone`; a
-//! newtype that does not want to copy itself simply does not derive `DbValue`.
+//! Derive of `From<&T> for T` for a one-field newtype, so a column handle takes `&value`; the type must be `Clone`.
 
 use proc_macro2::TokenStream;
 use quote::quote;

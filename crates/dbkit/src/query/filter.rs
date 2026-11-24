@@ -1,5 +1,4 @@
-//! The filter tree, its operand, and the typed handle a column is filtered
-//! through.
+//! The filter tree, its operand, and the typed handle a column is filtered through.
 
 use crate::Column;
 use crate::Columns;
@@ -29,10 +28,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// One comparison of a column, or a group of filters.
-///
-/// A leaf handle returns `Filter`, not `Leaf`, so one array can mix leaves and
-/// groups: a `Vec` holds one element type, and the enum is what allows the mix.
+/// One comparison of a column, or a group of them; the enum lets one array mix leaves and groups.
 #[derive(Clone)]
 pub enum Filter<C: Column> {
     Leaf(Leaf<C>),
@@ -47,11 +43,7 @@ pub struct Leaf<C: Column> {
     pub operand: Operand,
 }
 
-/// What a leaf binds.
-///
-/// The arity is in the type so a hand-built tree cannot silently render two
-/// placeholders for one value; [`build`](crate::Query::build) still checks that
-/// the operator agrees with it.
+/// What a leaf binds: the arity is in the type, so a hand-built tree cannot render two placeholders for one value.
 #[derive(Clone)]
 pub enum Operand {
     /// A single value.
@@ -143,8 +135,7 @@ impl Combinator {
     }
 }
 
-/// A combinator and its children. Every group renders in parentheses, so SQL
-/// precedence never decides the meaning.
+/// A combinator and its children. Every group renders in parentheses, so SQL precedence never decides the meaning.
 #[derive(Clone)]
 pub struct Group<C: Column> {
     pub combinator: Combinator,
@@ -152,11 +143,7 @@ pub struct Group<C: Column> {
 }
 
 impl<C: Column> Filter<C> {
-    /// A comparison, with the operand the operator needs.
-    ///
-    /// This constructor is untyped on purpose: a handle exists for every
-    /// operator a column declares, and this is the way to build one it does
-    /// not cover. `build()` validates it like any other leaf.
+    /// A comparison with any operator and operand, for one no handle covers; `build()` validates it like any leaf.
     pub fn leaf(column: C, operator: FilterOperator, operand: Operand) -> Self {
         Filter::Leaf(Leaf {
             column,
@@ -180,9 +167,7 @@ impl<C: Column> Filter<C> {
         Filter::group(Combinator::Or, filters)
     }
 
-    /// Flattens a same-combinator child into its parent and drops a group with
-    /// one child, recursively. Opt-in, because it rewrites the tree and so
-    /// changes what serialization prints.
+    /// Flattens same-combinator children and drops one-child groups; opt-in, because it changes serialization.
     pub fn normalize(self) -> Self {
         let Filter::Group(group) = self else {
             return self;
@@ -259,14 +244,7 @@ impl<C: Column> PartialEq for Filter<C> {
 
 impl<C: Column> Eq for Filter<C> {}
 
-/// A column with its value type and the tag that says which operators it
-/// declared.
-///
-/// The column enum cannot carry a per-variant value type, because an associated
-/// type belongs to an impl rather than to a variant. `Order::columns()` builds
-/// one of these per field, and `#[derive(DbModel)]` emits one empty tag type
-/// per column with one capability impl per `query_ops` entry, so an operator
-/// the column never declared does not resolve.
+/// A column with its value type and capability tag; `Order::columns()` builds one per field.
 pub struct ColumnRef<Tag, C: Column, T> {
     column: C,
     tag: PhantomData<fn() -> Tag>,
@@ -291,8 +269,7 @@ impl<Tag, C: Column, T> fmt::Debug for ColumnRef<Tag, C, T> {
     }
 }
 
-// No `PartialEq`: its `eq` would resolve when a column's `eq` is not declared,
-// which would turn "operator not declared" into a type mismatch.
+// No `PartialEq`: its `eq` would win over an undeclared operator and turn a missing operator into a type error.
 
 impl<Tag, C: Column, T> ColumnRef<Tag, C, T> {
     /// The handle of a column, for the generated `columns()`.
@@ -310,8 +287,7 @@ impl<Tag, C: Column, T> ColumnRef<Tag, C, T> {
         self.column
     }
 
-    /// `IS NULL`. Available on every column: on a `NOT NULL` one it simply
-    /// matches nothing.
+    /// `IS NULL`. Available on every column: on a `NOT NULL` one it simply matches nothing.
     pub fn is_null(self) -> Filter<C> {
         Filter::leaf(self.column, FilterOperator::IsNull, Operand::None)
     }
@@ -501,13 +477,7 @@ where
     }
 }
 
-/// What a selection may be built from: one column, one handle, a prebuilt set,
-/// or a list of columns, owned or borrowed.
-///
-/// The element types differ, because a handle is one type per column, so the
-/// trait is what lets `select` take a mix of them. Only the array form needs a
-/// single element type, and a handle reduces to its column with
-/// [`column()`](ColumnRef::column).
+/// What `select` accepts: a column, a handle, a set or a list; a handle reduces to its column with `column()`.
 pub trait IntoColumns<C: Column> {
     fn into_columns(self) -> Columns<C>;
 }
@@ -536,9 +506,7 @@ impl<C: Column, const N: usize> IntoColumns<C> for [C; N] {
     }
 }
 
-// Through a reference, so a caller can pass a list it does not own. These do
-// not overlap the impls above: `Column` is this crate's trait, and none of
-// these reference types implements it.
+// Through a reference so a caller can pass a list it does not own; these do not overlap the impls above.
 impl<C: Column, const N: usize> IntoColumns<C> for &[C; N] {
     fn into_columns(self) -> Columns<C> {
         self.iter().copied().collect()

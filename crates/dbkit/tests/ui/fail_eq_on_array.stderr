@@ -1,35 +1,35 @@
 error[E0599]: the method `eq` exists for struct `ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>`, but its trait bounds were not satisfied
-  --> tests/ui/fail_eq_on_array.rs:10:44
-   |
-10 |     let _ = Order::query().filters([c.tags.eq("rust")]);
-   |                                            ^^ method cannot be called due to unsatisfied trait bounds
-   |
-  ::: tests/ui/support.rs
-   |
-   | #[derive(DbModel)]
-   |          ------- doesn't satisfy `OrderTagsTag: HasEq<OrderColumn>`
-   |
-  ::: src/query/filter.rs
-   |
-   | pub struct ColumnRef<Tag, C: Column, T> {
-   | --------------------------------------- doesn't satisfy `_: Iterator`
-   |
-   = note: the following trait bounds were not satisfied:
-           `OrderTagsTag: HasEq<OrderColumn>`
-           `ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>: Iterator`
-           which is required by `&mut ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>: Iterator`
+ --> tests/ui/fail_eq_on_array.rs:9:44
+  |
+9 |     let _ = Order::query().filters([c.tags.eq("rust")]);
+  |                                            ^^ method cannot be called due to unsatisfied trait bounds
+  |
+ ::: tests/ui/support.rs
+  |
+  | #[derive(DbModel)]
+  |          ------- doesn't satisfy `OrderTagsTag: HasEq<OrderColumn>`
+  |
+ ::: src/query/filter.rs
+  |
+  | pub struct ColumnRef<Tag, C: Column, T> {
+  | --------------------------------------- doesn't satisfy `_: Iterator`
+  |
+  = note: the following trait bounds were not satisfied:
+          `OrderTagsTag: HasEq<OrderColumn>`
+          `ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>: Iterator`
+          which is required by `&mut ColumnRef<OrderTagsTag, OrderColumn, Vec<std::string::String>>: Iterator`
 note: the trait `HasEq` must be implemented
-  --> src/query/capability.rs
-   |
-   |               pub trait $name<C: Column> {}
-   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+ --> src/query/capability.rs
+  |
+  |               pub trait $name<C: Column> {}
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
-   | / capability! {
-   | |     HasEq => "eq",
-   | |     HasNeq => "neq",
-   | |     HasGt => "gt",
-...  |
-   | |     HasNotBetween => "not_between",
-   | | }
-   | |_- in this macro invocation
-   = note: this error originates in the macro `capability` (in Nightly builds, run with -Z macro-backtrace for more info)
+  | / capability! {
+  | |     HasEq => "eq",
+  | |     HasNeq => "neq",
+  | |     HasGt => "gt",
+... |
+  | |     HasNotBetween => "not_between",
+  | | }
+  | |_- in this macro invocation
+  = note: this error originates in the macro `capability` (in Nightly builds, run with -Z macro-backtrace for more info)

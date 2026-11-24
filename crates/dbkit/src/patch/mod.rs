@@ -1,5 +1,4 @@
-//! Update inputs: the [`Patch`] value and the builder that applies a batch of
-//! them.
+//! Update inputs: the [`Patch`] value and the builder that applies a batch of them.
 
 mod query;
 
@@ -13,20 +12,7 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 
-/// One field of an update, distinguishing "not given" from "set to `NULL`".
-///
-/// With `#[serde(default)]` on the field, a missing key is [`Patch::Absent`],
-/// an explicit `null` is [`Patch::Null`] and any other value is
-/// [`Patch::Set`]. No custom deserializers are needed on the patch struct.
-///
-/// A patch serializes for responses: `Set` writes the value and `Null` writes
-/// `null`. `Absent` also writes `null`, so a returned struct needs
-/// `skip_serializing_if = "Patch::is_absent"` to keep an absent field off the
-/// wire.
-///
-/// The `garde::Validate` implementation validates only `Set` values, so an
-/// absent or cleared column never fails validation. A patch struct derives
-/// `garde::Validate` and marks its patch fields `#[garde(dive)]`.
+/// One update field: `Absent` (not given), `Null` (clear it) or `Set` (a value); `garde` validates only `Set`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Patch<T> {
     #[default]

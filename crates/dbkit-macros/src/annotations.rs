@@ -18,8 +18,7 @@ pub enum Role {
     UpdatedAt,
 }
 
-/// A `dbkit::FilterOperator` variant, known to the macro by its annotation
-/// name.
+/// A `dbkit::FilterOperator` variant, known to the macro by its annotation name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilterOperator {
     Eq,
@@ -76,8 +75,7 @@ impl FilterOperator {
     }
 }
 
-/// What the struct describes: a table row, rows a query produces, or a group
-/// of columns embedded in another model with `#[db(flatten)]`.
+/// What the struct describes: a table row, a query's rows, or columns another model embeds with `#[db(flatten)]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shape {
     Table(String),
@@ -131,13 +129,11 @@ pub enum PgDefault {
     Declared(String),
     /// The field declares no default by omitting `pgdefault`.
     None,
-    /// Taken from the field type's `dbkit::DbType` implementation with
-    /// `#[db(pgdefault = inherit)]`.
+    /// Taken from the field type's `dbkit::DbType` implementation with `#[db(pgdefault = inherit)]`.
     Inherited,
 }
 
-/// What the field's `pgdefault` annotation says, before a `PgDefault` is
-/// produced.
+/// What the field's `pgdefault` annotation says, before a `PgDefault` is produced.
 #[derive(Debug)]
 enum FieldDefault {
     Inherit,
@@ -744,8 +740,7 @@ mod tests {
     }
 
     impl PgDefault {
-        /// The field's own default, `Some(None)` when it declares none, or
-        /// `None` when the default is inherited from the field type.
+        /// The field's own default: `Some(None)` for none declared, `None` when inherited from the type.
         fn declared(&self) -> Option<Option<&str>> {
             match self {
                 PgDefault::Declared(pg_default) => Some(Some(pg_default)),

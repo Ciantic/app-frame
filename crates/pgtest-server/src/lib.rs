@@ -1,5 +1,4 @@
-//! Runs one PostgreSQL container for all test processes and one schema per
-//! test.
+//! Runs one PostgreSQL container for all test processes and one schema per test.
 
 use sqlx::Connection;
 use sqlx::PgPool;
@@ -24,8 +23,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-// For TimescaleDB, use the image below and ensure the extension setup in
-// `attach`. const IMAGE: &str = "docker.io/timescale/timescaledb:latest-pg18"
+// For TimescaleDB, use `docker.io/timescale/timescaledb:latest-pg18` and ensure the extension setup in `attach`.
 
 const IMAGE: &str = "docker.io/library/postgres:18";
 const USER: &str = "postgres";
@@ -49,8 +47,7 @@ pub struct PgtestServer {
 }
 
 impl PgtestServer {
-    /// Attaches to the shared container, starting it if no process uses one
-    /// yet.
+    /// Attaches to the shared container, starting it if no process uses one yet.
     pub async fn start() -> Self {
         let _starting = STARTING.lock().await;
         if let Some(server) = STARTED.get() {
@@ -122,15 +119,7 @@ impl PgtestServer {
 
         let server = Self { port };
 
-        // Wait until the container accepts connections. The plain PostgreSQL
-        // image has no TimescaleDB extension; with an image that bundles it,
-        // the extension is created like this:
-        //
-        // let mut connection = server.connect().await;
-        // sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS timescaledb")
-        //     .execute(&mut connection)
-        //     .await
-        //     .expect("failed to create the timescaledb extension");
+        // Wait for connections; the plain image has no TimescaleDB, but a bundled one needs `CREATE EXTENSION`.
 
         drop(server.connect().await);
 
@@ -346,8 +335,7 @@ fn start_container(container: &str, port: u16) {
             "--detach",
             "--name",
             container,
-            // Keeps the data directory in RAM; initdb is what dominates startup.
-            // Applies to whatever path the image itself declares as a volume.
+            // Keeps the data directory in RAM; applies to whatever path the image declares as a volume.
             "--image-volume",
             "tmpfs",
             "--publish",

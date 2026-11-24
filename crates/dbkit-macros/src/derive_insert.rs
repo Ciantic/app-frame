@@ -1,12 +1,4 @@
-//! Derive of a model's insert input type.
-//!
-//! Required columns are plain fields; columns with a default or a nullable
-//! column are `Option` fields, so `None` omits the column. The constructor
-//! takes the required fields and each flattened fragment insert. `set_` methods
-//! change one column.
-//!
-//! An inherited default is verified with a const assertion: the macro cannot
-//! read `DbType::PG_DEFAULT`, but the compiler can.
+//! Derive of `<Model>Insert`: required fields are plain, defaulted or nullable ones are `Option`, and `None` omits.
 
 use crate::annotations;
 use crate::annotations::Column;
@@ -233,8 +225,7 @@ fn field_text(name: &syn::Ident) -> String {
     name.to_string().trim_start_matches("r#").to_owned()
 }
 
-/// The insert type of a flattened field: the field type with `Insert` appended
-/// to its last path segment, so `size: Size` becomes `SizeInsert`.
+/// The insert type of a flattened field: its last path segment plus `Insert`.
 fn insert_type(ty: &Type) -> Type {
     let Type::Path(path) = ty else {
         return ty.clone();
@@ -268,11 +259,7 @@ fn non_optional(ty: &Type) -> &Type {
     }
 }
 
-/// Whether a payload type can carry validation rules.
-///
-/// Only a local type can implement `garde::Validate`, so a primitive or a
-/// foreign type is skipped. Role fields are skipped too: an id, version or
-/// timestamp is not request payload.
+/// Whether a payload type can carry rules: a local type with `garde::Validate`, skipping role fields.
 fn garde(ty: &Type, role: bool) -> TokenStream {
     if role || !carries_rules(ty) {
         quote!(#[garde(skip)])

@@ -1,5 +1,4 @@
-// An array column declares `contains`, not `eq`: `any` has no two-dimensional
-// parameter, so the plan gives it no value operator at all.
+// An array column declares `contains`, not `eq`: `any` has no two-dimensional parameter, so `eq` has no operator.
 #[path = "support.rs"]
 mod support;
 use support::Order;

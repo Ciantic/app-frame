@@ -1,13 +1,4 @@
-//! Derive of a model's projected-row type.
-//!
-//! `{Model}Select` holds one `dbkit::Selected<T>` field per column, so a row
-//! decoded from a projection distinguishes a column that was not asked for from
-//! one that came back `NULL`. Decoding asks the row which columns it carries,
-//! so no second parameter says what the projection was.
-//!
-//! A nullable column keeps its `Option` inside `Selected`: `Set(None)` is a
-//! selected `NULL`. A `#[db(flatten)]` field nests the fragment's own select
-//! struct, so `row.size.width` works the way the handle struct does.
+//! Derive of `<Model>Select`: one `Selected<T>` per column, so a missing column differs from a selected `NULL`.
 
 use crate::annotations;
 use crate::annotations::Column;
@@ -104,8 +95,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
-/// The select type of a flattened field: the field type with `Select` appended
-/// to its last path segment, so `size: Size` becomes `SizeSelect`.
+/// The select type of a flattened field: its last path segment plus `Select`.
 fn select_type(ty: &Type) -> Type {
     let Type::Path(path) = ty else {
         return ty.clone();

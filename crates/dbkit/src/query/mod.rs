@@ -1,10 +1,4 @@
-//! A `WHERE` clause as data: a query type tailored to one model's row source,
-//! built from typed Rust values or parsed from succinct JSON, that renders to
-//! the `(sql, params)` pair `sqlx` executes.
-//!
-//! Both faces converge on one [`Query<C>`], so a Rust-built query serializes
-//! to the JSON that rebuilds it, and neither face formats a request string into
-//! SQL: identifiers come from model metadata, and values are bound.
+//! A `WHERE` clause as data, built from typed handles or JSON and rendered to the `(sql, params)` pair `sqlx` runs.
 
 use crate::Column;
 use crate::Columns;
@@ -51,15 +45,11 @@ pub const MAX_NODES: usize = 64;
 /// How many values one list operand may hold.
 pub const MAX_LIST: usize = 100;
 
-/// The statement [`Query::build_selected`] returns: the SQL and its arguments,
-/// ready to run, decoding into the model's select type.
+/// The statement `build_selected` returns: SQL and arguments ready to run, decoding into the select type.
 pub type SelectedQuery<C> =
     QueryAs<'static, Postgres, <<C as Column>::Model as Selectable>::Select, PgArguments>;
 
-/// One query of one model.
-///
-/// `filters` is the top-level conjunction: it appends, and it never nests, so
-/// a group is only ever the explicit [`Filter::and`] or [`Filter::or`].
+/// One query of one model; `filters` is the top-level conjunction, appended and never nested.
 #[derive(Clone)]
 pub struct Query<C: Column> {
     pub select: Option<Columns<C>>,
@@ -83,8 +73,7 @@ impl<C: Column> Query<C> {
         }
     }
 
-    /// Selects the given columns instead of every column. Calling it again
-    /// replaces the selection rather than adding to it.
+    /// Selects these columns instead of every column; a later call replaces the selection.
     pub fn select(mut self, columns: impl IntoColumns<C>) -> Self {
         self.select = Some(columns.into_columns());
         self
@@ -112,9 +101,7 @@ impl<C: Column> Query<C> {
         self
     }
 
-    /// Flattens same-combinator nesting and drops single-child groups.
-    ///
-    /// The top level is a conjunction too, so an `and` group there joins it.
+    /// Flattens same-combinator nesting and drops one-child groups; a top-level `and` joins the conjunction.
     pub fn normalize(mut self) -> Self {
         let mut filters = Vec::with_capacity(self.filters.len());
 
@@ -131,38 +118,17 @@ impl<C: Column> Query<C> {
         self
     }
 
-    /// Reads the JSON form: a `filters` object with `limit` and `offset`
-    /// beside it.
-    ///
-    /// A syntactically broken payload is [`Error::Json`]; a rejected one keeps
-    /// its own variant, so a handler can map it to a status.
+    /// Reads the JSON form; a broken payload is `Error::Json`, a rejected one keeps its own variant.
     pub fn parse(json: &str) -> Result<Self, Error> {
         serde::parse(json)
     }
 
-    /// The statement and its parameters, or the first problem the tree has.
-    ///
-    /// For a caller that wants the SQL text and the bound values: to log them,
-    /// to hand them to its own executor, or to assert on them in a test.
-    /// [`build`](Self::build) and [`build_selected`](Self::build_selected) are
-    /// the same rendering taken straight to a query.
+    /// The SQL and its parameters, or the first problem; `build` and `build_selected` take it straight to a query.
     pub fn render(&self) -> Result<Rendered, Error> {
         render::render(self)
     }
 
-    /// The same statement as a `QueryAs`, decoding into the model.
-    ///
-    /// The SQL and its arguments are owned, so the value can be held, passed
-    /// around and only then awaited:
-    ///
-    /// ```ignore
-    /// let rows: Vec<Order> = Order::query().filters([c.status.eq("open")]).build()?.fetch_all(&pool).await?;
-    /// ```
-    ///
-    /// `C::Model` must derive `sqlx::FromRow`, which the service models already
-    /// do. The query has to read every column — no `select`, or one that names
-    /// all of them — because a partial row cannot be decoded into the model;
-    /// [`build_selected`](Self::build_selected) is the projection form.
+    /// The statement as a `QueryAs` decoding into the model; it must read every column and `C::Model: FromRow`.
     pub fn build(&self) -> Result<QueryAs<'static, Postgres, C::Model, PgArguments>, Error>
     where
         C::Model: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
@@ -183,20 +149,7 @@ impl<C: Column> Query<C> {
         ))
     }
 
-    /// The same statement, decoding into the model's select type.
-    ///
-    /// Use it for a sparse projection: decoding goes through `{Model}Select`,
-    /// so a column the query left out is a
-    /// [`Selected::Absent`](crate::Selected::Absent) field rather than a decode
-    /// error.
-    ///
-    /// It needs an explicit `select`: a query that reads every column decodes
-    /// into the model through [`build`](Self::build), and asking for the select
-    /// type there is [`Error::MissingSelection`].
-    ///
-    /// ```ignore
-    /// let rows = Order::query().select([c.total.column()]).build_selected()?.fetch_all(&pool).await?;
-    /// ```
+    /// The statement decoding into `{Model}Select`; it needs an explicit `select`, else `Error::MissingSelection`.
     pub fn build_selected(&self) -> Result<SelectedQuery<C>, Error>
     where
         C::Model: Selectable,
@@ -247,10 +200,7 @@ impl<C: Column> PartialEq for Query<C> {
 
 impl<C: Column> Eq for Query<C> {}
 
-/// Everything a request can be rejected for.
-///
-/// Display names the column and the problem; mapping a variant to an HTTP
-/// status is the handler's job.
+/// Everything a request can be rejected for; Display names the column and the problem.
 #[derive(Debug)]
 pub enum Error {
     UnknownColumn {
@@ -320,8 +270,7 @@ pub enum Error {
     EmptyGroup {
         combinator: Combinator,
     },
-    /// The model has a column named `and` or `or`, which wins over the
-    /// combinator key, so a group of that kind has no JSON spelling.
+    /// The model has a column named `and` or `or`, which wins over the combinator key, so no group spelling.
     CombinatorShadowed {
         combinator: Combinator,
     },
@@ -345,8 +294,7 @@ pub enum Error {
     UnknownDirection {
         name: String,
     },
-    /// An `order_by` entry that is not a column name with an optional
-    /// direction.
+    /// An `order_by` entry that is not a column name with an optional direction.
     InvalidOrder {
         value: String,
     },
@@ -356,11 +304,9 @@ pub enum Error {
     },
     /// A selection with no columns, which is neither `SELECT *` nor valid SQL.
     EmptySelection,
-    /// A `select` that leaves a column out, which [`Query::build`] cannot
-    /// decode into the model.
+    /// A `select` that leaves a column out, which [`Query::build`] cannot decode into the model.
     ProjectedModel,
-    /// [`Query::build_selected`] on a query with no `select`, which
-    /// [`Query::build`] decodes instead.
+    /// [`Query::build_selected`] on a query with no `select`, which [`Query::build`] decodes instead.
     MissingSelection,
     /// sqlx refused a value while the arguments were assembled.
     Encode(sqlx::Error),

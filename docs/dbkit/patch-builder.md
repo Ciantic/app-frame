@@ -68,7 +68,7 @@ pub struct UserPatch {
 - The patch derives `garde::Validate`; validation runs before the builder, as
   it does for any other request input.
 
-See [dbkit annotations](dbkit-annotations.md#generated-patch) for the full
+See [dbkit annotations](annotations.md#generated-patch) for the full
 patch generation rules.
 
 ### Building a patch

@@ -12,8 +12,9 @@
 
 ## Code guidelines
 
-- Prefer single-line code comments. If more explanation is needed, add it to
-  `docs/` and link to that.
+- Every code comment is a single line of at most 120 characters: never stack
+  `//`, `///` or `//!` lines or use `/* */` blocks. If more explanation is
+  needed, add it to `docs/` and link to that.
 - Avoid creating small helper functions that only add indirection. Rust is a
   verbose language. 
 - Do not split logic just to make functions shorter.
@@ -44,7 +45,7 @@ Docs if needed: https://docs.rs/sqlx
   with a default or nullable columns: a missing optional column is omitted, so
   PostgreSQL applies the default or stores `NULL`
 - `#[db(...)]` annotations go one per line and each field is separated by a
-  blank line; see [dbkit annotations](docs/dbkit-annotations.md#style)
+  blank line; see [dbkit annotations](docs/dbkit/annotations.md#style)
 - A column with a database default carries `#[db(pgdefault = "...")]` that
   repeats the `schema.sql` default (`uuidv7()`, `now()`, `0`); a field that uses
   its value type's default says `#[db(pgdefault = inherit)]`; the schema test

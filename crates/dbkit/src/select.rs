@@ -1,5 +1,4 @@
-//! One field of a projected row, distinguishing "not selected" from "selected
-//! `NULL`".
+//! One field of a projected row, distinguishing "not selected" from "selected `NULL`".
 
 use serde::Deserialize;
 use serde::Deserializer;
@@ -12,16 +11,7 @@ use sqlx::Type;
 use sqlx::postgres::PgRow;
 use sqlx::postgres::Postgres;
 
-/// One column of a projected row.
-///
-/// A projection returns only the columns the request asked for, so a decoded
-/// row has to answer "the caller did not ask for this column" separately from
-/// "the column is `NULL`". `Patch<T>` draws the same distinction on the way in;
-/// this is the way out.
-///
-/// A nullable column keeps its `Option`: `Selected<Option<T>>`'s `Set(None)` is
-/// a selected `NULL`, and `Absent` is a column the projection left out,
-/// whatever its nullability.
+/// One column of a projection: `Set` when selected, `Absent` when not; a selected `NULL` stays distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Selected<T> {
     #[default]
@@ -64,42 +54,26 @@ impl<T> Selected<T> {
 impl<T: Serialize> Serialize for Selected<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            // Unreachable behind `skip_serializing_if`, and the only honest
-            // value for a caller that serializes the field anyway.
+            // Unreachable behind `skip_serializing_if`; the only honest value if serialized anyway.
             Selected::Absent => serializer.serialize_none(),
             Selected::Set(value) => value.serialize(serializer),
         }
     }
 }
 
-/// A present value is `Set`; absence comes from the key being missing, which
-/// needs `#[serde(default)]` on the field.
-///
-/// A nullable column keeps its `Option` inside, so `null` deserializes to
-/// `Set(None)`: a `NULL` that was selected. A non-nullable column's `null` is a
-/// type error, because the column cannot hold one.
+/// A present value is `Set`; a missing key is `Absent` via `#[serde(default)]`, and `null` is a selected `NULL`.
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Selected<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         T::deserialize(deserializer).map(Selected::Set)
     }
 }
 
-/// A projected row, as a whole.
-///
-/// A row is empty when every column in it is absent, which is what lets a
-/// nested `#[db(flatten)]` select skip itself in a response: a fragment with
-/// no selected column writes nothing rather than `{}`.
+/// A projected row; empty when every column is absent, so a flattened fragment with no selection writes nothing.
 pub trait SelectRow {
     fn is_empty(&self) -> bool;
 }
 
-/// One column of a row, by name.
-///
-/// The row reports its own projection through `columns()`, so a field whose
-/// column is not in the result set decodes to [`Selected::Absent`] instead of
-/// failing. That is what lets one select struct serve every projection of a
-/// table, and it is why a query needs no second parameter to say which columns
-/// were asked for.
+/// One column of a row by name; a column absent from the result decodes to `Selected::Absent` instead of failing.
 pub fn selected<'r, T>(row: &'r PgRow, column: &str) -> Result<Selected<T>, sqlx::Error>
 where
     T: Decode<'r, Postgres> + Type<Postgres>,

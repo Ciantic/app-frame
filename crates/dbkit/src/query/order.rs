@@ -1,9 +1,4 @@
-//! `ORDER BY` terms: a column and a direction, rendered after the filters.
-//!
-//! A term names a column of the model, so a query can only order by what it
-//! reads, and only if the column declared `#[db(orderable)]`. A direction is a
-//! keyword chosen from an enum, never a value, so ordering binds no parameter
-//! and leaves the paging placeholders where they were.
+//! `ORDER BY` terms: a column and a direction after the filters; only `#[db(orderable)]` columns qualify.
 
 use crate::Column;
 use crate::query::ColumnRef;
@@ -20,8 +15,7 @@ pub enum OrderDirection {
 }
 
 impl OrderDirection {
-    /// The direction as the annotation-free vocabulary spells it: `asc`,
-    /// `desc`.
+    /// The direction as the annotation-free vocabulary spells it: `asc`, `desc`.
     pub fn as_str(self) -> &'static str {
         match self {
             OrderDirection::Asc => "asc",
@@ -44,13 +38,7 @@ impl OrderDirection {
     }
 }
 
-/// One `ORDER BY` term: a column and the direction to sort it in.
-///
-/// The column handle has [`asc`](crate::ColumnRef::asc) and
-/// [`desc`](crate::ColumnRef::desc), gated on `#[db(orderable)]`, so the usual
-/// call site is `c.total.desc()`. [`asc`](Self::asc) and [`desc`](Self::desc)
-/// build one from a bare column, which `render()` validates like any other
-/// term.
+/// One `ORDER BY` term, usually from `ColumnRef::asc`/`desc`; `render()` validates it like any other term.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct OrderTerm<C: Column> {
     pub column: C,
@@ -112,8 +100,7 @@ pub(crate) fn check<C: Column>(order: &[OrderTerm<C>]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Reads one `order_by` entry: a column name, optionally followed by `asc` or
-/// `desc`.
+/// Reads one `order_by` entry: a column name, optionally followed by `asc` or `desc`.
 pub(crate) fn parse<C: Column>(value: &str) -> Result<OrderTerm<C>, Error> {
     let mut words = value.split_whitespace();
     let Some(name) = words.next() else {

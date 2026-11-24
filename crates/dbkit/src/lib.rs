@@ -1,26 +1,4 @@
-//! Database building blocks shared by the service crates.
-//!
-//! [`Patch`] is the update input that tells "not given" apart from "set to
-//! `NULL`"; `#[derive(DbPatch)]` generates the patch of a model and validates
-//! it with `garde`, and [`PatchQuery`] applies a batch of patches as one
-//! transaction. `#[derive(DbInsert)]` generates an insert input whose required
-//! fields are plain values and whose defaulted or nullable fields are optional,
-//! and [`InsertQuery`] inserts a batch and returns the inserted primary keys.
-//! `#[derive(DbDelete)]` adds `Model::delete`, which deletes a batch by key and
-//! checks each row's version, and [`DeleteQuery`] runs the batch in one
-//! transaction.
-//! [`Model`] and its [`TableMeta`] describe a table at runtime, [`SubQuery`]
-//! describes a model whose row source is a query, and
-//! [`schema::check_live_schema_against_models`] compares a list of tables with
-//! a live database. [`DbType`] records the column type and default of a value
-//! type, so a model field can take its `pgtype` and opt into its default.
-//! [`Column`] and [`Columns`] name the selectable columns of a model;
-//! `#[derive(DbModel)]` generates the enum and [`ErasedColumn`] is the erased
-//! view a [`TableMeta`] holds. [`Query`] is the filter of one table, built from
-//! the typed [`ColumnRef`] handles or parsed from JSON, and [`Query::build`]
-//! renders it to the statement `sqlx` executes, decoding into the model, while
-//! [`Query::build_selected`] decodes into the model's select type so a sparse
-//! projection can report its absent columns.
+//! Database building blocks shared by the service crates: models, columns, queries, patches, inserts and deletes.
 
 mod columns;
 mod delete;

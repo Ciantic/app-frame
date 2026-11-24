@@ -1,5 +1,4 @@
-//! Filter values: one boxed value per operand, and the one list that names the
-//! concrete Rust type of a value arriving as JSON.
+//! Filter values: one boxed value per operand, and the type list that reads a JSON value into one.
 
 use crate::FilterOperator;
 use crate::query::Error;
@@ -19,24 +18,12 @@ use std::any::Any;
 use std::fmt::Debug;
 use uuid::Uuid;
 
-/// One bound value: enough to bind it, to compare it in a test and to
-/// serialize it back to JSON.
-///
-/// This is an object-safe shim over sqlx's [`Type`] and [`Encode`], which are
-/// not dyn-compatible on their own: `Type::type_info()` is an associated
-/// function, so `Box<dyn Type<Postgres>>` does not compile. The blanket impl
-/// resolves both traits per concrete `T`, and the trait object only exposes
-/// `&self` methods.
-///
-/// Newtypes need no implementation of their own: a transparent
-/// `#[derive(sqlx::Type)]` newtype already reports its inner type, so it is a
-/// filter value the moment it is a column value.
+/// One bound value, object-safe over sqlx's `Type` and `Encode`; a transparent sqlx newtype needs no extra impl.
 pub trait Bind: Debug + Send + Sync + 'static {
     /// Appends the value to the arguments of the statement being built.
     fn bind(&self, arguments: &mut PgArguments) -> Result<(), sqlx::Error>;
 
-    /// The value as JSON, for a readable assertion and for serializing the
-    /// query back to the payload it came from.
+    /// The value as JSON, for a readable assertion and for serializing the query back to the payload it came from.
     fn as_json(&self) -> serde_json::Value;
 
     /// Type-exact comparison: `100i64` does not equal `100i32`.
@@ -87,8 +74,7 @@ pub(crate) fn element_pg_type(pg_type: &'static str) -> &'static str {
     }
 }
 
-/// The type name without its array suffix and its length modifier, so
-/// `varchar(20)[]` becomes `varchar`.
+/// The type name without its array suffix and its length modifier, so `varchar(20)[]` becomes `varchar`.
 fn base_name(pg_type: &'static str) -> &'static str {
     let pg_type = element_pg_type(pg_type);
 
@@ -110,9 +96,7 @@ pub(crate) fn describe(value: &Value) -> &'static str {
     }
 }
 
-/// The JSON shape a type parses from, so a wrong shape is reported as the
-/// column's type rather than as serde's expectation. This is about JSON, not
-/// about SQL types: `bool` reads a boolean, `i64` a number, `uuid` a string.
+/// The JSON shape a type parses from, so a wrong shape is reported as the column's type rather than serde's.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shape {
     Bool,
@@ -137,22 +121,7 @@ impl Shape {
     }
 }
 
-/// The Rust type of a column type, asked of sqlx rather than of a table kept
-/// here.
-///
-/// `Type::compatible` decides which of the types below a name denotes, so the
-/// aliases come from sqlx: `String` accepts `text`, `varchar`, `bpchar`,
-/// `name` and `citext`, and `i64` accepts only `int8`. Nothing in `dbkit`
-/// spells those names out.
-///
-/// One list, because sqlx can describe a type but cannot build one from JSON:
-/// `Type::type_info()` is an associated function, so the concrete type has to
-/// be named somewhere, and the value is then parsed by serde. The list is
-/// reached only by the JSON face; a Rust-built filter names its type through
-/// the handle, so `c.total.eq(500)` never consults it.
-///
-/// `Type::compatible` panics when asked about an array type it cannot resolve,
-/// so an array column is resolved by its element type and boxed as a `Vec`.
+/// The concrete Rust type a column's SQL name denotes, resolved by sqlx's `Type::compatible` when JSON is parsed.
 fn rust_type(
     pg_type: &'static str,
     array: bool,
@@ -184,8 +153,7 @@ fn rust_type(
         };
     }
 
-    // `Value` last: it is the fallback for a JSON column and must not shadow a
-    // more specific type.
+    // `Value` last: it is the fallback for a JSON column and must not shadow a more specific type.
     bindable! {
         Bool => bool,
         Number => i16,
@@ -211,13 +179,11 @@ fn from_json<T: DeserializeOwned + Bind>(
 ) -> Result<Box<dyn Bind>, Error> {
     match T::deserialize(value) {
         Ok(parsed) => Ok(Box::new(parsed)),
-        // The shape was checked already, so this is a value that does not
-        // parse: serde names what is wrong with it.
+        // The shape was checked already, so this is a value that does not parse: serde names what is wrong with it.
         Err(error) => Err(Error::InvalidValue {
             column,
             pg_type: pg_type.to_owned(),
-            // The value has no position of its own; the document offset serde
-            // appends would point at the outer object.
+            // The value has no position of its own; the document offset serde appends would point at the outer object.
             reason: without_position(&error),
         }),
     }
@@ -239,10 +205,7 @@ fn unsupported(column: &'static str, pg_type: &str) -> Error {
     }
 }
 
-/// One value of the column's type, boxed, ready to bind as a single parameter.
-///
-/// An array column boxes the whole array: `{"tags": ["rust"]}` is one
-/// parameter of type `text[]`.
+/// One value of the column's type, boxed for one parameter; an array column boxes the whole array.
 pub(crate) fn scalar(
     pg_type: &'static str,
     column: &'static str,
@@ -252,8 +215,7 @@ pub(crate) fn scalar(
         .unwrap_or_else(|| Err(unsupported(column, pg_type)))
 }
 
-/// A list of the column's element type, boxed as one array parameter, with the
-/// element count so an empty list can be rejected.
+/// A list of the element type, boxed as one array parameter, with its count so an empty list can be rejected.
 pub(crate) fn list(
     operator: FilterOperator,
     element_pg_type: &'static str,

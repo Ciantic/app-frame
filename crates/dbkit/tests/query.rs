@@ -218,8 +218,7 @@ fn the_goal_example_builds_the_documented_sql() {
 
 #[test]
 fn the_json_payload_builds_the_same_query() {
-    // A raw string, because `json!` builds a sorted map and key order is
-    // parameter order.
+    // A raw string, because `json!` builds a sorted map and key order is parameter order.
     let payload = r#"{
         "filters": {
             "status__any": ["open", "paid"],
@@ -500,8 +499,7 @@ fn an_empty_selection_is_an_error() {
         build_error(&Order::query().select(Columns::default())),
         "a selection needs at least one column; omit `select` to read every column"
     );
-    // The JSON face parses it, because only `build()` knows the projection is
-    // rendered; the rejection is the same either way.
+    // Only `build()` knows the projection is rendered; the JSON face parses it and rejects it the same way.
     let query = Query::<OrderColumn>::parse(r#"{"select": []}"#).unwrap();
 
     assert_eq!(
@@ -520,8 +518,7 @@ fn the_select_key_parses_and_serializes() {
         r#"{"select":["id","total"]}"#
     );
 
-    // Request order is kept, and it is part of equality: the two render
-    // different SQL.
+    // Request order is kept, and it is part of equality: the two render different SQL.
     let reversed = Query::<OrderColumn>::parse(r#"{"select": ["total", "id"]}"#).unwrap();
 
     assert_ne!(reversed, query);
@@ -1061,8 +1058,7 @@ fn a_column_named_or_wins_over_the_combinator() {
 
 #[test]
 fn paging_lives_beside_the_filters_not_inside_them() {
-    // `limit` is not a filter key at all, so inside `filters` it is a column
-    // name like any other.
+    // `limit` is not a filter key at all, so inside `filters` it is a column name like any other.
     let message = parse_error(r#"{"limit": 5}"#);
 
     assert!(
@@ -1150,8 +1146,7 @@ fn build_takes_every_column_but_not_a_subset() {
 
 #[test]
 fn build_reports_an_empty_selection_as_such() {
-    // The render check comes first, so an empty selection is not reported as a
-    // subset of the columns.
+    // The render check comes first, so an empty selection is not reported as a subset of the columns.
     let Err(error) = Order::query().select(Columns::default()).build() else {
         panic!("the projection is empty");
     };

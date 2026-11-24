@@ -316,8 +316,7 @@ fn derive_accepts_the_annotations() {
     assert_eq!(widget.version, 0);
 }
 
-/// Proves a composite primary key needs no extra ceremony beyond repeating the
-/// role.
+/// Proves a composite primary key needs no extra ceremony beyond repeating the role.
 #[test]
 fn derive_accepts_a_composite_primary_key() {
     let membership = Membership {

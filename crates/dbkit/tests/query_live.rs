@@ -139,8 +139,7 @@ async fn a_disjunction_is_not_flattened() {
         Filter::or([c().total.lt(200), c().status.eq("void")]),
     ]);
 
-    // `vip` is true for 100 and 500, but only the void row is `status = void`
-    // and it is not a vip, so `total < 200` is the only way in.
+    // Only the void row is both not a vip and `status = void`, so `total < 200` is the only way in.
     assert_eq!(totals(&db, &query).await, [100]);
 }
 
@@ -175,8 +174,7 @@ async fn paging_binds_its_parameters() {
         .offset(2);
 
     assert_eq!(totals(&db, &first).await, [100, 250]);
-    // The `any` list holds two statuses, so the third matching row is the void
-    // one, which the list excludes.
+    // The `any` list holds two statuses, so the third matching row is the void one, which the list excludes.
     assert_eq!(totals(&db, &second).await, [500]);
 
     let none = OrderLive::query().limit(0);
@@ -450,8 +448,7 @@ async fn a_subquery_model_orders_by_its_output_columns() {
         .map(|row| (row.status.as_str(), row.total))
         .collect();
 
-    // `open` is 250 before narrowing, so it sorts last; the two 500s tie on
-    // `total` and fall back to the second term.
+    // `open` is 250 before narrowing, so it sorts last; the two 500s tie on `total` and fall back to the second term.
     assert_eq!(summary, [("paid", 500), ("void", 500), ("open", 250)]);
 }
 

@@ -1,10 +1,4 @@
-//! Derive of a table's delete entry point.
-//!
-//! `DbModel` already generates `{Model}PKV`, the primary key plus the version
-//! when the model has one. This derive implements `dbkit::DeleteKey` for it and
-//! adds `Model::delete(entries)`, so a batch of keys deletes its rows in one
-//! transaction. A fragment or a subquery has no table to delete from and is
-//! rejected.
+//! Derive of `Model::delete`: implements `dbkit::DeleteKey` for `{Model}PKV` and batches deletes in one transaction.
 
 use crate::annotations;
 use proc_macro2::TokenStream;

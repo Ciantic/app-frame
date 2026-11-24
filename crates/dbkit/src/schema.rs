@@ -6,17 +6,7 @@ use sqlx::PgConnection;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-/// Compares `models` with the tables of the connection's current schema.
-///
-/// Returns one message per difference: a column or table without a model, a
-/// model field without a column, and a nullable or type mismatch. An empty list
-/// means they agree.
-///
-/// Types are compared by creating a temporary table from the `pgtype`
-/// annotations and reading back the type and typmod PostgreSQL gave each
-/// column, so any DDL spelling is accepted and length and precision must match.
-/// The temporary table is session-local, hence the connection rather than a
-/// pool.
+/// Compares `models` with the connection's tables; one message per difference, and an empty list means they agree.
 pub async fn check_live_schema_against_models(
     connection: &mut PgConnection,
     models: &[TableMeta],
@@ -94,8 +84,7 @@ pub async fn check_live_schema_against_models(
     Ok(problems)
 }
 
-/// Lets PostgreSQL parse the `pgtype` and `pgdefault` annotations and compares
-/// the resulting type, typmod and default with the columns of the real table.
+/// Lets PostgreSQL parse the `pgtype` and `pgdefault` DDL and compares the result with the real columns.
 async fn column_mismatches(
     connection: &mut PgConnection,
     meta: &TableMeta,

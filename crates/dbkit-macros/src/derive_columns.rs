@@ -1,19 +1,4 @@
-//! Generation of a model's selectable columns.
-//!
-//! The generated enum has one variant per column declared on the model, named
-//! in PascalCase. A `#[db(flatten)]` field contributes a variant wrapping the
-//! fragment's own enum, so the fragment's columns stay typed and selectable as
-//! `<Model>Column::<Field>(<Fragment>Column::<Column>)` even though the parent
-//! enum cannot name them.
-//!
-//! Serde is written by hand rather than derived: the wire form of a column is
-//! its database name, which a wrapped variant only knows at runtime, and an
-//! unknown name must report the column list. A variant is the only proof that a
-//! column exists, and its name is a `&'static str`, so a query layer can build
-//! SQL from it without ever formatting a request string into the statement.
-//!
-//! Role columns are selectable too: a patch never touches the key, the version
-//! or the audit columns, but a read needs them.
+//! Generation of a model's `<Model>Column` enum and its serde, driven by the model's annotations.
 
 use crate::annotations;
 use crate::annotations::Column;
@@ -101,8 +86,7 @@ pub(crate) fn expand(
                     quote!()
                 };
 
-                // A tag is generic over the column enum, because a fragment's
-                // column is spliced into whichever parent flattened it.
+                // A tag is generic over the column enum, because a fragment's column is spliced into its parent.
                 tags.push(quote! {
                     #[doc(hidden)]
                     #visibility struct #tag;
@@ -363,9 +347,7 @@ pub(crate) fn expand(
     })
 }
 
-/// `all()` is a promoted slice when the model has no flattened field, and a
-/// cached `Vec` when it does: a nested enum's variants cannot be listed at
-/// expansion, so those columns are appended at run time.
+/// `all()` is a promoted slice unless a flattened field forces a cached `Vec` appended at run time.
 fn all_function(columns: &Ident, annotations: &[Column]) -> TokenStream {
     let flattened = annotations
         .iter()
@@ -421,20 +403,17 @@ fn all_function(columns: &Ident, annotations: &[Column]) -> TokenStream {
     }
 }
 
-/// The handle struct of a flattened field's type: the type with `Columns`
-/// appended to its last path segment, so `size: Size` becomes `SizeColumns`.
+/// The handle struct of a flattened field's type: its last path segment plus `Columns`.
 fn handle_type(ty: &syn::Type) -> syn::Type {
     rename(ty, "Columns")
 }
 
-/// The zero-sized tag type of one column, unique per model, so
-/// `Order` and `status` name `OrderStatusTag`.
+/// The zero-sized tag type of one column, unique per model, so `Order` and `status` name `OrderStatusTag`.
 fn tag(model: &Ident, variant: &Ident) -> Ident {
     format_ident!("{model}{variant}Tag")
 }
 
-/// The capability trait an operator's handle method is gated on, or `None`
-/// when the operator takes no value and so needs no declaration.
+/// The capability trait an operator method is gated on, or `None` when the operator takes no value.
 fn capability(operator: annotations::FilterOperator) -> Option<&'static str> {
     use annotations::FilterOperator::*;
 
@@ -463,8 +442,7 @@ fn capability(operator: annotations::FilterOperator) -> Option<&'static str> {
     })
 }
 
-/// The column enum of a flattened field's type: the type with `Column`
-/// appended to its last path segment, so `size: Size` becomes `SizeColumn`.
+/// The column enum of a flattened field's type: its last path segment plus `Column`.
 fn column_type(ty: &syn::Type) -> syn::Type {
     let syn::Type::Path(path) = ty else {
         return ty.clone();

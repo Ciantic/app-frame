@@ -1,5 +1,4 @@
-//! Inserting rows: one `INSERT` per entry, all in one transaction, returning
-//! the inserted primary keys.
+//! Inserting rows: one `INSERT` per entry, all in one transaction, returning the inserted primary keys.
 
 use crate::Assignment;
 use crate::Meta;
@@ -22,16 +21,11 @@ pub trait InsertRow {
     /// The row an insert returns: the model's primary key.
     type Key: for<'r> FromRow<'r, PgRow> + Send + Unpin;
 
-    /// Provided columns in declaration order. An absent optional column is not
-    /// listed; `value: None` writes SQL `NULL`.
+    /// Provided columns in declaration order. An absent optional column is not listed; `value: None` writes SQL `NULL`.
     fn columns(&self) -> Vec<Assignment<'_>>;
 }
 
-/// A batch of inserts of one model.
-///
-/// [`render`](Self::render) produces one `INSERT` per entry;
-/// [`execute`](Self::execute) runs them in one transaction and returns the
-/// inserted primary keys.
+/// A batch of inserts: one `INSERT` per entry in one transaction, returning the inserted primary keys.
 pub struct InsertQuery<P: InsertRow> {
     entries: Vec<P>,
 }
@@ -65,11 +59,7 @@ impl<P: InsertRow> InsertQuery<P> {
             .collect()
     }
 
-    /// Renders every entry first, then runs them in one transaction.
-    ///
-    /// A pool or a plain connection opens a transaction; a `&mut Transaction`
-    /// creates a savepoint. A failure rolls the whole batch back. An empty
-    /// batch is a no-op.
+    /// Renders first, then runs one transaction (`&mut Transaction` nests a savepoint); a failure rolls all back.
     pub async fn execute<'c, A>(self, acquirer: A) -> Result<Vec<P::Key>, InsertError>
     where
         A: Acquire<'c, Database = Postgres>,
@@ -209,8 +199,7 @@ fn render_entry<P: InsertRow>(meta: &TableMeta, entry: &P) -> Result<RenderedIns
     })
 }
 
-/// The inserted row is identified by its primary key, so `RETURNING` names
-/// those columns instead of the whole row.
+/// The inserted row is identified by its primary key, so `RETURNING` names those columns instead of the whole row.
 fn push_returning(meta: &TableMeta, sql: &mut String) {
     sql.push_str(" RETURNING ");
 
@@ -222,9 +211,7 @@ fn push_returning(meta: &TableMeta, sql: &mut String) {
     }
 }
 
-/// An imported row supplies `created_at` but not `updated_at`; use the same
-/// timestamp for both rather than letting `now()` mark the row as freshly
-/// modified.
+/// An imported row supplies `created_at` but not `updated_at`; reuse it so `now()` does not mark the row modified.
 fn add_updated_at(meta: &TableMeta, assignments: &mut Vec<Assignment<'_>>) {
     let (Some(created_at), Some(updated_at)) = (meta.created_at, meta.updated_at) else {
         return;

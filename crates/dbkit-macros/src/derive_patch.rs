@@ -1,15 +1,4 @@
-//! Derive of a model's patch input type.
-//!
-//! The generated struct holds the primary key and, when the model has one, the
-//! version as-is: an update always names its row and states the version it
-//! expects. Every other business column becomes a [`dbkit::Patch`] field, so a
-//! missing key leaves the column alone and `null` clears it. Audit columns are
-//! not inputs, so they are omitted. A flattened field is a `serde(flatten)`ed
-//! nested patch, so a fragment's columns share the parent patch object.
-//!
-//! The struct derives `garde::Validate`, and a patch field whose payload type
-//! can carry rules dives into it, so `Set` values are validated while `Absent`
-//! and `Null` pass.
+//! Derive of `<Model>Patch`: key and version as-is, other columns as `Patch<T>` so a missing key leaves them alone.
 
 use crate::annotations;
 use crate::annotations::Column;
@@ -228,8 +217,7 @@ fn field_text(name: &syn::Ident) -> String {
     name.to_string().trim_start_matches("r#").to_owned()
 }
 
-/// The patch type of a flattened field: the field type with `Patch` appended to
-/// its last path segment, so `size: Size` becomes `SizePatch`.
+/// The patch type of a flattened field: its last path segment plus `Patch`.
 fn patch_type(ty: &Type) -> Type {
     let Type::Path(path) = ty else {
         return ty.clone();
@@ -243,10 +231,7 @@ fn patch_type(ty: &Type) -> Type {
     Type::Path(path)
 }
 
-/// The type inside `Option<...>`, or the type itself.
-///
-/// A nullable column's patch is `Patch<T>` rather than `Patch<Option<T>>`, so
-/// `null` means "clear the column" and a value means "set it".
+/// The type inside `Option<...>`, or the type itself; a nullable column's patch is `Patch<T>`, not `Patch<Option<T>>`.
 fn non_optional(ty: &Type) -> &Type {
     let Type::Path(path) = ty else {
         return ty;
@@ -266,11 +251,7 @@ fn non_optional(ty: &Type) -> &Type {
     }
 }
 
-/// Whether a payload type can carry validation rules.
-///
-/// Only a local type can implement `garde::Validate`, so a primitive or a
-/// foreign type is skipped; `Patch<T>` then validates nothing, which matches a
-/// type that has no rules.
+/// Whether a payload type can carry rules: a local type with `garde::Validate`, so `Patch<T>` validates or not.
 fn carries_rules(ty: &Type) -> bool {
     let Type::Path(path) = ty else {
         return true;

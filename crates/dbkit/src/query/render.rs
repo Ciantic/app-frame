@@ -19,14 +19,7 @@ use crate::query::value::is_array;
 use sqlx::postgres::PgArguments;
 use std::sync::Arc;
 
-/// The statement `sqlx` executes, and the values it was rendered from.
-///
-/// What [`Query::render`] returns: the SQL text and its arguments, for a caller
-/// that logs them, hands them to its own executor, or asserts on them in a
-/// test. [`Query::build`] takes the same pair straight to a `QueryAs`.
-///
-/// [`Query::build`]: crate::Query::build
-/// [`Query::render`]: crate::Query::render
+/// The statement `sqlx` executes and the values behind it, as `Query::render` returns them; `build` wraps the pair.
 pub struct Rendered {
     pub sql: String,
     /// Assembled ahead of the query, which `query_as_with` then takes.
@@ -89,8 +82,7 @@ fn needs_array_column(operator: FilterOperator) -> bool {
     )
 }
 
-/// The alias a `#[db(subquery = "...")]` model's derived table is given.
-/// PostgreSQL requires every table in `FROM` to have one.
+/// The alias a `#[db(subquery = "...")]` model's derived table is given; PostgreSQL requires one.
 const SUBQUERY_ALIAS: &str = "subquery";
 
 pub(crate) fn render<C: Column>(query: &Query<C>) -> Result<Rendered, Error> {
@@ -324,8 +316,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// Rejects an operator the column never declared, an operator that does not
-    /// fit the column type, and an operand of the wrong arity.
+    /// Rejects an undeclared operator, one unfit for the column type, or an operand of the wrong arity.
     fn check<C: Column>(&self, leaf: &crate::query::Leaf<C>) -> Result<(), Error> {
         let operator = leaf.operator;
         let column = leaf.column.name();
@@ -408,8 +399,7 @@ fn symbol(operator: FilterOperator) -> &'static str {
     }
 }
 
-/// The row source of a query: a quoted table, or a subquery wrapped in
-/// parentheses with the alias PostgreSQL requires.
+/// The row source of a query: a quoted table, or a subquery wrapped in parentheses with the alias PostgreSQL requires.
 fn push_source<C: Column>(sql: &mut String) -> Result<(), Error> {
     match C::Model::meta() {
         Meta::Table(meta) => push_identifier(sql, meta.table),
