@@ -10,6 +10,8 @@ use dbkit::DbValue;
 use dbkit::Filter;
 use dbkit::FilterOperator;
 use dbkit::Operand;
+use dbkit::OrderDirection;
+use dbkit::OrderTerm;
 use dbkit::Query;
 use dbkit::query::Error as QueryError;
 use serde::Deserialize;
@@ -35,10 +37,12 @@ struct Order {
 
     #[db(pgtype = "varchar(20)")]
     #[db(query_ops(eq, any, not_any, ilike))]
+    #[db(orderable)]
     status: String,
 
     #[db(pgtype = "int8")]
     #[db(query_ops(eq, gte, lt, between))]
+    #[db(orderable)]
     total: i64,
 
     #[db(pgtype = "bool")]
@@ -58,6 +62,7 @@ struct Order {
 
     #[db(pgtype = "timestamptz")]
     #[db(query_ops(eq, neq))]
+    #[db(orderable)]
     deleted_at: Option<DateTime<Utc>>,
 }
 
@@ -574,6 +579,154 @@ fn select_serializes_before_filters_and_paging() {
 }
 
 #[test]
+fn ordering_renders_after_the_filters_and_before_paging() {
+    let query = Order::query()
+        .filters([c().status.eq("open")])
+        .order_by([c().total.desc(), c().status.asc()])
+        .limit(20)
+        .offset(40);
+
+    assert_eq!(
+        built(&query),
+        (
+            "SELECT * FROM \"orders\" WHERE \"status\" = $1 ORDER BY \"total\" DESC, \"status\" \
+             ASC LIMIT $2 OFFSET $3"
+                .to_owned(),
+            vec![json!("open"), json!(20), json!(40)],
+        ),
+        "a direction is a keyword, so ordering adds no parameter"
+    );
+}
+
+#[test]
+fn ordering_appends_across_calls() {
+    let query = Order::query()
+        .order_by([c().status.asc()])
+        .order_by([c().total.desc()]);
+
+    assert_eq!(
+        built(&query).0,
+        "SELECT * FROM \"orders\" ORDER BY \"status\" ASC, \"total\" DESC"
+    );
+}
+
+#[test]
+fn an_order_term_is_the_column_and_its_direction() {
+    let term = c().deleted_at.desc();
+
+    assert_eq!(term.column, OrderColumn::DeletedAt);
+    assert_eq!(term.direction, OrderDirection::Desc);
+    assert_eq!(OrderDirection::Asc.as_str(), "asc");
+    assert_eq!(
+        OrderDirection::from_name("desc"),
+        Some(OrderDirection::Desc)
+    );
+}
+
+#[test]
+fn ordering_round_trips_through_json() {
+    let payload = r#"{"filters":{"status":"open"},"order_by":["total desc","status"],"limit":5}"#;
+    let parsed = Query::<OrderColumn>::parse(payload).unwrap();
+
+    assert_eq!(
+        parsed,
+        Order::query()
+            .filters([c().status.eq("open")])
+            .order_by([c().total.desc(), c().status.asc()])
+            .limit(5)
+    );
+    assert_eq!(
+        serde_json::to_string(&parsed).unwrap(),
+        r#"{"filters":{"status":"open"},"order_by":["total desc","status asc"],"limit":5}"#
+    );
+}
+
+#[test]
+fn an_empty_order_list_is_no_ordering() {
+    let query = Query::<OrderColumn>::parse(r#"{"order_by": []}"#).unwrap();
+
+    assert_eq!(query, Query::new());
+    assert_eq!(built(&query).0, "SELECT * FROM \"orders\"");
+}
+
+#[test]
+fn an_unknown_ordered_column_names_the_columns() {
+    let message = Query::<OrderColumn>::parse(r#"{"order_by": ["nope"]}"#)
+        .expect_err("the column is unknown")
+        .to_string();
+
+    assert!(
+        message.starts_with(
+            "unknown column `nope`; expected one of: id, status, total, vip, tags, deleted_at"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_column_without_orderable_is_rejected() {
+    let message = Query::<OrderColumn>::parse(r#"{"order_by": ["vip desc"]}"#)
+        .expect_err("the column is not orderable")
+        .to_string();
+
+    assert_eq!(
+        message,
+        "column `vip` is not orderable; add `#[db(orderable)]` to it"
+    );
+    assert_eq!(
+        build_error(&Order::query().order_by([OrderTerm::desc(OrderColumn::Tags)])),
+        "column `tags` is not orderable; add `#[db(orderable)]` to it"
+    );
+}
+
+#[test]
+fn an_unknown_order_direction_lists_the_two() {
+    let message = Query::<OrderColumn>::parse(r#"{"order_by": ["total down"]}"#)
+        .expect_err("the direction is unknown")
+        .to_string();
+
+    assert_eq!(
+        message,
+        "order direction `down` is not known; expected one of: asc, desc"
+    );
+}
+
+#[test]
+fn a_malformed_order_entry_says_what_it_accepts() {
+    for payload in [
+        r#"{"order_by": [""]}"#,
+        r#"{"order_by": ["total desc extra"]}"#,
+    ] {
+        let message = Query::<OrderColumn>::parse(payload)
+            .expect_err("the entry is malformed")
+            .to_string();
+
+        assert!(
+            message.contains("is not a column name with an optional `asc` or `desc`"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn the_order_cap_is_sixteen_terms() {
+    let terms: Vec<OrderTerm<OrderColumn>> = (0..17)
+        .map(|_| OrderTerm::desc(OrderColumn::Total))
+        .collect();
+
+    assert_eq!(
+        build_error(&Order::query().order_by(terms)),
+        "`order_by` takes at most 16 columns, got 17"
+    );
+    assert!(
+        Order::query()
+            .order_by((0..16).map(|_| OrderTerm::desc(OrderColumn::Total)))
+            .render()
+            .is_ok()
+    );
+}
+
+#[test]
 fn paging_binds_parameters_and_is_absent_when_unset() {
     let query = Order::query()
         .filters([c().status.eq("open")])
@@ -713,7 +866,7 @@ fn a_filter_at_the_top_level_says_where_filters_go() {
 
     assert_eq!(
         message,
-        "unknown key `vip`; a query takes `select`, `filters`, `limit` and `offset`"
+        "unknown key `vip`; a query takes `select`, `filters`, `order_by`, `limit` and `offset`"
     );
 }
 

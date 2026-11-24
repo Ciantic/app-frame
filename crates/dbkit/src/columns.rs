@@ -29,6 +29,10 @@ pub trait Column: Copy + Ord + Hash + std::fmt::Debug + Send + Sync + 'static {
     /// The column name as the database spells it.
     fn name(self) -> &'static str;
 
+    /// Whether the column may appear in `ORDER BY`, as declared by
+    /// `#[db(orderable)]`.
+    fn orderable(self) -> bool;
+
     /// The column of that name, or `None` when the model has no such column.
     fn from_name(name: &str) -> Option<Self>;
 
@@ -48,6 +52,10 @@ pub trait Column: Copy + Ord + Hash + std::fmt::Debug + Send + Sync + 'static {
 impl<C: Column> ErasedColumn for C {
     fn name(&self) -> &'static str {
         Column::name(*self)
+    }
+
+    fn orderable(&self) -> bool {
+        Column::orderable(*self)
     }
 
     fn pg_type(&self) -> &'static str {

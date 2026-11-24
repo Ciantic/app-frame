@@ -3,8 +3,8 @@
 Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
 They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, which ones are audit
-columns, which columns the database fills in from a default, and which
-comparisons each column may be queried with. Every field carries a `pgtype`
+columns, which columns the database fills in from a default, which comparisons
+each column may be queried with, and whether it may be sorted. Every field carries a `pgtype`
 unless it is flattened or its type declares one with `#[derive(DbType)]`, and
 a table row needs a primary key; the other annotations are opt-in.
 
@@ -88,6 +88,7 @@ generated patch would expose; role-annotated fields never are.
   `#[db(updated_at)]` on a field of a table row.
 - `#[db(query_ops(...))]` on a field, at most once; the parentheses hold a
   comma-separated operator list.
+- `#[db(orderable)]` on a field, at most once.
 - `#[db(flatten)]` on a field of a table row or a subquery row, at most once.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
   collected across all of them.
@@ -102,9 +103,10 @@ The derive accepts a role, `pgtype` and `pgdefault` in one attribute, e.g.
 not use that form:
 
 - One annotation per line, each in its own `#[db(...)]` attribute.
-- Role first, then `pgtype`, then `pgdefault`, then `query_ops`:
-  `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
-  `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, any))]`.
+- Role first, then `pgtype`, then `pgdefault`, then `query_ops`, then
+  `orderable`: `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
+  `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, any))]` above
+  `#[db(orderable)]`.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
 - A `#[db(flatten)]` field carries that annotation alone.
 - On a `DbType` struct, `#[db(pgtype = "...")]` sits above
@@ -147,7 +149,7 @@ Makes the struct's rows the output of a query, read as if they were a table.
   from `$1`, so a placeholder in the annotation would collide.
 - The struct declares the columns the query returns. It has no primary key,
   version or audit columns, and role annotations are rejected.
-- `pgtype` and `query_ops` per field work as usual.
+- `pgtype`, `query_ops` and `orderable` per field work as usual.
 - A subquery row is read-only: `#[derive(DbPatch)]` rejects it.
 - A subquery cannot have generic parameters, because the metadata cache is one
   `static` per type.
@@ -178,7 +180,8 @@ Makes the struct a group of columns instead of a table row.
 - Legal on: the struct, exactly once, as an alternative to `table`.
 - Value: none; it is a bare annotation.
 - A fragment has no table name, no primary key and no roles. `pgtype` is
-  required on every field, and `pgdefault` and `query_ops` work as usual.
+  required on every field, and `pgdefault`, `query_ops` and `orderable` work
+  as usual.
 - The derive generates `impl dbkit::Model`, whose `meta()` is
   `Meta::Fragment(&TableFragment { columns })`: no table name, no key, no
   roles to fake. A model embeds it with [`flatten`](#flatten).
@@ -217,8 +220,9 @@ Splices the columns of a fragment into the enclosing table or subquery.
 - The fragment's columns take the field's position in the enclosing column
   list, so declaration order is preserved across plain and flattened fields.
 - A flattened field is not a column itself: it must not carry `pgtype`,
-  `pgdefault`, `query_ops` or a role, and it must not be `Option`. An optional
-  group is expressed by nullable columns inside the fragment.
+  `pgdefault`, `query_ops`, `orderable` or a role, and it must not be
+  `Option`. An optional group is expressed by nullable columns inside the
+  fragment.
 - The field stays an ordinary struct field on the row type, so reading the row
   and serializing it are unaffected.
 - `#[derive(DbPatch)]` emits the field as a `#[serde(flatten)]` field of type
@@ -367,6 +371,42 @@ Declares which comparisons a column may be queried with.
   whose type the column does not have is a model mistake the schema test cannot
   see.
 
+## `orderable`
+
+Allows the column in `ORDER BY`.
+
+- Legal on: a field, optional and at most once; a bare annotation.
+- The derive implements the `dbkit::HasOrder` capability for the column's tag
+  type, so `c.column.asc()` and `c.column.desc()` exist only on a declared
+  column; an undeclared one is a compile error. The flag is also recorded in
+  `Column::orderable`, which the JSON deserializer and `render()` check, so a
+  request cannot order by a column the model did not allow.
+- Independence: ordering needs no `query_ops` entry, and `query_ops` does not
+  imply ordering. A column can be sortable but not filterable, which is what a
+  denormalized display column usually wants.
+- Not checked against the column type: PostgreSQL accepts any type in
+  `ORDER BY`, including `jsonb` and arrays, so the annotation is the only gate.
+- A `#[db(flatten)]` field forwards its columns' flags, so a fragment's
+  orderable column stays orderable in the parent.
+
+```rust
+#[derive(DbModel)]
+#[db(table = "orders")]
+pub struct Order {
+    #[db(primary_key)]
+    #[db(pgtype = "uuid")]
+    pub id: Uuid,
+
+    #[db(pgtype = "int8")]
+    #[db(query_ops(eq, gte, lt))]
+    #[db(orderable)]
+    pub total: i64,
+}
+```
+
+`Order::query().order_by([c.total.desc()])` renders
+`SELECT * FROM "orders" ORDER BY "total" DESC`; `c.id.asc()` does not compile.
+
 ## `primary_key`
 
 Marks a primary key column. Repeat it on every column of a composite key.
@@ -435,8 +475,8 @@ Every rule below produces a compile error.
 - `DbPatch` cannot be derived for a subquery row.
 - Every field that is not `#[db(flatten)]` must carry `#[db(pgtype = "...")]`
   or have a type that implements `dbkit::DbType`.
-- `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`
-  or a role, and its field must not be `Option`.
+- `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`,
+  `orderable` or a role, and its field must not be `Option`.
 - A fragment cannot `#[db(flatten)]` another struct.
 - `version`, `created_at` and `updated_at` may each appear at most once.
 - A single field may carry at most one role, even if the roles are split across
@@ -456,10 +496,11 @@ Every rule below produces a compile error.
 - `query_ops` appears at most once per field, holds at least one operator, and
   every operator must be in the accepted list; repeating an operator is an
   error.
+- `orderable` appears at most once per field and takes no value.
 - The `DbModel` struct attribute accepts only `table`, `subquery` and
   `fragment`; the field-level attribute accepts only `pgtype`, `pgdefault`,
-  `query_ops`, `flatten` and the four roles. The `DbType` struct attribute
-  accepts only `pgtype` and `pgdefault`.
+  `query_ops`, `orderable`, `flatten` and the four roles. The `DbType` struct
+  attribute accepts only `pgtype` and `pgdefault`.
 - A `DbType` struct must not annotate its fields, and it must carry `pgtype`.
 
 ## How field types are matched
@@ -500,11 +541,13 @@ For reference when reading a compile failure:
 - `` `DbModel` on a table or a subquery cannot have generic parameters; ... ``
 - `` a subquery cannot carry `#[db(...)]` roles ``
 - `` `DbPatch` cannot be derived for a `#[db(subquery = "...")]` struct; a subquery is read-only ``
-- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at`, `flatten`, `pgtype`, `pgdefault` or `query_ops` ``
+- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at`, `flatten`, `pgtype`, `pgdefault`, `query_ops` or `orderable` ``
+- ``duplicate `orderable` ``
+- `` `#[db(flatten)]` cannot be combined with `orderable` ``
 - `` a fragment cannot carry `#[db(...)]` roles ``
 - `` a fragment cannot `#[db(flatten)]` another struct ``
 - `` `#[db(flatten)]` cannot be combined with `pgtype` `` (and the same for
-  `pgdefault`, `query_ops` and a role)
+  `pgdefault`, `query_ops`, `orderable` and a role)
 - `` `#[db(flatten)]` field must not be `Option` ``
 - `` `pgtype` must not be empty ``
 - ``duplicate `pgtype` ``
@@ -554,8 +597,9 @@ matches `Meta` and panics on the other variants:
   `<Model>Column` variants. `nullable` is true exactly when the field type is
   `Option<_>`, `pg_type` is the field's `pgtype` annotation or its `DbType`
   type's `PG_TYPE`, `pg_default` is its `pgdefault` annotation, its `DbType`
-  type's `PG_DEFAULT`, or `None`, and `query_ops` is the `query_ops` list in
-  declaration order or an empty slice.
+  type's `PG_DEFAULT`, or `None`, `query_ops` is the `query_ops` list in
+  declaration order or an empty slice, and `orderable` says whether the column
+  declared `#[db(orderable)]`.
 
 A `#[db(subquery = "...")]` struct emits
 `Meta::SubQuery(&SubQuery { sql, columns })` instead, where `sql` is the
@@ -704,15 +748,17 @@ impl WidgetColumn {
     pub fn pg_default(self) -> Option<&'static str> { /* Some("uuidv7()"), ... */ }
     pub fn nullable(self) -> bool { /* ... */ }
     pub fn query_ops(self) -> &'static [FilterOperator] { /* ... */ }
+    pub fn orderable(self) -> bool { /* ... */ }
 }
 
 impl Serialize for WidgetColumn { /* serialize_str(self.name()) */ }
 impl<'de> Deserialize<'de> for WidgetColumn { /* from_name() */ }
 
-// one empty tag per column, one capability per query_ops entry, and the typed
-// handles the query builder takes
+// one empty tag per column, one capability per query_ops entry and for
+// `orderable`, and the typed handles the query builder takes
 pub struct WidgetIdTag;
 impl<C: Column> dbkit::HasEq<C> for WidgetIdTag {}
+impl<C: Column> dbkit::HasOrder<C> for WidgetIdTag {}
 
 pub struct WidgetColumns<C: Column = WidgetColumn> {
     pub id: dbkit::ColumnRef<WidgetIdTag, C, WidgetId>,

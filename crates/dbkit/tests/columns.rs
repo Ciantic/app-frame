@@ -22,6 +22,7 @@ pub struct Widget {
 
     #[db(pgtype = "text")]
     #[db(query_ops(eq, neq, like))]
+    #[db(orderable)]
     pub name: String,
 
     #[db(pgtype = "text")]
@@ -216,6 +217,12 @@ fn a_column_knows_its_nullability() {
 }
 
 #[test]
+fn a_column_carries_whether_it_is_orderable() {
+    assert!(WidgetColumn::Name.orderable());
+    assert!(!WidgetColumn::EmailVerifiedAt.orderable());
+}
+
+#[test]
 fn a_column_carries_its_query_operators() {
     assert_eq!(
         WidgetColumn::Name.query_ops(),
@@ -274,6 +281,7 @@ fn metadata_columns_are_the_enum_variants() {
         assert_eq!(column.pg_default(), variant.pg_default());
         assert_eq!(column.nullable(), variant.nullable());
         assert_eq!(column.query_ops(), variant.query_ops());
+        assert_eq!(column.orderable(), variant.orderable());
     }
 }
 

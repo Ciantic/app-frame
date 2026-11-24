@@ -8,6 +8,10 @@
 //!
 //! `is_null` and `is_not_null` have no trait: they take no value and cannot be
 //! mistyped, so every column can use them.
+//!
+//! [`HasOrder`] is not an operator: it is the `#[db(orderable)]` declaration,
+//! and it gates [`asc`](crate::ColumnRef::asc) and
+//! [`desc`](crate::ColumnRef::desc) the same way.
 
 use crate::Column;
 
@@ -42,3 +46,6 @@ capability! {
     HasBetween => "between",
     HasNotBetween => "not_between",
 }
+
+/// The column declared `#[db(orderable)]`, so a query may order by it.
+pub trait HasOrder<C: Column> {}

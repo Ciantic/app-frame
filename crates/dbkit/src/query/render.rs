@@ -13,6 +13,7 @@ use crate::query::MAX_LIMIT;
 use crate::query::MAX_LIST;
 use crate::query::MAX_NODES;
 use crate::query::Operand;
+use crate::query::OrderDirection;
 use crate::query::Query;
 use crate::query::value::is_array;
 use sqlx::postgres::PgArguments;
@@ -118,6 +119,23 @@ pub(crate) fn render<C: Column>(query: &Query<C>) -> Result<Rendered, Error> {
     if !query.filters.is_empty() {
         renderer.sql.push_str(" WHERE ");
         renderer.level(&query.filters, Combinator::And, 0)?;
+    }
+
+    if !query.order.is_empty() {
+        crate::query::order::check(&query.order)?;
+        renderer.sql.push_str(" ORDER BY ");
+
+        for (index, term) in query.order.iter().enumerate() {
+            if index > 0 {
+                renderer.sql.push_str(", ");
+            }
+            renderer.column(term.column.name());
+            renderer.sql.push(' ');
+            renderer.sql.push_str(match term.direction {
+                OrderDirection::Asc => "ASC",
+                OrderDirection::Desc => "DESC",
+            });
+        }
     }
 
     if let Some(limit) = query.limit {

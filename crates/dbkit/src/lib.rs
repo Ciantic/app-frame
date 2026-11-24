@@ -47,6 +47,8 @@ pub use query::Group;
 pub use query::IntoColumns;
 pub use query::Leaf;
 pub use query::Operand;
+pub use query::OrderDirection;
+pub use query::OrderTerm;
 pub use query::Query;
 pub use query::Rendered;
 pub use query::SelectedQuery;

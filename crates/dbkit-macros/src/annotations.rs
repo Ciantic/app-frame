@@ -108,6 +108,8 @@ pub enum Column {
         pg_default: PgDefault,
         /// Operators the column may be filtered with, in declaration order.
         query_ops: Vec<FilterOperator>,
+        /// Whether the column may be ordered by, from `#[db(orderable)]`.
+        orderable: bool,
     },
     /// A `#[db(flatten)]` field, contributing the columns of its type.
     Flattened { name: Ident, ty: Type },
@@ -143,6 +145,7 @@ struct FieldAnnotations {
     /// A bare `#[db(pgdefault)]`, meaning "no default".
     pg_default_none: bool,
     query_ops: Vec<FilterOperator>,
+    orderable: bool,
 }
 
 const ROLES: &[(&str, Role)] = &[
@@ -247,6 +250,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                     "`#[db(flatten)]` cannot be combined with `query_ops`",
                 ));
             }
+            if annotations.orderable {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `orderable`",
+                ));
+            }
             if is(&field.ty, "Option") {
                 errors.push(syn::Error::new(
                     field.ty.span(),
@@ -307,6 +316,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             pg_type,
             pg_default,
             query_ops: annotations.query_ops.clone(),
+            orderable: annotations.orderable,
         });
     }
 
@@ -555,12 +565,18 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                     return Err(meta.error("duplicate `flatten`"));
                 }
                 annotations.flatten = true;
+            } else if meta.path.is_ident("orderable") {
+                if annotations.orderable {
+                    return Err(meta.error("duplicate `orderable`"));
+                }
+                annotations.orderable = true;
             } else {
                 let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name))
                 else {
                     return Err(meta.error(
                         "unknown attribute; expected `primary_key`, `version`, `created_at`, \
-                         `updated_at`, `flatten`, `pgtype`, `pgdefault` or `query_ops`",
+                         `updated_at`, `flatten`, `pgtype`, `pgdefault`, `query_ops` or \
+                         `orderable`",
                     ));
                 };
 
@@ -704,6 +720,7 @@ mod tests {
         pg_type: &'a PgType,
         pg_default: &'a PgDefault,
         query_ops: &'a [FilterOperator],
+        orderable: bool,
     }
 
     impl PgType {
@@ -735,6 +752,7 @@ mod tests {
             pg_type,
             pg_default,
             query_ops,
+            orderable,
             ..
         } = column
         else {
@@ -747,6 +765,7 @@ mod tests {
             pg_type,
             pg_default,
             query_ops,
+            orderable: *orderable,
         }
     }
 
@@ -943,6 +962,46 @@ mod tests {
                 FilterOperator::NotBetween,
             ]
         );
+    }
+
+    #[test]
+    fn reads_orderable() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text")]
+                #[db(orderable)]
+                name: String,
+                #[db(pgtype = "text")]
+                note: Option<String>,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert!(scalar(&model.columns[1]).orderable);
+        assert!(!scalar(&model.columns[0]).orderable);
+        assert!(!scalar(&model.columns[2]).orderable);
+    }
+
+    #[test]
+    fn rejects_duplicate_orderable() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(pgtype = "text", orderable, orderable)]
+                name: String,
+            }
+        "#,
+        );
+
+        assert!(message.contains("duplicate `orderable`"), "{message}");
     }
 
     #[test]
@@ -1239,6 +1298,26 @@ mod tests {
 
         assert!(
             message.contains("`#[db(flatten)]` cannot be combined with `pgtype`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_flattened_field_with_orderable() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(flatten, orderable)]
+                address: Address,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(flatten)]` cannot be combined with `orderable`"),
             "{message}"
         );
     }

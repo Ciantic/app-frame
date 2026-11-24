@@ -16,6 +16,7 @@ pub struct Order {
 
     #[db(pgtype = "varchar(20)")]
     #[db(query_ops(eq, any))]
+    #[db(orderable)]
     pub status: String,
 
     #[db(pgtype = "int8")]

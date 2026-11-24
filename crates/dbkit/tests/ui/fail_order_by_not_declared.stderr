@@ -1,0 +1,18 @@
+error[E0599]: the method `desc` exists for struct `ColumnRef<OrderTotalTag, OrderColumn, i64>`, but its trait bounds were not satisfied
+ --> tests/ui/fail_order_by_not_declared.rs:9:46
+  |
+9 |     let _ = Order::query().order_by([c.total.desc()]);
+  |                                              ^^^^ method cannot be called on `ColumnRef<OrderTotalTag, OrderColumn, i64>` due to unsatisfied trait bounds
+  |
+ ::: tests/ui/support.rs
+  |
+  | #[derive(DbModel)]
+  |          ------- doesn't satisfy `OrderTotalTag: HasOrder<OrderColumn>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `OrderTotalTag: HasOrder<OrderColumn>`
+note: the trait `HasOrder` must be implemented
+ --> src/query/capability.rs
+  |
+  | pub trait HasOrder<C: Column> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

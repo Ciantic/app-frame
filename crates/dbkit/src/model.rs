@@ -166,6 +166,10 @@ pub trait ErasedColumn: std::fmt::Debug + Send + Sync + 'static {
     /// The column name as the database spells it.
     fn name(&self) -> &'static str;
 
+    /// Whether the column may appear in `ORDER BY`, as declared by
+    /// `#[db(orderable)]`.
+    fn orderable(&self) -> bool;
+
     /// The column type as DDL spells it: `uuid`, `text`, `varchar(255)`.
     fn pg_type(&self) -> &'static str;
 

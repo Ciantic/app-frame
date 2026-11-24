@@ -19,6 +19,7 @@ use std::fmt;
 
 pub mod capability;
 mod filter;
+mod order;
 mod render;
 mod serde;
 mod value;
@@ -30,11 +31,16 @@ pub use filter::Group;
 pub use filter::IntoColumns;
 pub use filter::Leaf;
 pub use filter::Operand;
+pub use order::OrderDirection;
+pub use order::OrderTerm;
 pub use render::Rendered;
 pub use value::Bind;
 
 /// The largest `LIMIT` a request may ask for.
 pub const MAX_LIMIT: u32 = 1000;
+
+/// How many `ORDER BY` terms one query may hold.
+pub const MAX_ORDER: usize = 16;
 
 /// How deeply `and`/`or` may nest.
 pub const MAX_DEPTH: usize = 8;
@@ -58,6 +64,8 @@ pub type SelectedQuery<C> =
 pub struct Query<C: Column> {
     pub select: Option<Columns<C>>,
     pub filters: Vec<Filter<C>>,
+    /// `ORDER BY` terms in the order they were given; empty means no ordering.
+    pub order: Vec<OrderTerm<C>>,
     /// `None` means no `LIMIT`: every row the filters match.
     pub limit: Option<u32>,
     /// `None` and `0` both mean no `OFFSET`.
@@ -69,6 +77,7 @@ impl<C: Column> Query<C> {
         Self {
             select: None,
             filters: Vec::new(),
+            order: Vec::new(),
             limit: None,
             offset: None,
         }
@@ -84,6 +93,12 @@ impl<C: Column> Query<C> {
     /// Appends to the top-level conjunction.
     pub fn filters(mut self, filters: impl IntoIterator<Item = Filter<C>>) -> Self {
         self.filters.extend(filters);
+        self
+    }
+
+    /// Appends to the `ORDER BY` list.
+    pub fn order_by(mut self, order: impl IntoIterator<Item = OrderTerm<C>>) -> Self {
+        self.order.extend(order);
         self
     }
 
@@ -213,6 +228,7 @@ impl<C: Column> fmt::Debug for Query<C> {
             .debug_struct("Query")
             .field("select", &self.select)
             .field("filters", &self.filters)
+            .field("order", &self.order)
             .field("limit", &self.limit)
             .field("offset", &self.offset)
             .finish()
@@ -223,6 +239,7 @@ impl<C: Column> PartialEq for Query<C> {
     fn eq(&self, other: &Self) -> bool {
         self.select == other.select
             && self.filters == other.filters
+            && self.order == other.order
             && self.limit == other.limit
             && self.offset == other.offset
     }
@@ -320,6 +337,23 @@ pub enum Error {
     Limit,
     /// The model is a fragment, which has no row source to read.
     NotATable,
+    /// A column that did not declare `#[db(orderable)]`.
+    NotOrderable {
+        column: &'static str,
+    },
+    /// A direction that is neither `asc` nor `desc`.
+    UnknownDirection {
+        name: String,
+    },
+    /// An `order_by` entry that is not a column name with an optional
+    /// direction.
+    InvalidOrder {
+        value: String,
+    },
+    /// More than [`MAX_ORDER`] terms.
+    OrderTerms {
+        len: usize,
+    },
     /// A selection with no columns, which is neither `SELECT *` nor valid SQL.
     EmptySelection,
     /// A `select` that leaves a column out, which [`Query::build`] cannot
@@ -435,7 +469,8 @@ impl fmt::Display for Error {
             ),
             Error::UnknownKey { key } => write!(
                 formatter,
-                "unknown key `{key}`; a query takes `select`, `filters`, `limit` and `offset`"
+                "unknown key `{key}`; a query takes `select`, `filters`, `order_by`, `limit` and \
+                 `offset`"
             ),
             Error::Depth => write!(formatter, "filters nest deeper than {MAX_DEPTH} levels"),
             Error::Nodes => write!(
@@ -446,6 +481,23 @@ impl fmt::Display for Error {
             Error::NotATable => {
                 formatter.write_str("the model is a `#[db(fragment)]`, which has no table to query")
             }
+            Error::NotOrderable { column } => write!(
+                formatter,
+                "column `{column}` is not orderable; add `#[db(orderable)]` to it"
+            ),
+            Error::UnknownDirection { name } => write!(
+                formatter,
+                "order direction `{name}` is not known; expected one of: {}",
+                OrderDirection::names().collect::<Vec<_>>().join(", ")
+            ),
+            Error::InvalidOrder { value } => write!(
+                formatter,
+                "`order_by` entry `{value}` is not a column name with an optional `asc` or `desc`"
+            ),
+            Error::OrderTerms { len } => write!(
+                formatter,
+                "`order_by` takes at most {MAX_ORDER} columns, got {len}"
+            ),
             Error::EmptySelection => formatter.write_str(
                 "a selection needs at least one column; omit `select` to read every column",
             ),

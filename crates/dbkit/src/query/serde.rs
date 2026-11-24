@@ -19,6 +19,7 @@ use crate::query::Filter;
 use crate::query::Leaf;
 use crate::query::MAX_LIST;
 use crate::query::Operand;
+use crate::query::OrderTerm;
 use crate::query::Query;
 use crate::query::value;
 use serde::Deserialize;
@@ -43,6 +44,15 @@ impl<C: Column> Serialize for Query<C> {
         }
         if !self.filters.is_empty() {
             map.serialize_entry("filters", &Level(&self.filters))?;
+        }
+        if !self.order.is_empty() {
+            let terms: Vec<String> = self
+                .order
+                .iter()
+                .map(|term| format!("{} {}", term.column.name(), term.direction.as_str()))
+                .collect();
+
+            map.serialize_entry("order_by", &terms)?;
         }
         if let Some(limit) = self.limit {
             map.serialize_entry("limit", &limit)?;
@@ -207,7 +217,9 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
     type Value = Result<Query<C>, Error>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a query object, holding `select`, `filters`, `limit` and `offset`")
+        formatter.write_str(
+            "a query object, holding `select`, `filters`, `order_by`, `limit` and `offset`",
+        )
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
@@ -243,6 +255,10 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
                     ParsedLevel(Ok(LevelOwned(filters))) => query.filters = filters,
                     ParsedLevel(Err(error)) => rejected = Some(error),
                 },
+                "order_by" => match order_by::<C>(map.next_value()?) {
+                    Ok(order) => query.order = order,
+                    Err(error) => rejected = Some(error),
+                },
                 "limit" => query.limit = Some(map.next_value()?),
                 "offset" => query.offset = Some(map.next_value()?),
                 _ => {
@@ -257,6 +273,20 @@ impl<'de, C: Column> Visitor<'de> for QueryVisitor<C> {
             None => Ok(query),
         })
     }
+}
+
+/// Reads the `order_by` list, resolving each entry through the column enum and
+/// rejecting a column that did not declare `#[db(orderable)]`.
+fn order_by<C: Column>(requested: Vec<String>) -> Result<Vec<OrderTerm<C>>, Error> {
+    let mut order = Vec::with_capacity(requested.len());
+
+    for value in requested {
+        order.push(crate::query::order::parse::<C>(&value)?);
+    }
+
+    crate::query::order::check(&order)?;
+
+    Ok(order)
 }
 
 /// Reads the `select` list, resolving each name through the column enum so an

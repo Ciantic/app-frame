@@ -23,10 +23,12 @@ struct OrderLive {
 
     #[db(pgtype = "varchar(20)")]
     #[db(query_ops(eq, any, not_any, ilike))]
+    #[db(orderable)]
     status: String,
 
     #[db(pgtype = "int8")]
     #[db(query_ops(eq, gte, lt, between))]
+    #[db(orderable)]
     total: i64,
 
     #[db(pgtype = "bool")]
@@ -48,10 +50,12 @@ struct OrderLive {
 struct StatusTotal {
     #[db(pgtype = "varchar(20)")]
     #[db(query_ops(eq))]
+    #[db(orderable)]
     status: String,
 
     #[db(pgtype = "int8")]
     #[db(query_ops(gte))]
+    #[db(orderable)]
     total: i64,
 }
 
@@ -390,6 +394,65 @@ async fn a_subquery_model_reads_the_rows_its_query_produces() {
             .total,
         250
     );
+}
+
+#[tokio::test]
+async fn ordering_sorts_the_rows_it_matches() {
+    let db = seeded().await;
+
+    let rows: Vec<OrderLive> = OrderLive::query()
+        .filters([c().deleted_at.is_null()])
+        .order_by([c().total.desc(), c().status.asc()])
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.total).collect::<Vec<_>>(),
+        [500, 250, 100],
+        "the null-deleted rows by total, descending"
+    );
+
+    let rows: Vec<OrderLive> = OrderLive::query()
+        .filters([c().deleted_at.is_null()])
+        .order_by([c().total.asc()])
+        .limit(2)
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.total).collect::<Vec<_>>(),
+        [100, 250],
+        "ordering applies before the limit"
+    );
+}
+
+#[tokio::test]
+async fn a_subquery_model_orders_by_its_output_columns() {
+    let db = seeded().await;
+    let columns = StatusTotal::columns();
+
+    let rows: Vec<StatusTotal> = StatusTotal::query()
+        .order_by([columns.total.desc(), columns.status.asc()])
+        .build()
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+    let summary: Vec<(&str, i64)> = rows
+        .iter()
+        .map(|row| (row.status.as_str(), row.total))
+        .collect();
+
+    // `open` is 250 before narrowing, so it sorts last; the two 500s tie on
+    // `total` and fall back to the second term.
+    assert_eq!(summary, [("paid", 500), ("void", 500), ("open", 250)]);
 }
 
 #[tokio::test]

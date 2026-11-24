@@ -45,6 +45,7 @@ pub(crate) fn expand(
     let mut defaults = Vec::new();
     let mut nullability = Vec::new();
     let mut operators = Vec::new();
+    let mut orderability = Vec::new();
     let mut literals = Vec::new();
     let mut flattened = Vec::new();
     let mut tags = Vec::new();
@@ -59,6 +60,7 @@ pub(crate) fn expand(
                 pg_type,
                 pg_default,
                 query_ops,
+                orderable,
             } => {
                 let variant = variant(field);
                 let literal = column_name(field);
@@ -93,6 +95,12 @@ pub(crate) fn expand(
                     .map(|capability| Ident::new(capability, proc_macro2::Span::call_site()))
                     .collect();
 
+                let order = if *orderable {
+                    quote!(impl<C: ::dbkit::Column> ::dbkit::HasOrder<C> for #tag {})
+                } else {
+                    quote!()
+                };
+
                 // A tag is generic over the column enum, because a fragment's
                 // column is spliced into whichever parent flattened it.
                 tags.push(quote! {
@@ -100,6 +108,7 @@ pub(crate) fn expand(
                     #visibility struct #tag;
 
                     #(impl<C: ::dbkit::Column> ::dbkit::#capabilities<C> for #tag {})*
+                    #order
                 });
                 handles.push((
                     field.clone(),
@@ -114,6 +123,7 @@ pub(crate) fn expand(
                 defaults.push(quote!(Self::#variant => #pg_default));
                 nullability.push(quote!(Self::#variant => #nullable));
                 operators.push(quote!(Self::#variant => &[#(#query_ops),*]));
+                orderability.push(quote!(Self::#variant => #orderable));
             }
             Column::Flattened { name: field, ty } => {
                 let variant = variant(field);
@@ -132,6 +142,8 @@ pub(crate) fn expand(
                 defaults.push(quote!(Self::#variant(inner) => ::dbkit::Column::pg_default(inner)));
                 nullability.push(quote!(Self::#variant(inner) => ::dbkit::Column::nullable(inner)));
                 operators.push(quote!(Self::#variant(inner) => ::dbkit::Column::query_ops(inner)));
+                orderability
+                    .push(quote!(Self::#variant(inner) => ::dbkit::Column::orderable(inner)));
                 flattened.push((variant, ty));
             }
         }
@@ -161,6 +173,7 @@ pub(crate) fn expand(
     let default_doc = "The column default as DDL spells it, or `None` when the column has none.";
     let nullable_doc = "Whether the column is nullable.";
     let ops_doc = "The comparisons the column may be queried with, in declaration order.";
+    let orderable_doc = "Whether the column may appear in `ORDER BY`.";
 
     let handles_type = format_ident!("{name}Columns");
     let handle_doc =
@@ -256,6 +269,13 @@ pub(crate) fn expand(
                     #(#operators),*
                 }
             }
+
+            #[doc = #orderable_doc]
+            pub fn orderable(self) -> bool {
+                match self {
+                    #(#orderability),*
+                }
+            }
         }
 
         impl ::dbkit::Column for #columns {
@@ -287,6 +307,10 @@ pub(crate) fn expand(
 
             fn query_ops(self) -> &'static [::dbkit::FilterOperator] {
                 #columns::query_ops(self)
+            }
+
+            fn orderable(self) -> bool {
+                #columns::orderable(self)
             }
         }
 

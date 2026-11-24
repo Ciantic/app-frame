@@ -2,7 +2,8 @@
 
 A `WHERE` clause as data: a query type tailored to one model's row source,
 built from typed Rust values or parsed from succinct JSON, that renders to the
-`(sql, params)` pair `sqlx` executes.
+`(sql, params)` pair `sqlx` executes. `ORDER BY` is the same data: a list of
+terms, each a column and a direction.
 
 The code lives in `crates/dbkit/src/query/`, and `#[derive(DbModel)]` generates
 the per-model parts: `<Model>Column`, the column tags, the capability impls,
@@ -26,9 +27,9 @@ graph LR
   `c.total.eq("500")` does not compile and a filter on a column the table does
   not have cannot be constructed at all.
 - The JSON face is the same tree in a flat, key-per-filter form under a
-  `filters` key, with `limit` and `offset` beside it. It parses into the same
-  `Query<C>`, so the two faces converge on one representation instead of two
-  code paths, and a Rust-built query serializes back to the same JSON.
+  `filters` key, with `order_by`, `limit` and `offset` beside it. It parses into
+  the same `Query<C>`, so the two faces converge on one representation instead
+  of two code paths, and a Rust-built query serializes back to the same JSON.
 - Rendering is the only exit: `render()` produces the SQL text and the
   parameter list, and `build()` wraps the same pair as a `QueryAs` to run, with
   every value bound and every identifier quoted from model metadata, never from
@@ -125,8 +126,9 @@ A newtype keeps its identity: a column of type `Email` takes `Email`, not
 
 `Query::<OrderColumn>::parse(&body)` yields the same `Query<OrderColumn>` the
 Rust block built, and serializing that value produces this payload again.
-`filters` holds the tree; `limit` and `offset` sit beside it, because paging is
-not a filter and the endpoint already knows the table.
+`filters` holds the tree; `order_by`, `limit` and `offset` sit beside it,
+because sorting and paging are not filters and the endpoint already knows the
+table.
 
 ### Rendered SQL
 
@@ -198,12 +200,13 @@ Because of the first point, an empty `any` list is an error rather than a silent
 
 ### The JSON grammar
 
-A query object holds `select`, `filters`, `limit` and `offset`, and nothing
-else:
+A query object holds `select`, `filters`, `order_by`, `limit` and `offset`,
+and nothing else:
 
 ```json
 {
   "filters": { "status__any": ["open", "paid"] },
+  "order_by": ["total desc", "status"],
   "limit": 20,
   "offset": 40
 }
@@ -215,6 +218,11 @@ else:
 - `filters` is the filter tree. It is absent when there is nothing to filter,
   which is why `{"limit": 20}` is a valid request for the first page of every
   row; an empty object is the same as absent.
+- `order_by` is the sort list: an array of terms, in the order they apply. A
+  term is a column name, optionally followed by `asc` or `desc`; `"total"` and
+  `"total asc"` are the same request. An absent or empty array means no
+  `ORDER BY`. A column without `#[db(orderable)]` is rejected, naming the
+  annotation to add.
 - Inside `filters` a key is a column name, optionally followed by `__` and an
   operator: `"status__any"`, `"total__between"`.
 - A key with no operator suffix means `eq`: `"vip": true` is
@@ -252,7 +260,7 @@ else:
   That filters on the `limit` column and then takes 20 rows. The combinators
   `and` and `or` are the only reserved keys left inside a level, and a column
   of that name wins there — see [Arbitrary nesting](#arbitrary-nesting).
-- A key beside `filters` that is none of the four is an error naming them, so
+- A key beside `filters` that is none of the five is an error naming them, so
   a payload in the older flat shape is rejected with a message rather than
   silently matching nothing.
 - `null` is the short form of `is_null`: `{"deleted_at": null}` renders
@@ -740,6 +748,41 @@ With neither, the clause is absent rather than `LIMIT ALL`:
 SELECT * FROM "orders" WHERE "status" = $1
 ```
 
+### Ordering
+
+```rust
+Order::query()
+    .filters([c.status.eq("open")])
+    .order_by([c.total.desc(), c.status.asc()])
+```
+
+```json
+{ "filters": { "status": "open" }, "order_by": ["total desc", "status asc"] }
+```
+
+```sql
+SELECT * FROM "orders" WHERE "status" = $1 ORDER BY "total" DESC, "status" ASC
+-- params: ["open"]
+```
+
+The term list is data, not SQL: `c.total.desc()` is an `OrderTerm` holding the
+column variant and an `OrderDirection`, so the column is quoted from model
+metadata and the direction is one of two keywords. Nothing is bound, so the
+parameter list is exactly what the filters produced.
+
+`order_by` appends across calls, like `filters`, so a shared base can be
+extended:
+
+```rust
+let paged = Order::query().order_by([c.total.desc()]).limit(20);
+let by_status = paged.clone().order_by([c.status.asc()]);
+```
+
+A column must declare `#[db(orderable)]` for the handle to offer `asc`/`desc`:
+`c.vip.desc()` does not compile, and a JSON request naming `vip` is rejected.
+The two gates are independent of `query_ops`, so a sort-only column declares
+`orderable` alone.
+
 ### A disjunction
 
 ```rust
@@ -889,7 +932,18 @@ A key beside `filters` is rejected with the four that belong there:
 
 ```text
 { "vip": true }
-  unknown key `vip`; a query takes `select`, `filters`, `limit` and `offset`
+  unknown key `vip`; a query takes `select`, `filters`, `order_by`, `limit` and
+  `offset`
+
+{ "order_by": ["vip desc"] }
+  column `vip` is not orderable; add `#[db(orderable)]` to it
+
+{ "order_by": ["total down"] }
+  order direction `down` is not known; expected one of: asc, desc
+
+{ "order_by": ["total desc extra"] }
+  `order_by` entry `total desc extra` is not a column name with an optional
+  `asc` or `desc`
 ```
 
 An empty projection is rejected rather than reading every column:
@@ -1376,16 +1430,23 @@ name and the `#[db(query_ops(...))]` annotation agree; a derived impl would
 demand `"In"` and `"NotILike"`.
 
 `Query<C>` serializes to the wrapped form and does not derive `Deserialize`. It
-writes `filters` when there is at least one, then `limit`, then `offset`, so a
-payload round-trips in that order. Inside `filters` the serializer follows the
+writes `filters` when there is at least one, then `order_by` when there is at
+least one term, then `limit`, then `offset`, so a payload round-trips in that
+order. Each term is written as `"column direction"`; an `asc` term parses the
+same from `"column"`. Inside `filters` the serializer follows the
 level rules in [Arbitrary nesting](#arbitrary-nesting), so its output always
 re-parses to the same tree.
 
 The `Deserialize` implementation walks each map with `MapAccess`, preserving
 order:
 
-- At the top level the only keys are `filters`, `limit` and `offset`; anything
-  else is `Error::UnknownKey`, which names all three.
+- At the top level the only keys are `select`, `filters`, `order_by`, `limit`
+  and `offset`; anything else is `Error::UnknownKey`, which names all of them.
+- An `order_by` entry is split on whitespace: the first word resolves through
+  `C::from_name`, the second, if any, through `OrderDirection::from_name`, and
+  a third is a malformed entry. Each resolved term is then checked against
+  `Column::orderable` and the cap, so the JSON face and `render()` share one
+  validation.
 - Inside `filters`, resolve each key in the order the grammar states: the whole
   key as a column, then `and` and `or`, then the last-`__` split.
   `C::from_name` supplies the column list for the error.
@@ -1466,6 +1527,9 @@ Two consequences worth stating:
 - A group always renders as `(`, its children, `)`; parenthesizing every group
   keeps rendering independent of precedence and matches the payload's nesting.
 - A leaf renders the quoted column, the operator's SQL, and its placeholders.
+- Then ` ORDER BY ` and the terms joined by `, `, each the quoted column spelled
+  explicitly as ` ASC` or ` DESC`. A direction is a keyword from an enum, so
+  ordering binds no parameter and does not shift the paging placeholders.
 - Then ` LIMIT $n` when `limit` is `Some`, and ` OFFSET $n` when `offset` is
   `Some` and non-zero. Both are pushed through `push_bind` after the filters, so
   their placeholders follow every filter placeholder in the values list; a
@@ -1634,6 +1698,8 @@ Untrusted trees need bounds so one request cannot build unbounded SQL:
   asking for every row: `query.limit.get_or_insert(100);` before `render()`.
 - `offset` is capped at `u32::MAX` by its type; a deeper page is a slower scan,
   not a larger statement, so no separate cap applies.
+- Maximum `ORDER BY` terms, 16, enforced in `render()` and by the JSON
+  deserializer.
 
 Paging is not the only bound that matters: a request with `limit: None` and no
 filters selects the whole table, which is why the service layer decides whether
@@ -1650,6 +1716,8 @@ impl<C: Column> Query<C> {
     pub fn select(self, columns: impl IntoColumns<C>) -> Self;
     /// Appends to the top-level conjunction; it never nests.
     pub fn filters(self, filters: impl IntoIterator<Item = Filter<C>>) -> Self;
+    /// Appends to the `ORDER BY` list.
+    pub fn order_by(self, order: impl IntoIterator<Item = OrderTerm<C>>) -> Self;
     pub fn parse(json: &str) -> Result<Self, Error>;
     /// Flattens same-combinator nesting and drops single-child groups.
     pub fn normalize(self) -> Self;
@@ -1677,7 +1745,7 @@ impl<C: Column> Filter<C> {
     pub fn normalize(self) -> Self;
 }
 
-impl<C: Column> Serialize for Query<C> { /* `filters` plus paging */ }
+impl<C: Column> Serialize for Query<C> { /* `filters`, ordering and paging */ }
 ```
 
 Three methods, one rendering: `render()` stops at the pair, `build()` and
@@ -1755,6 +1823,8 @@ projection decodes into the select type instead.
   `crates/dbkit-macros/src/derive_select.rs` generates the select struct.
 - `crates/dbkit/src/query/filter.rs` — `Filter`, `Leaf`, `Group`, `Operand`,
   `Combinator`, `ColumnRef` and its per-operator impl blocks.
+- `crates/dbkit/src/query/order.rs` — `OrderTerm`, `OrderDirection`, the
+  `asc`/`desc` handles and the check both faces share.
 - `crates/dbkit/src/query/capability.rs` — one `Has<Operator><C>` trait per
   `FilterOperator` variant that takes a value, declared by one `macro_rules!`
   so the list stays in step with the enum.
@@ -1784,9 +1854,14 @@ projection decodes into the select type instead.
 - `{"filters": {"vip": true}}` equals `{"filters": {"vip__eq": true}}`;
   `{"deleted_at": null}` and `{"deleted_at__neq": null}` render `IS NULL` and
   `IS NOT NULL`; `{"deleted_at__is_null": true}` is the same request.
-- The wrapper is load-bearing: a key beside `filters` is rejected with the four
-  that belong there, `{"filters": 5}` says it expects an object, and
+- The wrapper is load-bearing: a key beside `filters` is rejected with the
+  five that belong there, `{"filters": 5}` says it expects an object, and
   `{"filters": {}}` builds a query with no `WHERE`.
+- Ordering: the rendered clause sits between `WHERE` and `LIMIT`, adds no
+  parameter, appends across calls, and round-trips through JSON in the
+  `"column direction"` spelling. An empty array is no ordering; an unknown
+  column, an unknown direction, a malformed entry, a column without
+  `#[db(orderable)]` and a seventeenth term each report their own message.
 - Every selection shape builds its columns in the order it was given; a second
   `select` replaces the first; an empty selection is `Error::EmptySelection`
   from both faces.
@@ -1815,7 +1890,7 @@ projection decodes into the select type instead.
 - Every error in [Errors](#errors) verbatim, plus `and` with no children, a
   fractional `limit`, and a negative one.
 - The caps trip at the boundary and not before: eight nested groups, 64 nodes,
-  100 list values, `limit` 1000. `limit` 0 is accepted.
+  100 list values, `limit` 1000, 16 order terms. `limit` 0 is accepted.
 - The untyped `Filter::leaf` is validated like any other leaf: an undeclared
   operator and a wrong arity are both rejected by `render()`.
 - A newtype column takes the newtype, owned, borrowed, and as a list of either;
@@ -1823,9 +1898,10 @@ projection decodes into the select type instead.
 - A fragment model is rejected by `render()`, and a flattened handle builds a
   filter whose column is the parent's.
 
-`crates/dbkit/tests/compile.rs` with `tests/ui/`, four cases asserting `E0599`:
+`crates/dbkit/tests/compile.rs` with `tests/ui/`, five cases asserting `E0599`:
 `like` on an integer column, `between` on a column that does not declare it,
-`eq` on an array column, and a `&str` argument to an integer column.
+`eq` on an array column, a `&str` argument to an integer column, and `desc` on a
+column without `#[db(orderable)]`.
 
 Against `pgtest-server`, in `crates/dbkit/tests/query_live.rs`:
 
@@ -1852,6 +1928,8 @@ Against `pgtest-server`, in `crates/dbkit/tests/query_live.rs`:
 - The JSON face and the Rust face return the same rows for the same predicate.
 - A subquery model reads the rows its query produces, with a filter applied to
   an aggregate output column.
+- Ordering sorts the matched rows, applies before `limit`, breaks ties with the
+  next term, and works on a subquery's output columns.
 
 In `crates/dbkit/src/query/value.rs`, unit tests pin the JSON table: every alias
 sqlx accepts for `String` parses as one, each type name maps to its own type,
@@ -1907,8 +1985,8 @@ Built in steps that each compiled and passed their tests on their own.
   service default is one line, so the builder leaves `None` meaning "no limit"
   and documents the footgun instead.
 - Keyset paging (`WHERE (created_at, id) < ($1, $2)`) is the scalable
-  alternative to `OFFSET`, which scans and discards the skipped rows. It needs
-  ordering, so it comes with `ORDER BY`, not with `offset`.
+  alternative to `OFFSET`, which scans and discards the skipped rows. `ORDER BY`
+  is in place; the remaining question is how the tie-breaker terms are stated.
 - Should `&` and `|` be implemented on `Filter<C>` as sugar for `and` and `or`?
   Rust gives `&` higher precedence than `|`, matching SQL's `AND` over `OR`, so
   `a & b | (c & d)` would read like the SQL it produces. It hides the tree
@@ -1949,8 +2027,9 @@ Built in steps that each compiled and passed their tests on their own.
 
 ## Out of scope
 
-- `ORDER BY`: the natural next field, and the prerequisite for keyset paging.
-  `LIMIT` and `OFFSET` are in scope now, bound as parameters.
+- `NULLS FIRST`/`NULLS LAST` and expression terms in `ORDER BY`: a term is a
+  column and a direction today. Keyset paging builds on ordering but needs the
+  tie-breaker rule stated first.
 - Joins, aggregates and `GROUP BY`. A `#[db(subquery = "...")]` model wraps a
   hand-written query, including a `WITH` clause, but the builder does not
   construct one.
