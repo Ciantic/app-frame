@@ -1,4 +1,3 @@
-use crate::db::primitives::customer_id::CustomerId;
 use crate::db::primitives::e_invoice_address::EInvoiceAddress;
 use crate::db::primitives::e_invoice_operator::EInvoiceOperator;
 use crate::db::primitives::email_address::EmailAddress;
@@ -10,9 +9,29 @@ use dbkit::DbInsert;
 use dbkit::DbModel;
 use dbkit::DbPatch;
 use dbkit::DbSelect;
+use dbkit::DbType;
 use serde::Deserialize;
 use serde::Serialize;
 use user_service::db::models::tenant::TenantId;
+use uuid::Uuid;
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    garde::Validate,
+    DbType,
+)]
+#[db(pgtype = "uuid")]
+#[db(pgdefault = "uuidv7()")]
+#[sqlx(transparent)]
+pub struct CustomerId(#[garde(skip)] pub Uuid);
 
 #[derive(
     Debug,

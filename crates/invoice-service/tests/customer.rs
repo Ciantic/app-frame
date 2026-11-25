@@ -1,9 +1,9 @@
 use dbkit::InsertError;
 use invoice_service::db::models::customer::Customer;
+use invoice_service::db::models::customer::CustomerId;
 use invoice_service::db::models::customer::CustomerInsert;
 use invoice_service::db::models::invoice::Invoice;
 use invoice_service::db::models::invoice::InvoiceInsert;
-use invoice_service::db::primitives::customer_id::CustomerId;
 use invoice_service::db::primitives::e_invoice_address::EInvoiceAddress;
 use invoice_service::db::primitives::email_address::EmailAddress;
 use invoice_service::db::primitives::language::Language;

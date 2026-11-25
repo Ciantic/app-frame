@@ -1,7 +1,7 @@
 use super::customer::Customer;
+use super::customer::CustomerId;
 use super::invoice_row::InvoiceRow;
 use super::seller::SellerId;
-use crate::db::primitives::customer_id::CustomerId;
 use crate::db::primitives::date::Date;
 use crate::db::primitives::language::Language;
 use crate::db::primitives::money::Money;

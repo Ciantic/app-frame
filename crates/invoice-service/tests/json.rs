@@ -1,13 +1,13 @@
 use chrono::NaiveDate;
 use chrono::Utc;
 use invoice_service::db::models::customer::Customer;
+use invoice_service::db::models::customer::CustomerId;
 use invoice_service::db::models::invoice::Invoice;
 use invoice_service::db::models::invoice::InvoiceId;
 use invoice_service::db::models::invoice_row::InvoiceRow;
 use invoice_service::db::models::invoice_row::InvoiceRowId;
 use invoice_service::db::models::seller::Seller;
 use invoice_service::db::models::seller::SellerId;
-use invoice_service::db::primitives::customer_id::CustomerId;
 use invoice_service::db::primitives::date::Date;
 use invoice_service::db::primitives::e_invoice_address::EInvoiceAddress;
 use invoice_service::db::primitives::e_invoice_operator::EInvoiceOperator;

@@ -1,4 +1,3 @@
-pub mod customer_id;
 pub mod date;
 pub mod e_invoice_address;
 pub mod e_invoice_operator;

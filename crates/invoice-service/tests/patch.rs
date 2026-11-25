@@ -1,9 +1,9 @@
 use dbkit::Patch;
 use garde::Validate;
+use invoice_service::db::models::customer::CustomerId;
 use invoice_service::db::models::customer::CustomerPatch;
 use invoice_service::db::models::invoice::InvoicePatch;
 use invoice_service::db::models::invoice_row::InvoiceRowPatch;
-use invoice_service::db::primitives::customer_id::CustomerId;
 use invoice_service::db::primitives::date::Date;
 use invoice_service::db::primitives::e_invoice_address::EInvoiceAddress;
 use invoice_service::db::primitives::email_address::EmailAddress;
