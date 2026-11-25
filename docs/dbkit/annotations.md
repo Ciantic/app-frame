@@ -5,10 +5,11 @@ They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, which ones are audit
 columns, which columns the database fills in from a default, which comparisons
 each column may be queried with, and whether it may be sorted. They also
-describe related non-column fields, foreign keys, unique keys, trigger
-definitions and generated columns. Every field carries a `pgtype` unless it is
-flattened, is a relation, or its type declares one with `#[derive(DbType)]`, and a table
-row needs a primary key; the other annotations are opt-in.
+describe related non-column fields, foreign keys, unique keys, non-unique
+indexes, trigger definitions and generated columns. Every field carries a
+`pgtype` unless it is flattened, is a relation, or its type declares one with
+`#[derive(DbType)]`, and a table row needs a primary key; the other annotations
+are opt-in.
 
 A struct is one of three shapes:
 
@@ -85,8 +86,9 @@ or a relation; role-annotated fields never are.
   struct a table row, `subquery` makes its rows the output of a query, and
   `fragment` makes it a column group.
 - `#[db(pg_trigger = "...")]` or `#[db(pg_trigger(...))]` on a table row or a
-  scalar field of a table row, repeatable; `#[db(unique)]` on a field and
-  `#[db(unique(columns = [...]))]` on a table row.
+  scalar field of a table row, repeatable; `#[db(unique)]` on a field,
+  `#[db(unique(columns = [...]))]` and `#[db(index(columns = [...]))]` on a
+  table row.
 - `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`,
   `#[db(relation)]`, unless the field type implements `dbkit::DbType`, exactly
   once.
@@ -121,8 +123,8 @@ not use that form:
   `relation`: `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
   `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, any))]` above
   `#[db(orderable)]` above `#[db(pg_trigger = "...")]`.
-- Struct-level `pg_trigger` and `unique(columns = [...])` follow the shape
-  annotation.
+- Struct-level `pg_trigger`, `unique(columns = [...])` and
+  `index(columns = [...])` follow the shape annotation.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
 - A `#[db(flatten)]` field carries that annotation alone.
 - On a `DbType` struct, `#[db(pgtype = "...")]` sits above
@@ -510,7 +512,7 @@ Marks the tenant ownership column.
   HTTP layer uses to choose tenant or global permission per entry.
 - The tenant table is owned by another service. A single backend schema can
   still declare `#[db(foreign_key(table = "tenant", column = "id"))]` on the
-  tenant column; see [Service composition](todo-schema-sql-generator.md#service-composition).
+  tenant column; see [Cross-service composition](schema-generator.md#cross-service-composition).
 
 ## `pg_trigger`
 
@@ -613,10 +615,12 @@ pub customer_id: Option<CustomerId>,
 - With `scope`, the local columns `(scope, field)` reference
   `table(scope, column)`. The target scope column has the same name as the
   local one.
+- `on_delete` and `on_update` are optional and take `no_action`, `restrict`,
+  `cascade`, `set_null` or `set_default`; both default to `no_action`.
 - The macro checks `scope` against the model's scalar columns. It cannot check
   the target type; PostgreSQL enforces that.
-- The schema test compares the declared columns and target with `pg_constraint`
-  in both directions. `on delete` and `on update` actions are not checked.
+- The schema test compares the declared columns, target and actions with
+  `pg_constraint` in both directions.
 
 ## `pg_virtual`
 
@@ -662,6 +666,28 @@ pub struct Invoice { /* ... */ }
 - `unique` does not change query, insert or patch inputs.
 - The schema test compares `pg_index` unique, non-primary indexes in both
   directions, ignoring partial and expression indexes.
+
+## `index`
+
+Declares a non-unique index for metadata, the schema test and the schema
+generator.
+
+```rust
+#[db(table = "invoice")]
+#[db(index(columns = [customer_id]))]
+#[db(index(columns = [tenant_id, created_at], name = "invoice_tenant_created_idx"))]
+pub struct Invoice { /* ... */ }
+```
+
+- Legal on a table row, repeatable. Not legal on a field, a fragment or a
+  subquery.
+- `columns` is a required, non-empty list of scalar columns, in index order.
+- `name` is optional and must be non-empty. The default is
+  `<table>_<column>_<column>_idx`, which matches PostgreSQL's convention.
+- Repeating a column or an index is an error.
+- The schema test compares non-unique, non-primary indexes in both directions,
+  ignoring partial and expression indexes.
+- The schema generator emits `create index ... on ... (...)`.
 
 ## `relation`
 
@@ -740,12 +766,16 @@ Every rule below produces a compile error.
   same `(on, name)` are an error. A trigger field cannot combine with a role,
   `pg_virtual`, `flatten` or `relation`.
 - `#[db(foreign_key)]` is legal only on a scalar field of a table row; `table`
-  and `column` are required, and `scope` must name another scalar column.
+  and `column` are required, `scope` must name another scalar column, and
+  `on_delete`/`on_update` must be one of the accepted actions.
 - `#[db(pg_virtual)]` is legal only on a scalar field of a table row and cannot
   combine with a role or `pgdefault`.
 - A field-level `#[db(unique)]` is legal only on a scalar, non-primary-key field
   of a table row. The struct form needs a non-empty `columns` list of scalar
   columns, without repeats, and a key that is not exactly the primary key.
+- `#[db(index)]` is legal only on a table row. It needs a non-empty `columns`
+  list of scalar columns and an optional non-empty `name`; repeating a column
+  or an index is an error.
 - `version`, `created_at`, `updated_at` and `tenant` may each appear at most
   once.
 - A single field may carry at most one role, even if the roles are split across
@@ -770,10 +800,10 @@ Every rule below produces a compile error.
   error.
 - `orderable` appears at most once per field and takes no value.
 - The `DbModel` struct attribute accepts `table`, `subquery`, `fragment`,
-  `pg_trigger` and `unique`; the field-level attribute accepts `pgtype`,
-  `pgdefault`, `query_ops`, `orderable`, `pg_trigger`, `pg_virtual`, `unique`,
-  `foreign_key`, `relation`, `flatten` and the five roles. The `DbType` struct
-  attribute accepts only `pgtype` and `pgdefault`.
+  `pg_trigger`, `unique` and `index`; the field-level attribute accepts
+  `pgtype`, `pgdefault`, `query_ops`, `orderable`, `pg_trigger`, `pg_virtual`,
+  `unique`, `foreign_key`, `relation`, `flatten` and the five roles. The
+  `DbType` struct attribute accepts only `pgtype` and `pgdefault`.
 - A `DbType` struct must not annotate its fields, and it must carry `pgtype`.
 
 ## How field types are matched
@@ -806,7 +836,7 @@ For reference when reading a compile failure:
 - `` `DbModel` can only be derived for structs ``
 - `` `DbModel` requires named fields ``
 - `` missing `#[db(table = "...")]`, `#[db(subquery = "...")]` or `#[db(fragment)]` ``
-- ``unknown attribute; the struct accepts `table`, `subquery`, `fragment`, `pg_trigger` or `unique` ``
+- ``unknown attribute; the struct accepts `table`, `subquery`, `fragment`, `pg_trigger`, `unique` or `index` ``
 - `` `table` must not be empty ``
 - `` `subquery` must not be empty ``
 - `` `subquery` must not end with a semicolon; the query is wrapped in parentheses ``
@@ -871,6 +901,7 @@ For reference when reading a compile failure:
 - `` `#[db(foreign_key)]` is only legal on a table row ``
 - `` `foreign_key` requires `table = "..."` `` (and the same for `column`)
 - `` `scope` `name` is not a scalar column ``
+- ``expected `no_action`, `restrict`, `cascade`, `set_null` or `set_default` ``
 - `` `#[db(relation)]` is only legal on a table row ``
 - `` `#[db(relation)]` field must be `Option<T>` or `Vec<T>` ``
 - `` `local_key` `name` is not a scalar column ``
@@ -879,6 +910,11 @@ For reference when reading a compile failure:
 - `` `#[db(unique)]` is redundant on a primary-key field ``
 - `` `unique` column `name` is not a scalar column ``
 - `` a `unique` key cannot repeat the primary key ``
+- `` `#[db(index)]` is only legal on a table row ``
+- `` `index` requires `columns = [...]` ``
+- `` `index` column `name` is not a scalar column ``
+- `` `index` repeats column `name` ``
+- ``duplicate `index` ``
 
 All problems found in one struct are reported together, so a single compile
 fixes the whole annotation block.
@@ -919,9 +955,11 @@ matches `Meta` and panics on the other variants:
 - `relations` — every `#[db(relation)]` field in declaration order, with its
   field name, model name, target table, cardinality, local key and target key.
 - `foreign_keys` — every `#[db(foreign_key)]` in declaration order, with its
-  local columns, target table and referenced columns.
+  local columns, target table, referenced columns and `on_delete`/`on_update`
+  actions.
 - `unique_keys` — every field-level `#[db(unique)]` and struct-level
   `#[db(unique(columns = [...]))]`, with its column list.
+- `indexes` — every `#[db(index)]` with its resolved name and column list.
 - `triggers` — every `#[db(pg_trigger)]` declaration in declaration order as a
   `dbkit::TriggerRef { name, table }`. `table` is `on = "..."` or the model's
   table, so an entry may name another model's table.
@@ -1459,9 +1497,9 @@ assert!(
 Each problem is one line naming the table and column, so a failing test says
 what to fix. The check covers names and nullability from
 `information_schema.columns`, tables without a model, types and defaults,
-generated columns, foreign keys, unique indexes, triggers, and a column declared
-more than once — which is what two `#[db(flatten)]` fragments sharing a column
-name produce.
+generated columns, foreign keys and their actions, unique indexes, non-unique
+indexes, triggers, and a column declared more than once — which is what two
+`#[db(flatten)]` fragments sharing a column name produce.
 Types are compared structurally: the helper creates a temporary table whose
 columns use the `pgtype` annotations and compares each column's `atttypid` and
 `atttypmod` with the real table's, so length and precision must match and any
@@ -1519,12 +1557,9 @@ These are deliberately out of scope until a model needs them:
   new annotation.
 - Loading a `#[db(relation)]`: the annotation records the field and the join,
   but dbkit does not execute the second query.
-- Generating `schema.sql` from `MODELS`: triggers are fully described, but the
-  generator does not exist yet. Non-unique indexes and foreign-key actions are
-  not modelled either, so a generated schema would currently lose them. See
-  [Schema SQL generator](todo-schema-sql-generator.md).
-- Foreign-key `on delete` and `on update` actions: only the columns and target
-  are compared.
+- Generating `schema.sql` covers tables, keys, indexes and triggers, but not
+  check constraints, domains, extensions or other unmodelled DDL. See
+  [Schema SQL generator](schema-generator.md).
 - Stored generated columns: `#[db(pg_virtual)]` describes a virtual column.
-- Propagating foreign keys, unique keys, triggers or relations through
+- Propagating foreign keys, unique keys, indexes, triggers or relations through
   `#[db(flatten)]` fragments.

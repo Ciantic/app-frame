@@ -50,6 +50,7 @@ pub struct InvoiceId(#[garde(skip)] pub Uuid);
 )]
 #[db(table = "invoice")]
 #[db(unique(columns = [tenant_id, id]))]
+#[db(index(columns = [customer_id]))]
 pub struct Invoice {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]

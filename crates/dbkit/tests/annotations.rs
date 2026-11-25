@@ -116,6 +116,7 @@ struct Frame {
 #[db(table = "annotated")]
 #[db(pg_trigger = "annotated_trigger")]
 #[db(unique(columns = [tenant_id, id]))]
+#[db(index(columns = [name]))]
 #[expect(
     dead_code,
     reason = "the fields exist only to derive the table metadata"
@@ -128,7 +129,12 @@ struct Annotated {
     tenant_id: Uuid,
 
     #[db(pgtype = "uuid")]
-    #[db(foreign_key(table = "widget", column = "id", scope = "tenant_id"))]
+    #[db(foreign_key(
+        table = "widget",
+        column = "id",
+        scope = "tenant_id",
+        on_delete = cascade
+    ))]
     widget_id: Option<Uuid>,
 
     #[db(relation(
@@ -306,6 +312,8 @@ fn derive_generates_relations_constraints_and_generated_columns() {
     assert_eq!(foreign_key.columns, ["tenant_id", "widget_id"]);
     assert_eq!(foreign_key.table, "widget");
     assert_eq!(foreign_key.referenced_columns, ["tenant_id", "id"]);
+    assert_eq!(foreign_key.on_delete, dbkit::ForeignKeyAction::Cascade);
+    assert_eq!(foreign_key.on_update, dbkit::ForeignKeyAction::NoAction);
 
     assert_eq!(meta.triggers.len(), 1);
     assert_eq!(meta.triggers[0].name, "annotated_trigger");
@@ -315,6 +323,10 @@ fn derive_generates_relations_constraints_and_generated_columns() {
     assert_eq!(meta.unique_keys.len(), 2);
     assert_eq!(meta.unique_keys[0].columns, ["tenant_id", "id"]);
     assert_eq!(meta.unique_keys[1].columns, ["name"]);
+
+    assert_eq!(meta.indexes.len(), 1);
+    assert_eq!(meta.indexes[0].name, "annotated_name_idx");
+    assert_eq!(meta.indexes[0].columns, ["name"]);
 
     assert_eq!(meta.columns[4].generated(), Some("1"));
     assert_eq!(meta.columns[0].generated(), None);

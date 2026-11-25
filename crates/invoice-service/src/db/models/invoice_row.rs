@@ -47,6 +47,7 @@ pub struct InvoiceRowId(#[garde(skip)] pub Uuid);
     DbSelect,
 )]
 #[db(table = "invoice_row")]
+#[db(index(columns = [invoice_id]))]
 #[db(pg_trigger(
     name = "invoice_row_totals",
     timing = after,
@@ -82,7 +83,12 @@ pub struct InvoiceRow {
     pub tenant_id: TenantId,
 
     #[db(query_ops(eq, any))]
-    #[db(foreign_key(table = "invoice", column = "id", scope = "tenant_id"))]
+    #[db(foreign_key(
+        table = "invoice",
+        column = "id",
+        scope = "tenant_id",
+        on_delete = cascade
+    ))]
     pub invoice_id: InvoiceId,
 
     #[db(pgtype = "text")]

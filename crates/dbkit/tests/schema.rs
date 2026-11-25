@@ -212,6 +212,7 @@ end;"#
 #[derive(DbModel)]
 #[db(table = "parent")]
 #[db(unique(columns = [tenant_id, id]))]
+#[db(index(columns = [name]))]
 #[expect(
     dead_code,
     reason = "the fields exist only to derive the table metadata"
@@ -250,7 +251,12 @@ struct Child {
     tenant_id: Uuid,
 
     #[db(pgtype = "uuid")]
-    #[db(foreign_key(table = "parent", column = "id", scope = "tenant_id"))]
+    #[db(foreign_key(
+        table = "parent",
+        column = "id",
+        scope = "tenant_id",
+        on_delete = cascade
+    ))]
     parent_id: Uuid,
 }
 
@@ -491,13 +497,15 @@ const CONSTRAINTS: &str = r#"
         constraint "parent_name_key" unique ("name")
     );
 
+    create index "parent_name_idx" on "parent" ("name");
+
     create table "child" (
         "id" uuid not null,
         "tenant_id" uuid not null,
         "parent_id" uuid not null,
         constraint "child_pkey" primary key ("id"),
         constraint "child_parent_fkey" foreign key ("tenant_id", "parent_id")
-            references "parent" ("tenant_id", "id")
+            references "parent" ("tenant_id", "id") on delete cascade
     );
 
     create function "child_trigger"() returns trigger language plpgsql as $$
@@ -527,7 +535,8 @@ async fn reports_a_missing_foreign_key() {
     let schema =
         CONSTRAINTS.replace(
             ",\n        constraint \"child_parent_fkey\" foreign key (\"tenant_id\", \
-             \"parent_id\")\n            references \"parent\" (\"tenant_id\", \"id\")",
+             \"parent_id\")\n            references \"parent\" (\"tenant_id\", \"id\") on delete \
+             cascade",
             "",
         );
 
@@ -548,6 +557,43 @@ async fn reports_a_missing_trigger() {
     assert_eq!(
         problems(&schema, &constraint_models()).await,
         ["child: trigger `child_trigger` is declared but does not exist"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_foreign_key_action_mismatch() {
+    let schema = CONSTRAINTS.replace(") on delete cascade", ") on delete restrict");
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        [
+            "child: foreign key (tenant_id, parent_id) on delete is restrict, the model says \
+             cascade"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_missing_index() {
+    let schema = CONSTRAINTS.replace(
+        "    create index \"parent_name_idx\" on \"parent\" (\"name\");\n\n",
+        "",
+    );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["parent: index `parent_name_idx` is declared but does not exist"]
+    );
+}
+
+#[tokio::test]
+async fn reports_an_extra_index() {
+    let schema =
+        format!("{CONSTRAINTS}\ncreate index \"parent_extra_idx\" on \"parent\" (\"name\");");
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["parent: index `parent_extra_idx` on (name) has no model declaration"]
     );
 }
 

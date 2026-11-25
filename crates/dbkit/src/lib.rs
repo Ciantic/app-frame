@@ -31,6 +31,8 @@ pub use model::DbType;
 pub use model::ErasedColumn;
 pub use model::FilterOperator;
 pub use model::ForeignKey;
+pub use model::ForeignKeyAction;
+pub use model::Index;
 pub use model::Meta;
 pub use model::Model;
 pub use model::Relation;

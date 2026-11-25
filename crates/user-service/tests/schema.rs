@@ -132,6 +132,15 @@ fn every_model_has_an_insert_fixture() {
     }
 }
 
+#[test]
+fn schema_sql_is_generated() {
+    assert_eq!(
+        SCHEMA.generate().unwrap(),
+        SCHEMA.sql,
+        "regenerate with `cargo run -p user-service --bin user-schema`"
+    );
+}
+
 #[tokio::test]
 async fn models_and_schema_share_columns() {
     let db = PgtestServer::start().await.database().await;

@@ -209,11 +209,43 @@ pub struct ForeignKey {
     pub columns: &'static [&'static str],
     pub table: &'static str,
     pub referenced_columns: &'static [&'static str],
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+/// A foreign key's `on delete` or `on update` action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+impl ForeignKeyAction {
+    /// The keywords as DDL spells them.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForeignKeyAction::NoAction => "no action",
+            ForeignKeyAction::Restrict => "restrict",
+            ForeignKeyAction::Cascade => "cascade",
+            ForeignKeyAction::SetNull => "set null",
+            ForeignKeyAction::SetDefault => "set default",
+        }
+    }
 }
 
 /// A unique key declared with `#[db(unique)]` or `#[db(unique(columns = [...]))]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UniqueKey {
+    pub columns: &'static [&'static str],
+}
+
+/// A non-unique index declared with `#[db(index(columns = [...]))]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Index {
+    pub name: &'static str,
     pub columns: &'static [&'static str],
 }
 
@@ -325,6 +357,8 @@ pub struct TableMeta {
     pub foreign_keys: &'static [ForeignKey],
     /// Unique keys declared with `#[db(unique)]`, in declaration order.
     pub unique_keys: &'static [UniqueKey],
+    /// Non-unique indexes declared with `#[db(index)]`, in declaration order.
+    pub indexes: &'static [Index],
     /// Every trigger declaration in declaration order, including triggers installed on another table.
     pub triggers: &'static [TriggerRef],
     /// Full trigger definitions from `#[db(pg_trigger(...))]` with a `body`, in declaration order.

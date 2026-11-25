@@ -106,6 +106,8 @@ pub struct Annotations {
     pub trigger_definitions: Vec<TriggerDefinition>,
     /// Unique keys in declaration order, from `#[db(unique)]`.
     pub unique_keys: Vec<Vec<String>>,
+    /// Non-unique indexes in declaration order, from `#[db(index)]`.
+    pub indexes: Vec<IndexAnnotation>,
 }
 
 /// When a trigger fires, from `timing = before` or `timing = after`.
@@ -192,6 +194,17 @@ pub struct ForeignKeyAnnotation {
     pub table: String,
     pub column: String,
     pub scope: Option<String>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +212,21 @@ pub struct ResolvedForeignKey {
     pub columns: Vec<String>,
     pub table: String,
     pub referenced_columns: Vec<String>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexAnnotation {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug)]
+struct IndexInput {
+    name: Option<String>,
+    columns: Vec<String>,
+    span: proc_macro2::Span,
 }
 
 #[derive(Debug)]
@@ -315,11 +343,13 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let mut errors = Vec::new();
     let mut trigger_inputs = Vec::new();
     let mut struct_unique_keys = Vec::new();
+    let mut index_inputs = Vec::new();
     let shape = shape(
         &input.attrs,
         input.span(),
         &mut trigger_inputs,
         &mut struct_unique_keys,
+        &mut index_inputs,
         &mut errors,
     );
     let fragment = matches!(shape, Some(Shape::Fragment));
@@ -677,8 +707,15 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
 
     let mut foreign_keys = Vec::new();
     for (field, foreign_key) in foreign_key_fields {
+        let ForeignKeyAnnotation {
+            table,
+            column,
+            scope,
+            on_delete,
+            on_update,
+        } = foreign_key;
         let field_name = plain_name(&field);
-        let (columns, referenced_columns) = match foreign_key.scope {
+        let (columns, referenced_columns) = match scope {
             Some(scope) => {
                 if scope == field_name {
                     errors.push(syn::Error::new(
@@ -692,18 +729,17 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                         format!("`scope` `{scope}` is not a scalar column"),
                     ));
                 }
-                (
-                    vec![scope.clone(), field_name],
-                    vec![scope, foreign_key.column],
-                )
+                (vec![scope.clone(), field_name], vec![scope, column])
             }
-            None => (vec![field_name], vec![foreign_key.column]),
+            None => (vec![field_name], vec![column]),
         };
 
         foreign_keys.push(ResolvedForeignKey {
             columns,
-            table: foreign_key.table,
+            table,
             referenced_columns,
+            on_delete,
+            on_update,
         });
     }
 
@@ -781,6 +817,14 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         seen_unique_keys.push(sorted);
     }
 
+    let indexes = resolve_indexes(index_inputs, model_table, &columns, &mut errors);
+    if !table && !indexes.is_empty() {
+        errors.push(syn::Error::new(
+            input.span(),
+            "`#[db(index)]` is only legal on a table row",
+        ));
+    }
+
     combine(errors)?;
 
     let Some(shape) = shape else {
@@ -800,6 +844,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         triggers,
         trigger_definitions,
         unique_keys,
+        indexes,
     })
 }
 
@@ -885,6 +930,7 @@ fn shape(
     span: proc_macro2::Span,
     triggers: &mut Vec<TriggerInput>,
     unique_keys: &mut Vec<Vec<String>>,
+    indexes: &mut Vec<IndexInput>,
     errors: &mut Vec<syn::Error>,
 ) -> Option<Shape> {
     let mut shape = None;
@@ -944,10 +990,12 @@ fn shape(
                     );
                 };
                 unique_keys.push(columns);
+            } else if meta.path.is_ident("index") {
+                indexes.push(parse_index(meta)?);
             } else {
                 return Err(meta.error(
                     "unknown attribute; the struct accepts `table`, `subquery`, `fragment`, \
-                     `pg_trigger` or `unique`",
+                     `pg_trigger`, `unique` or `index`",
                 ));
             }
 
@@ -1152,6 +1200,8 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                 let mut table = None;
                 let mut column = None;
                 let mut scope = None;
+                let mut on_delete = None;
+                let mut on_update = None;
                 meta.parse_nested_meta(|option| {
                     if option.path.is_ident("table") {
                         let value: LitStr = option.value()?.parse()?;
@@ -1177,9 +1227,22 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                         if scope.replace(value.value()).is_some() {
                             return Err(option.error("duplicate `scope`"));
                         }
+                    } else if option.path.is_ident("on_delete") {
+                        let value: Ident = option.value()?.parse()?;
+                        let action = parse_foreign_key_action(&value)?;
+                        if on_delete.replace(action).is_some() {
+                            return Err(option.error("duplicate `on_delete`"));
+                        }
+                    } else if option.path.is_ident("on_update") {
+                        let value: Ident = option.value()?.parse()?;
+                        let action = parse_foreign_key_action(&value)?;
+                        if on_update.replace(action).is_some() {
+                            return Err(option.error("duplicate `on_update`"));
+                        }
                     } else {
                         return Err(option.error(
-                            "unknown `foreign_key` option; expected `table`, `column` or `scope`",
+                            "unknown `foreign_key` option; expected `table`, `column`, `scope`, \
+                             `on_delete` or `on_update`",
                         ));
                     }
 
@@ -1196,6 +1259,8 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                     table,
                     column,
                     scope,
+                    on_delete: on_delete.unwrap_or(ForeignKeyAction::NoAction),
+                    on_update: on_update.unwrap_or(ForeignKeyAction::NoAction),
                 });
             } else if meta.path.is_ident("pg_trigger") {
                 annotations.triggers.push(parse_trigger(meta)?);
@@ -1511,6 +1576,114 @@ fn resolve_triggers(
     }
 
     field_refs
+}
+
+fn parse_foreign_key_action(value: &Ident) -> syn::Result<ForeignKeyAction> {
+    match value.to_string().as_str() {
+        "no_action" => Ok(ForeignKeyAction::NoAction),
+        "restrict" => Ok(ForeignKeyAction::Restrict),
+        "cascade" => Ok(ForeignKeyAction::Cascade),
+        "set_null" => Ok(ForeignKeyAction::SetNull),
+        "set_default" => Ok(ForeignKeyAction::SetDefault),
+        _ => Err(syn::Error::new(
+            value.span(),
+            "expected `no_action`, `restrict`, `cascade`, `set_null` or `set_default`",
+        )),
+    }
+}
+
+fn parse_index(meta: syn::meta::ParseNestedMeta<'_>) -> syn::Result<IndexInput> {
+    let span = meta.path.span();
+    let mut name = None;
+    let mut columns = None;
+
+    meta.parse_nested_meta(|option| {
+        if option.path.is_ident("columns") {
+            if columns.is_some() {
+                return Err(option.error("duplicate `columns`"));
+            }
+            columns = Some(parse_key_list(option.value()?)?);
+        } else if option.path.is_ident("name") {
+            let value: LitStr = option.value()?.parse()?;
+            let value = value.value();
+            if value.is_empty() {
+                return Err(option.error("`name` must not be empty"));
+            }
+            if name.replace(value).is_some() {
+                return Err(option.error("duplicate `name`"));
+            }
+        } else {
+            return Err(option.error("unknown `index` option; expected `columns` or `name`"));
+        }
+
+        Ok(())
+    })?;
+
+    let Some(columns) = columns else {
+        return Err(meta.error("`index` requires `columns = [...]`"));
+    };
+
+    Ok(IndexInput {
+        name,
+        columns,
+        span,
+    })
+}
+
+fn resolve_indexes(
+    inputs: Vec<IndexInput>,
+    model_table: &str,
+    columns: &[Column],
+    errors: &mut Vec<syn::Error>,
+) -> Vec<IndexAnnotation> {
+    let mut indexes: Vec<IndexAnnotation> = Vec::new();
+
+    for input in inputs {
+        let IndexInput {
+            name,
+            columns: index_columns,
+            span,
+        } = input;
+        let mut seen = Vec::new();
+        for column in &index_columns {
+            if !is_scalar_column(columns, column) {
+                errors.push(syn::Error::new(
+                    span,
+                    format!("`index` column `{column}` is not a scalar column"),
+                ));
+            }
+            if seen.contains(column) {
+                errors.push(syn::Error::new(
+                    span,
+                    format!("`index` repeats column `{column}`"),
+                ));
+            }
+            seen.push(column.clone());
+        }
+
+        let name = name.unwrap_or_else(|| {
+            let mut name = model_table.to_owned();
+            for column in &index_columns {
+                name.push('_');
+                name.push_str(column);
+            }
+            name.push_str("_idx");
+            name
+        });
+        if indexes
+            .iter()
+            .any(|existing| existing.name == name || existing.columns == index_columns)
+        {
+            errors.push(syn::Error::new(span, "duplicate `index`"));
+        }
+
+        indexes.push(IndexAnnotation {
+            name,
+            columns: index_columns,
+        });
+    }
+
+    indexes
 }
 
 fn check_field_type(role: Role, field: &Field, errors: &mut Vec<syn::Error>) {
@@ -3113,6 +3286,104 @@ mod tests {
 
         assert!(
             message.contains("`truncate` requires `level = statement`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn reads_indexes_with_default_names() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            #[db(index(columns = [name]))]
+            #[db(index(columns = [tenant_id, name], name = "widget_tenant_name_idx"))]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pgtype = "uuid")]
+                tenant_id: Uuid,
+                #[db(pgtype = "text")]
+                name: String,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.indexes,
+            [
+                IndexAnnotation {
+                    name: "widget_name_idx".to_owned(),
+                    columns: vec!["name".to_owned()],
+                },
+                IndexAnnotation {
+                    name: "widget_tenant_name_idx".to_owned(),
+                    columns: vec!["tenant_id".to_owned(), "name".to_owned()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_an_index_on_a_missing_column() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            #[db(index(columns = [missing]))]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`index` column `missing` is not a scalar column"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn reads_foreign_key_actions() {
+        let model = parse_model(
+            r#"
+            #[db(table = "child")]
+            struct Child {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(foreign_key(
+                    table = "parent",
+                    column = "id",
+                    on_delete = cascade,
+                    on_update = set_null
+                ))]
+                parent_id: Uuid,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(model.foreign_keys.len(), 1);
+        assert_eq!(model.foreign_keys[0].on_delete, ForeignKeyAction::Cascade);
+        assert_eq!(model.foreign_keys[0].on_update, ForeignKeyAction::SetNull);
+    }
+
+    #[test]
+    fn rejects_an_unknown_foreign_key_action() {
+        let message = error(
+            r#"
+            #[db(table = "child")]
+            struct Child {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(foreign_key(table = "parent", column = "id", on_delete = explode))]
+                parent_id: Uuid,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("expected `no_action`, `restrict`, `cascade`"),
             "{message}"
         );
     }

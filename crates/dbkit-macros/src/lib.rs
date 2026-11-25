@@ -225,12 +225,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         .iter()
                         .map(String::as_str)
                         .collect();
+                    let on_delete = foreign_key_action(foreign_key.on_delete);
+                    let on_update = foreign_key_action(foreign_key.on_update);
 
                     quote! {
                         ::dbkit::ForeignKey {
                             columns: &[#(#columns),*],
                             table: #table,
                             referenced_columns: &[#(#referenced_columns),*],
+                            on_delete: #on_delete,
+                            on_update: #on_update,
                         }
                     }
                 })
@@ -243,6 +247,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     let columns: Vec<&str> = columns.iter().map(String::as_str).collect();
                     quote! {
                         ::dbkit::UniqueKey {
+                            columns: &[#(#columns),*],
+                        }
+                    }
+                })
+                .collect();
+
+            let indexes: Vec<TokenStream2> = annotations
+                .indexes
+                .iter()
+                .map(|index| {
+                    let name = &index.name;
+                    let columns: Vec<&str> = index.columns.iter().map(String::as_str).collect();
+                    quote! {
+                        ::dbkit::Index {
+                            name: #name,
                             columns: &[#(#columns),*],
                         }
                     }
@@ -335,6 +354,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         vec![#(#foreign_keys),*];
                     let unique_keys: ::std::vec::Vec<::dbkit::UniqueKey> =
                         vec![#(#unique_keys),*];
+                    let indexes: ::std::vec::Vec<::dbkit::Index> = vec![#(#indexes),*];
                     let triggers: ::std::vec::Vec<::dbkit::TriggerRef> = vec![#(#triggers),*];
                     let trigger_definitions: ::std::vec::Vec<::dbkit::Trigger> =
                         vec![#(#trigger_definitions),*];
@@ -350,6 +370,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         relations: ::std::boxed::Box::leak(relations.into_boxed_slice()),
                         foreign_keys: ::std::boxed::Box::leak(foreign_keys.into_boxed_slice()),
                         unique_keys: ::std::boxed::Box::leak(unique_keys.into_boxed_slice()),
+                        indexes: ::std::boxed::Box::leak(indexes.into_boxed_slice()),
                         triggers: ::std::boxed::Box::leak(triggers.into_boxed_slice()),
                         trigger_definitions:
                             ::std::boxed::Box::leak(trigger_definitions.into_boxed_slice()),
@@ -392,6 +413,18 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         #tenant_owned
     })
+}
+
+fn foreign_key_action(action: annotations::ForeignKeyAction) -> TokenStream2 {
+    match action {
+        annotations::ForeignKeyAction::NoAction => quote!(::dbkit::ForeignKeyAction::NoAction),
+        annotations::ForeignKeyAction::Restrict => quote!(::dbkit::ForeignKeyAction::Restrict),
+        annotations::ForeignKeyAction::Cascade => quote!(::dbkit::ForeignKeyAction::Cascade),
+        annotations::ForeignKeyAction::SetNull => quote!(::dbkit::ForeignKeyAction::SetNull),
+        annotations::ForeignKeyAction::SetDefault => {
+            quote!(::dbkit::ForeignKeyAction::SetDefault)
+        }
+    }
 }
 
 fn optional<T: ToString>(name: Option<T>) -> Expr {

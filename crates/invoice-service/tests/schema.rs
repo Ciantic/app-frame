@@ -1,6 +1,15 @@
 use invoice_service::db::schema::SCHEMA;
 use pgtest_server::PgtestServer;
 
+#[test]
+fn schema_sql_is_generated() {
+    assert_eq!(
+        SCHEMA.generate().unwrap(),
+        SCHEMA.sql,
+        "regenerate with `cargo run -p invoice-service --bin invoice-schema`"
+    );
+}
+
 #[tokio::test]
 async fn models_and_schema_share_columns() {
     let db = PgtestServer::start().await.database().await;
