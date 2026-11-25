@@ -4,6 +4,9 @@ How `httpkit` and `httpkit-macros` generate axum routes for the dbkit query,
 insert, patch and delete builders. Implemented in `crates/httpkit`,
 `crates/httpkit-macros` and the dbkit tenant support.
 
+See [next steps](httpkit/next-steps.md) for the remaining work before exposing
+routes.
+
 ## Scope
 
 - One read endpoint per entity: a query endpoint that uses `dbkit::Query`.
