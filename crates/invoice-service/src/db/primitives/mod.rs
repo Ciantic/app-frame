@@ -6,6 +6,5 @@ pub mod email_address;
 pub mod language;
 pub mod money;
 pub mod quantity;
-pub mod seller_id;
 pub mod tax_rate;
 pub mod unit;

@@ -57,17 +57,36 @@ create table "invoice_row" (
     constraint "invoice_row_pkey" primary key ("id")
 );
 
+create table "seller" (
+    "id" uuid not null default uuidv7(),
+    "tenant_id" uuid not null,
+    "name" text not null,
+    "business_id" text not null,
+    "e_invoice_address" text,
+    "e_invoice_operator" text,
+    "language" text,
+    "created_at" timestamptz not null default now(),
+    "updated_at" timestamptz not null default now(),
+    "version" bigint not null default 0,
+    constraint "seller_pkey" primary key ("id"),
+    constraint "seller_tenant_id_id_key" unique ("tenant_id", "id")
+);
+
 alter table "customer" add constraint "customer_tenant_id_fkey" foreign key ("tenant_id") references "tenant" ("id");
 
 alter table "invoice" add constraint "invoice_tenant_id_fkey" foreign key ("tenant_id") references "tenant" ("id");
 
 alter table "invoice" add constraint "invoice_tenant_id_customer_id_fkey" foreign key ("tenant_id", "customer_id") references "customer" ("tenant_id", "id");
 
+alter table "invoice" add constraint "invoice_tenant_id_seller_id_fkey" foreign key ("tenant_id", "seller_id") references "seller" ("tenant_id", "id");
+
 create index "invoice_customer_id_idx" on "invoice" ("customer_id");
 
 alter table "invoice_row" add constraint "invoice_row_tenant_id_invoice_id_fkey" foreign key ("tenant_id", "invoice_id") references "invoice" ("tenant_id", "id") on delete cascade;
 
 create index "invoice_row_invoice_id_idx" on "invoice_row" ("invoice_id");
+
+alter table "seller" add constraint "seller_tenant_id_fkey" foreign key ("tenant_id") references "tenant" ("id");
 
 create function "invoice_row_amounts"() returns trigger language "plpgsql" as $$
 begin

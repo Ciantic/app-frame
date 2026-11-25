@@ -1,10 +1,10 @@
 use super::customer::Customer;
 use super::invoice_row::InvoiceRow;
+use super::seller::SellerId;
 use crate::db::primitives::customer_id::CustomerId;
 use crate::db::primitives::date::Date;
 use crate::db::primitives::language::Language;
 use crate::db::primitives::money::Money;
-use crate::db::primitives::seller_id::SellerId;
 use chrono::DateTime;
 use chrono::Utc;
 use dbkit::DbDelete;
@@ -83,6 +83,7 @@ pub struct Invoice {
     pub customer: Option<Customer>,
 
     #[db(query_ops(eq, any))]
+    #[db(foreign_key(table = "seller", column = "id", scope = "tenant_id"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seller_id: Option<SellerId>,
 

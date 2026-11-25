@@ -4,12 +4,12 @@ Demonstration of invoices in the app frame; not a production billing system.
 
 ## Scope
 
-- Store customers and invoice headers and their line items in the tenant-owned
-  `customer`, `invoice` and `invoice_row` tables.
+- Store customers, sellers, invoice headers and their line items in the
+  tenant-owned `customer`, `seller`, `invoice` and `invoice_row` tables.
 - Compute row amounts before every write and invoice totals after every row
   change with PostgreSQL triggers.
-- Provide `Customer`, `Invoice` and `InvoiceRow` models with dbkit query,
-  insert, patch, delete and select derives.
+- Provide `Customer`, `Seller`, `Invoice` and `InvoiceRow` models with dbkit
+  query, insert, patch, delete and select derives.
 - Describe the customer and row relations and the schema constraints with
   dbkit annotations; dbkit records the joins but does not load them.
 - Expose the schema as `invoice_service::db::schema::SCHEMA`.
@@ -21,13 +21,13 @@ Demonstration of invoices in the app frame; not a production billing system.
   amounts.
 - [models](./src/db/models) — the model structs and their id newtypes.
 - [primitives](./src/db/primitives) — `Money`, `Quantity`, `TaxRate`, `Date`,
-  `EmailAddress`, `Unit`, `Language`, the e-invoice fields and the external
-  seller id.
+  `EmailAddress`, `Unit`, `Language` and the e-invoice fields.
 
 `tenant_id` uses `TenantId` from `user-service`. Invoices reference customers
-on `(tenant_id, customer_id)`, and rows reference invoices on `(tenant_id,
-invoice_id)`, so a reference cannot cross a tenant. Sellers and tenants are
-owned by other services, so their ids have no local foreign keys.
+on `(tenant_id, customer_id)`, sellers on `(tenant_id, seller_id)`, and rows
+reference invoices on `(tenant_id, invoice_id)`, so a reference cannot cross a
+tenant. Tenants are owned by another service, so their ids have no local
+foreign keys.
 
 ## Computed amounts
 

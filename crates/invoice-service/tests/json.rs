@@ -5,6 +5,8 @@ use invoice_service::db::models::invoice::Invoice;
 use invoice_service::db::models::invoice::InvoiceId;
 use invoice_service::db::models::invoice_row::InvoiceRow;
 use invoice_service::db::models::invoice_row::InvoiceRowId;
+use invoice_service::db::models::seller::Seller;
+use invoice_service::db::models::seller::SellerId;
 use invoice_service::db::primitives::customer_id::CustomerId;
 use invoice_service::db::primitives::date::Date;
 use invoice_service::db::primitives::e_invoice_address::EInvoiceAddress;
@@ -89,6 +91,28 @@ fn invoice_row() -> InvoiceRow {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         version: 0,
+    }
+}
+
+#[test]
+fn seller_null_optionals_are_omitted() {
+    let seller = Seller {
+        id: SellerId(Uuid::from_u128(6)),
+        tenant_id: tenant(),
+        name: "Acme Oy".to_owned(),
+        business_id: "FI1234567".to_owned(),
+        e_invoice_address: None,
+        e_invoice_operator: None,
+        language: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        version: 0,
+    };
+
+    let value = serde_json::to_value(seller).unwrap();
+
+    for field in ["e_invoice_address", "e_invoice_operator", "language"] {
+        assert!(value.get(field).is_none(), "{field}: {value}");
     }
 }
 

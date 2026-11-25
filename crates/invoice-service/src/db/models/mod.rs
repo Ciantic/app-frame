@@ -1,6 +1,7 @@
 pub mod customer;
 pub mod invoice;
 pub mod invoice_row;
+pub mod seller;
 
 use dbkit::Model;
 use dbkit::TableMeta;
@@ -11,5 +12,6 @@ pub static MODELS: LazyLock<Vec<TableMeta>> = LazyLock::new(|| {
         customer::Customer::meta().into_table(),
         invoice::Invoice::meta().into_table(),
         invoice_row::InvoiceRow::meta().into_table(),
+        seller::Seller::meta().into_table(),
     ]
 });
