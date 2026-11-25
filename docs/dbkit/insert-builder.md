@@ -77,6 +77,8 @@ pub struct UserPKV {
   `NULL`.
 - A defaulted column is optional even when it is not nullable: omitting it lets
   the database fill it in.
+- A `pg_virtual` column is omitted; PostgreSQL computes it. A `relation` field
+  is not a column and is omitted.
 - A composite key is classified one column at a time. A defaulted key column is
   optional; one without a default is required.
 - `DbModel` also generates `{Model}PK`, holding exactly the primary key fields,

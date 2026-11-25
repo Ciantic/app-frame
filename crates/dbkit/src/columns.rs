@@ -34,6 +34,9 @@ pub trait Column: Copy + Ord + Hash + std::fmt::Debug + Send + Sync + 'static {
     /// Whether the column is nullable.
     fn nullable(self) -> bool;
 
+    /// The generated-column expression, or `None` when the column is ordinary.
+    fn generated(self) -> Option<&'static str>;
+
     /// The comparisons the column may be queried with, in declaration order.
     fn query_ops(self) -> &'static [FilterOperator];
 }
@@ -57,6 +60,10 @@ impl<C: Column> ErasedColumn for C {
 
     fn nullable(&self) -> bool {
         Column::nullable(*self)
+    }
+
+    fn generated(&self) -> Option<&'static str> {
+        Column::generated(*self)
     }
 
     fn query_ops(&self) -> &'static [FilterOperator] {

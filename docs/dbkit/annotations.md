@@ -4,9 +4,11 @@ Annotations understood by `#[derive(DbModel)]` from the `dbkit-macros` crate.
 They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, which ones are audit
 columns, which columns the database fills in from a default, which comparisons
-each column may be queried with, and whether it may be sorted. Every field carries a `pgtype`
-unless it is flattened or its type declares one with `#[derive(DbType)]`, and
-a table row needs a primary key; the other annotations are opt-in.
+each column may be queried with, and whether it may be sorted. They also
+describe related non-column fields, foreign keys, unique keys, trigger names
+and generated columns. Every field carries a `pgtype` unless it is flattened,
+is a relation, or its type declares one with `#[derive(DbType)]`, and a table
+row needs a primary key; the other annotations are opt-in.
 
 A struct is one of three shapes:
 
@@ -73,7 +75,8 @@ pub struct Email {
 ```
 
 Fields without a role are ordinary business columns. They are the fields a
-generated patch would expose; role-annotated fields never are.
+generated patch would expose unless they are `pg_virtual` or a relation;
+role-annotated fields never are.
 
 ## Where annotations may appear
 
@@ -81,8 +84,11 @@ generated patch would expose; role-annotated fields never are.
   the struct, exactly once. They are mutually exclusive; `table` makes the
   struct a table row, `subquery` makes its rows the output of a query, and
   `fragment` makes it a column group.
-- `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`, unless
-  the field type implements `dbkit::DbType`, exactly once.
+- `#[db(pg_trigger = "...")]` on a table row, repeatable; `#[db(unique)]` on a
+  field and `#[db(unique(columns = [...]))]` on a table row.
+- `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`,
+  `#[db(relation)]`, unless the field type implements `dbkit::DbType`, exactly
+  once.
 - `#[db(pgdefault = "...")]` on a field, at most once.
 - `#[db(pgtype = "...")]` and `#[db(pgdefault = "...")]` on the struct of a
   value type that derives `DbType`, instead of on a field.
@@ -91,6 +97,8 @@ generated patch would expose; role-annotated fields never are.
 - `#[db(query_ops(...))]` on a field, at most once; the parentheses hold a
   comma-separated operator list.
 - `#[db(orderable)]` on a field, at most once.
+- `#[db(pg_virtual = "...")]`, `#[db(unique)]`, `#[db(foreign_key(...))]` or
+  `#[db(relation(...))]` on a field, at most once each.
 - `#[db(flatten)]` on a field of a table row or a subquery row, at most once.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
   collected across all of them.
@@ -106,9 +114,12 @@ not use that form:
 
 - One annotation per line, each in its own `#[db(...)]` attribute.
 - Role first, then `pgtype`, then `pgdefault`, then `query_ops`, then
-  `orderable`: `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
+  `orderable`, then `pg_virtual`, `unique`, `foreign_key` or `relation`:
+  `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
   `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, any))]` above
   `#[db(orderable)]`.
+- Struct-level `pg_trigger` and `unique(columns = [...])` follow the shape
+  annotation.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
 - A `#[db(flatten)]` field carries that annotation alone.
 - On a `DbType` struct, `#[db(pgtype = "...")]` sits above
@@ -495,6 +506,144 @@ Marks the tenant ownership column.
 - Generated insert, patch and key types implement `dbkit::TenantRow`, which the
   HTTP layer uses to choose tenant or global permission per entry.
 
+## `pg_trigger`
+
+Declares that a table has a trigger. The annotation is a name marker: the
+trigger function and its body stay in `schema.sql`, and the schema test checks
+that the name exists.
+
+```rust
+#[db(table = "invoice")]
+#[db(pg_trigger = "invoice_totals")]
+pub struct Invoice { /* ... */ }
+```
+
+- Legal on: a table row, repeatable. Not legal on a fragment or a subquery.
+- Value: a non-empty string literal. Repeating a name on one table is an error.
+- The schema test compares declared names with the table's non-internal
+  triggers. Internal constraint triggers and foreign-key enforcement triggers
+  are ignored.
+- Timing, events, function and body are not part of the annotation; only the
+  name is compared.
+- A trigger does not make a field read-only. A column maintained by a trigger
+  is still a normal model field.
+
+## `foreign_key`
+
+Declares a foreign key for metadata and the schema test; the constraint itself
+stays in `schema.sql`.
+
+```rust
+#[db(foreign_key(table = "customer", column = "id"))]
+pub customer_id: Option<CustomerId>,
+
+#[db(foreign_key(table = "customer", column = "id", scope = "tenant_id"))]
+pub customer_id: Option<CustomerId>,
+```
+
+- Legal on: a scalar field of a table row, at most once. Not legal on
+  `#[db(flatten)]`, a fragment or a subquery.
+- `table` and `column` are required, non-empty string literals.
+- `scope` is optional and names another scalar column of the same table. The
+  annotated field must not be the scope column.
+- Without `scope`, the local column `(field)` references `table(column)`.
+- With `scope`, the local columns `(scope, field)` reference
+  `table(scope, column)`. The target scope column has the same name as the
+  local one.
+- The macro checks `scope` against the model's scalar columns. It cannot check
+  the target type; PostgreSQL enforces that.
+- The schema test compares the declared columns and target with `pg_constraint`
+  in both directions. `on delete` and `on update` actions are not checked.
+
+## `pg_virtual`
+
+Declares a PostgreSQL generated column and marks the field read-only.
+
+```rust
+#[db(pg_virtual = "\"net_amount\" + \"tax_amount\"")]
+pub total_amount: Money,
+```
+
+- Legal on: a scalar field of a table row, at most once. Not legal on
+  `#[db(flatten)]`, a fragment or a subquery.
+- The value is a non-empty generated-column expression written with the DDL's
+  quoted identifiers.
+- It cannot combine with a role or with `pgdefault`. A generated primary key or
+  version is a different feature.
+- `#[derive(DbInsert)]` and `#[derive(DbPatch)]` omit the field; it has no
+  setter and no insert field. Reads, filters and projections keep the column.
+- The schema test requires the live column to be generated and compares the
+  normalized expression. The probe creates a `VIRTUAL` generated column.
+
+## `unique`
+
+Declares a unique constraint or unique index for metadata and the schema test.
+
+```rust
+#[db(unique)]
+pub number: Option<String>,
+
+#[db(table = "invoice")]
+#[db(unique(columns = [tenant_id, id]))]
+pub struct Invoice { /* ... */ }
+```
+
+- The field form is legal on a scalar field of a table row, at most once. The
+  field must not be a primary key, flattened, a fragment or a subquery.
+- The struct form is legal on a table row, repeatable. `columns` is a non-empty
+  bracketed list of scalar columns. Repeating a column, repeating a key, or
+  using exactly the primary key is an error; a scoped key may include a primary
+  key column beside the scope column.
+- A nullable unique column keeps PostgreSQL's rule that multiple `NULL`s are
+  allowed.
+- `unique` does not change query, insert or patch inputs.
+- The schema test compares `pg_index` unique, non-primary indexes in both
+  directions, ignoring partial and expression indexes.
+
+## `relation`
+
+Declares a non-column field that carries another model. The field is skipped by
+`FromRow`, the column enum, projections, inserts and patches; it is serialized
+when set.
+
+```rust
+#[db(relation(
+    one,
+    table = "customer",
+    local_key = [tenant_id, customer_id],
+    target_key = [tenant_id, id]
+))]
+#[sqlx(skip)]
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub customer: Option<Customer>,
+
+#[db(relation(
+    many,
+    table = "invoice_row",
+    local_key = [tenant_id, id],
+    target_key = [tenant_id, invoice_id]
+))]
+#[sqlx(skip)]
+#[serde(default, skip_serializing_if = "Vec::is_empty")]
+pub rows: Vec<InvoiceRow>,
+```
+
+- Legal on: a table row, at most once. Not legal on a fragment or a subquery.
+- Cardinality is explicit: `one` pairs with `Option<T>`, `many` with `Vec<T>`.
+  A required `T` is not supported.
+- `table` is a required non-empty string literal. `local_key` and `target_key`
+  are one or more column names; a single name is a bare identifier, a composite
+  key is a bracketed list. Both lists must have the same length.
+- Every `local_key` must name a scalar column of this model. The macro cannot
+  check `target_key` against the related table.
+- A relation is not necessarily a foreign key; it may join on any columns.
+  `foreign_key` describes the constraint, `relation` describes the loaded field.
+- dbkit does not load relations. A higher layer fills the field after the row
+  query.
+- The annotation must not combine with `pgtype`, `pgdefault`, `query_ops`,
+  `orderable`, a role, `flatten`, `unique`, `foreign_key` or `pg_virtual`.
+- There is no schema-test counterpart; a relation is not a DDL object.
+
 ## Legality rules enforced by the derive
 
 Every rule below produces a compile error.
@@ -510,11 +659,24 @@ Every rule below produces a compile error.
 - A table row must declare `primary_key` at least once; a subquery and a
   fragment must not carry it or any other role.
 - `DbPatch` and `DbInsert` cannot be derived for a subquery row.
-- Every field that is not `#[db(flatten)]` must carry `#[db(pgtype = "...")]`
-  or have a type that implements `dbkit::DbType`.
+- Every field that is not `#[db(flatten)]` or `#[db(relation)]` must carry
+  `#[db(pgtype = "...")]` or have a type that implements `dbkit::DbType`.
 - `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`,
-  `orderable` or a role, and its field must not be `Option`.
+  `orderable`, `pg_virtual`, `unique`, `foreign_key`, `relation` or a role,
+  and its field must not be `Option`.
 - A fragment cannot `#[db(flatten)]` another struct.
+- `#[db(relation)]` is legal only on a table row; its field must be `Option<T>`
+  for `one` or `Vec<T>` for `many`, and it cannot combine with a column
+  annotation or a role.
+- `#[db(pg_trigger)]` is legal only on a table row; names must be non-empty and
+  unique on the table.
+- `#[db(foreign_key)]` is legal only on a scalar field of a table row; `table`
+  and `column` are required, and `scope` must name another scalar column.
+- `#[db(pg_virtual)]` is legal only on a scalar field of a table row and cannot
+  combine with a role or `pgdefault`.
+- A field-level `#[db(unique)]` is legal only on a scalar, non-primary-key field
+  of a table row. The struct form needs a non-empty `columns` list of scalar
+  columns, without repeats, and a key that is not exactly the primary key.
 - `version`, `created_at`, `updated_at` and `tenant` may each appear at most
   once.
 - A single field may carry at most one role, even if the roles are split across
@@ -538,9 +700,10 @@ Every rule below produces a compile error.
   every operator must be in the accepted list; repeating an operator is an
   error.
 - `orderable` appears at most once per field and takes no value.
-- The `DbModel` struct attribute accepts only `table`, `subquery` and
-  `fragment`; the field-level attribute accepts only `pgtype`, `pgdefault`,
-  `query_ops`, `orderable`, `flatten` and the four roles. The `DbType` struct
+- The `DbModel` struct attribute accepts `table`, `subquery`, `fragment`,
+  `pg_trigger` and `unique`; the field-level attribute accepts `pgtype`,
+  `pgdefault`, `query_ops`, `orderable`, `pg_virtual`, `unique`,
+  `foreign_key`, `relation`, `flatten` and the five roles. The `DbType` struct
   attribute accepts only `pgtype` and `pgdefault`.
 - A `DbType` struct must not annotate its fields, and it must carry `pgtype`.
 
@@ -557,12 +720,15 @@ spellings behave the same:
 - Type aliases are not resolved. `type Timestamp = DateTime<Utc>;` on an audit
   column fails the `DateTime` check even though it is the same type.
 
-Annotations do not affect `sqlx::FromRow`, serde or the database mapping. A
-model still decodes every returned column, and the annotations only describe
-the role a field plays for the generated code. In particular, `#[db(flatten)]`
+Annotations mostly do not affect `sqlx::FromRow`, serde or the database
+mapping. A model still decodes every returned column, and the annotations
+describe the role a field plays for the generated code. `#[db(flatten)]`
 splices columns into dbkit's metadata only: a `FromRow` model whose struct
 should decode flat columns needs `#[sqlx(flatten)]` on the same field, and its
-JSON stays nested unless the field also carries `#[serde(flatten)]`.
+JSON stays nested unless the field also carries `#[serde(flatten)]`. A
+`#[db(relation)]` field is not a column, so it needs `#[sqlx(skip)]`. A
+`#[db(pg_virtual)]` field is still decoded, but it is omitted from insert and
+patch inputs.
 
 ## Error messages
 
@@ -571,7 +737,7 @@ For reference when reading a compile failure:
 - `` `DbModel` can only be derived for structs ``
 - `` `DbModel` requires named fields ``
 - `` missing `#[db(table = "...")]`, `#[db(subquery = "...")]` or `#[db(fragment)]` ``
-- ``unknown attribute; the struct accepts `table`, `subquery` or `fragment` ``
+- ``unknown attribute; the struct accepts `table`, `subquery`, `fragment`, `pg_trigger` or `unique` ``
 - `` `table` must not be empty ``
 - `` `subquery` must not be empty ``
 - `` `subquery` must not end with a semicolon; the query is wrapped in parentheses ``
@@ -582,13 +748,16 @@ For reference when reading a compile failure:
 - `` `DbModel` on a table or a subquery cannot have generic parameters; ... ``
 - `` a subquery cannot carry `#[db(...)]` roles ``
 - `` `DbPatch` cannot be derived for a `#[db(subquery = "...")]` struct; a subquery is read-only ``
-- ``unknown attribute; expected `primary_key`, `version`, `created_at`, `updated_at`, `flatten`, `pgtype`, `pgdefault`, `query_ops` or `orderable` ``
+- ``unknown attribute; expected `primary_key`, `version`, `created_at`,
+  `updated_at`, `tenant`, `flatten`, `pgtype`, `pgdefault`, `query_ops`,
+  `orderable`, `pg_virtual`, `unique`, `foreign_key` or `relation` ``
 - ``duplicate `orderable` ``
 - `` `#[db(flatten)]` cannot be combined with `orderable` ``
 - `` a fragment cannot carry `#[db(...)]` roles ``
 - `` a fragment cannot `#[db(flatten)]` another struct ``
 - `` `#[db(flatten)]` cannot be combined with `pgtype` `` (and the same for
-  `pgdefault`, `query_ops`, `orderable` and a role)
+  `pgdefault`, `query_ops`, `orderable`, `pg_virtual`, `unique`, `foreign_key`,
+  `relation` and a role)
 - `` `#[db(flatten)]` field must not be `Option` ``
 - `` `pgtype` must not be empty ``
 - ``duplicate `pgtype` ``
@@ -609,13 +778,30 @@ For reference when reading a compile failure:
 - `` `#[db(tenant)]` field must not have a default ``
 - ``unknown query operator; expected `eq`, `neq`, ...``
 - ``duplicate query operator``
+- `` `#[db(pg_trigger)]` is only legal on a table row ``
+- `` `#[db(pg_trigger)]` must not be empty ``
+- ``duplicate `pg_trigger` name ``
+- `` `#[db(pg_virtual)]` is only legal on a table row ``
+- `` `#[db(pg_virtual)]` cannot be combined with a role ``
+- `` `#[db(pg_virtual)]` cannot be combined with `pgdefault` ``
+- `` `#[db(foreign_key)]` is only legal on a table row ``
+- `` `foreign_key` requires `table = "..."` `` (and the same for `column`)
+- `` `scope` `name` is not a scalar column ``
+- `` `#[db(relation)]` is only legal on a table row ``
+- `` `#[db(relation)]` field must be `Option<T>` or `Vec<T>` ``
+- `` `local_key` `name` is not a scalar column ``
+- `` `local_key` and `target_key` must have the same length ``
+- `` `#[db(unique)]` is only legal on a table row ``
+- `` `#[db(unique)]` is redundant on a primary-key field ``
+- `` `unique` column `name` is not a scalar column ``
+- `` a `unique` key cannot repeat the primary key ``
 
 All problems found in one struct are reported together, so a single compile
 fixes the whole annotation block.
 
-A field with neither `pgtype` nor a type that implements `DbType` is not caught
-by the derive, because it cannot resolve types; rustc reports the unsatisfied
-`dbkit::DbType` bound on the field type instead.
+A non-relation field with neither `pgtype` nor a type that implements `DbType`
+is not caught by the derive, because it cannot resolve types; rustc reports the
+unsatisfied `dbkit::DbType` bound on the field type instead.
 
 One check is not a compile error. `#[db(flatten)]` on a table or a subquery
 type compiles, because all shapes are `dbkit::Model`; the generated `meta()`
@@ -637,13 +823,21 @@ matches `Meta` and panics on the other variants:
   `dbkit::TenantOwned` with `TENANT_COLUMN`.
 - `columns` — every column in declaration order as
   `&'static dyn dbkit::ErasedColumn`, whose `name()`, `nullable()`,
-  `pg_type()`, `pg_default()` and `query_ops()` answer like the generated
-  `<Model>Column` variants. `nullable` is true exactly when the field type is
-  `Option<_>`, `pg_type` is the field's `pgtype` annotation or its `DbType`
-  type's `PG_TYPE`, `pg_default` is its `pgdefault` annotation, its `DbType`
-  type's `PG_DEFAULT`, or `None`, `query_ops` is the `query_ops` list in
-  declaration order or an empty slice, and `orderable` says whether the column
-  declared `#[db(orderable)]`.
+  `pg_type()`, `pg_default()`, `generated()` and `query_ops()` answer like the
+  generated `<Model>Column` variants. `nullable` is true exactly when the field
+  type is `Option<_>`, `pg_type` is the field's `pgtype` annotation or its
+  `DbType` type's `PG_TYPE`, `pg_default` is its `pgdefault` annotation, its
+  `DbType` type's `PG_DEFAULT`, or `None`, `generated` is the `pg_virtual`
+  expression or `None`, `query_ops` is the `query_ops` list in declaration order
+  or an empty slice, and `orderable` says whether the column declared
+  `#[db(orderable)]`.
+- `relations` — every `#[db(relation)]` field in declaration order, with its
+  field name, model name, target table, cardinality, local key and target key.
+- `foreign_keys` — every `#[db(foreign_key)]` in declaration order, with its
+  local columns, target table and referenced columns.
+- `unique_keys` — every field-level `#[db(unique)]` and struct-level
+  `#[db(unique(columns = [...]))]`, with its column list.
+- `triggers` — every `#[db(pg_trigger = "...")]` name in declaration order.
 
 A `#[db(subquery = "...")]` struct emits
 `Meta::SubQuery(&SubQuery { sql, columns })` instead, where `sql` is the
@@ -769,6 +963,7 @@ pub struct UserPatch {
 - A nullable column's field is `Patch<T>`, not `Patch<Option<T>>`, so `null`
   means "clear" rather than "set to null".
 - `created_at` and `updated_at` are not patchable and are omitted.
+- A `#[db(pg_virtual)]` field is omitted; PostgreSQL computes it.
 - A `#[db(flatten)]` field becomes a `#[serde(flatten)]` field of type
   `<FieldType>Patch`, so the fragment's columns are top-level keys of the same
   patch object. The fragment must therefore derive `DbPatch` too. On a
@@ -900,6 +1095,8 @@ pub struct UserInsert {
   stores `NULL`.
 - A `#[db(tenant)]` field is always required; the derive rejects a default, so
   the insert cannot leave the tenant to the database.
+- A `#[db(pg_virtual)]` field is omitted; PostgreSQL computes it. A
+  `#[db(relation)]` field is not a column and is omitted.
 - `new(...)` takes the required fields in declaration order, plus each
   flattened fragment insert. Every optional field starts `None`.
 - `set_<field>(value)` sets one column. There is no `clear_` method: on insert,
@@ -984,6 +1181,7 @@ impl WidgetColumn {
     pub fn pg_type(self) -> &'static str { /* "uuid", "text", ... */ }
     pub fn pg_default(self) -> Option<&'static str> { /* Some("uuidv7()"), ... */ }
     pub fn nullable(self) -> bool { /* ... */ }
+    pub fn generated(self) -> Option<&'static str> { /* the pg_virtual expression, ... */ }
     pub fn query_ops(self) -> &'static [FilterOperator] { /* ... */ }
     pub fn orderable(self) -> bool { /* ... */ }
 }
@@ -1070,6 +1268,7 @@ inline, so these are plain lookups with no metadata search:
 WidgetColumn::Id.pg_type();                // "uuid", from the field type's DbType
 WidgetColumn::EmailVerifiedAt.nullable();  // true
 WidgetColumn::Id.pg_default();             // Some("uuidv7()")
+WidgetColumn::Total.generated();           // Some("net_amount + tax_amount"), from #[db(pg_virtual)]
 WidgetColumn::Name.query_ops();            // [Eq, Neq, Like], from #[db(query_ops(...))]
 ```
 
@@ -1166,17 +1365,21 @@ assert!(
 
 Each problem is one line naming the table and column, so a failing test says
 what to fix. The check covers names and nullability from
-`information_schema.columns`, tables without a model, types and defaults, and
-a column declared more than once — which is what two `#[db(flatten)]` fragments
-sharing a column name produce.
+`information_schema.columns`, tables without a model, types and defaults,
+generated columns, foreign keys, unique indexes, trigger names, and a column
+declared more than once — which is what two `#[db(flatten)]` fragments sharing a
+column name produce.
 Types are compared structurally: the helper creates a temporary table whose
 columns use the `pgtype` annotations and compares each column's `atttypid` and
 `atttypmod` with the real table's, so length and precision must match and any
-spelling PostgreSQL accepts works. Defaults are compared from the same probe
-table: the helper adds each `pgdefault` as a `DEFAULT` clause and compares the
-normalized expression PostgreSQL reports for it with the real column's default,
-so `now()` and `current_timestamp` are equivalent and a missing or extra
-default is reported.
+spelling PostgreSQL accepts works. Defaults and generated expressions are
+compared from the same probe table: the helper adds each `pgdefault` as a
+`DEFAULT` clause, or each `pg_virtual` as a `GENERATED ALWAYS AS (...) VIRTUAL`
+clause, and compares the normalized expression PostgreSQL reports for it with
+the real column's expression. A missing or extra default, generated kind or
+expression is reported. Foreign keys, unique indexes and trigger names are
+compared in both directions, so a live object without a model declaration is a
+problem too.
 
 The helper takes a single connection, not a pool, because its temporary table is
 session-local:
@@ -1191,9 +1394,6 @@ A model and `schema.sql` drifting apart is a test failure, not a runtime
 surprise.
 
 ## Not yet supported
-
-The annotation gaps found while converting the invoice models, with proposed
-syntax and schema checks, are tracked in [missing annotations](missing-annotations.md).
 
 These are deliberately out of scope until a model needs them:
 
@@ -1216,3 +1416,11 @@ These are deliberately out of scope until a model needs them:
 - Marking a column unselectable: every column becomes a `<Model>Column`
   variant today, so restricting a sensitive column such as a token hash needs a
   new annotation.
+- Loading a `#[db(relation)]`: the annotation records the field and the join,
+  but dbkit does not execute the second query.
+- Trigger timing, events and bodies: `#[db(pg_trigger)]` checks only the name.
+- Foreign-key `on delete` and `on update` actions: only the columns and target
+  are compared.
+- Stored generated columns: `#[db(pg_virtual)]` describes a virtual column.
+- Propagating foreign keys, unique keys, triggers or relations through
+  `#[db(flatten)]` fragments.

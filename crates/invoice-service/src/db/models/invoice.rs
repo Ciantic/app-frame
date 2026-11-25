@@ -1,3 +1,5 @@
+use super::customer::Customer;
+use super::invoice_row::InvoiceRow;
 use crate::db::primitives::customer_id::CustomerId;
 use crate::db::primitives::date::Date;
 use crate::db::primitives::language::Language;
@@ -47,6 +49,8 @@ pub struct InvoiceId(#[garde(skip)] pub Uuid);
     DbSelect,
 )]
 #[db(table = "invoice")]
+#[db(pg_trigger = "invoice_totals")]
+#[db(unique(columns = [tenant_id, id]))]
 pub struct Invoice {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]
@@ -58,12 +62,24 @@ pub struct Invoice {
     pub tenant_id: TenantId,
 
     #[db(pgtype = "text")]
+    #[db(unique)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number: Option<String>,
 
     #[db(query_ops(eq, any))]
+    #[db(foreign_key(table = "customer", column = "id", scope = "tenant_id"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub customer_id: Option<CustomerId>,
+
+    #[db(relation(
+        one,
+        table = "customer",
+        local_key = [tenant_id, customer_id],
+        target_key = [tenant_id, id]
+    ))]
+    #[sqlx(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer: Option<Customer>,
 
     #[db(query_ops(eq, any))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,8 +101,18 @@ pub struct Invoice {
     #[db(pgdefault = inherit)]
     pub tax_amount: Money,
 
-    #[db(pgdefault = inherit)]
+    #[db(pg_virtual = "\"net_amount\" + \"tax_amount\"")]
     pub total_amount: Money,
+
+    #[db(relation(
+        many,
+        table = "invoice_row",
+        local_key = [tenant_id, id],
+        target_key = [tenant_id, invoice_id]
+    ))]
+    #[sqlx(skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<InvoiceRow>,
 
     #[db(pgtype = "text")]
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -43,10 +43,14 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let mut version_parameter = None;
 
     for column in &annotations.columns {
-        let (field_name, ty, nullable) = match column {
+        let (field_name, ty, nullable, generated) = match column {
             Column::Scalar {
-                name, ty, nullable, ..
-            } => (name, ty, *nullable),
+                name,
+                ty,
+                nullable,
+                generated,
+                ..
+            } => (name, ty, *nullable, generated),
             Column::Flattened { name, ty } => {
                 let nested = patch_type(ty);
                 definitions.push(quote! {
@@ -73,6 +77,10 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 continue;
             }
         };
+
+        if generated.is_some() {
+            continue;
+        }
 
         if annotations.created_at.as_ref() == Some(field_name)
             || annotations.updated_at.as_ref() == Some(field_name)

@@ -1,5 +1,6 @@
 //! Parsing and validation of the `#[db(...)]` annotations.
 
+use quote::ToTokens;
 use syn::Attribute;
 use syn::Data;
 use syn::DeriveInput;
@@ -93,8 +94,46 @@ pub struct Annotations {
     pub created_at: Option<Ident>,
     pub updated_at: Option<Ident>,
     pub tenant: Option<Ident>,
-    /// Every field in declaration order.
+    /// Every column in declaration order.
     pub columns: Vec<Column>,
+    /// Related fields in declaration order, declared with `#[db(relation)]`.
+    pub relations: Vec<RelationAnnotation>,
+    /// Foreign keys in declaration order, declared with `#[db(foreign_key)]`.
+    pub foreign_keys: Vec<ResolvedForeignKey>,
+    /// Trigger names in declaration order, declared with `#[db(pg_trigger)]`.
+    pub triggers: Vec<String>,
+    /// Unique keys in declaration order, from `#[db(unique)]`.
+    pub unique_keys: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationCardinality {
+    One,
+    Many,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationAnnotation {
+    pub field: Ident,
+    pub model: String,
+    pub cardinality: RelationCardinality,
+    pub table: String,
+    pub local_key: Vec<String>,
+    pub target_key: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForeignKeyAnnotation {
+    pub table: String,
+    pub column: String,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedForeignKey {
+    pub columns: Vec<String>,
+    pub table: String,
+    pub referenced_columns: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -110,6 +149,8 @@ pub enum Column {
         query_ops: Vec<FilterOperator>,
         /// Whether the column may be ordered by, from `#[db(orderable)]`.
         orderable: bool,
+        /// The generated-column expression from `#[db(pg_virtual = "...")]`.
+        generated: Option<String>,
     },
     /// A `#[db(flatten)]` field, contributing the columns of its type.
     Flattened { name: Ident, ty: Type },
@@ -150,6 +191,10 @@ struct FieldAnnotations {
     pg_default: Option<FieldDefault>,
     query_ops: Vec<FilterOperator>,
     orderable: bool,
+    relation: Option<RelationAnnotation>,
+    foreign_key: Option<ForeignKeyAnnotation>,
+    pg_virtual: Option<String>,
+    unique: bool,
 }
 
 const ROLES: &[(&str, Role)] = &[
@@ -200,9 +245,18 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     };
 
     let mut errors = Vec::new();
-    let shape = shape(&input.attrs, input.span(), &mut errors);
+    let mut triggers = Vec::new();
+    let mut struct_unique_keys = Vec::new();
+    let shape = shape(
+        &input.attrs,
+        input.span(),
+        &mut triggers,
+        &mut struct_unique_keys,
+        &mut errors,
+    );
     let fragment = matches!(shape, Some(Shape::Fragment));
     let subquery = matches!(shape, Some(Shape::SubQuery(_)));
+    let table = matches!(shape, Some(Shape::Table(_)));
 
     if !fragment && !input.generics.params.is_empty() {
         errors.push(syn::Error::new(
@@ -214,9 +268,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
 
     let mut roles = Vec::new();
     let mut columns = Vec::new();
+    let mut relations = Vec::new();
+    let mut foreign_key_fields = Vec::new();
+    let mut field_unique_keys = Vec::new();
     for field in &fields.named {
         let name = field.ident.clone().expect("named field");
-        let annotations = field_annotations(field, &mut errors);
+        let mut annotations = field_annotations(field, &mut errors);
 
         if annotations.flatten {
             if fragment {
@@ -255,6 +312,30 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                     "`#[db(flatten)]` cannot be combined with `orderable`",
                 ));
             }
+            if annotations.relation.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `relation`",
+                ));
+            }
+            if annotations.foreign_key.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `foreign_key`",
+                ));
+            }
+            if annotations.pg_virtual.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `pg_virtual`",
+                ));
+            }
+            if annotations.unique {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `unique`",
+                ));
+            }
             if is(&field.ty, "Option") {
                 errors.push(syn::Error::new(
                     field.ty.span(),
@@ -265,6 +346,94 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             columns.push(Column::Flattened {
                 name,
                 ty: field.ty.clone(),
+            });
+            continue;
+        }
+
+        if let Some(relation) = annotations.relation.take() {
+            if !table {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` is only legal on a table row",
+                ));
+            }
+            if !annotations.roles.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with a role",
+                ));
+            }
+            if annotations.pg_type.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `pgtype`",
+                ));
+            }
+            if annotations.pg_default.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `pgdefault`",
+                ));
+            }
+            if !annotations.query_ops.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `query_ops`",
+                ));
+            }
+            if annotations.orderable {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `orderable`",
+                ));
+            }
+            if annotations.foreign_key.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `foreign_key`",
+                ));
+            }
+            if annotations.pg_virtual.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `pg_virtual`",
+                ));
+            }
+            if annotations.unique {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `unique`",
+                ));
+            }
+
+            let (inner, many) = match relation_field(&field.ty) {
+                Some(relation_field) => relation_field,
+                None => {
+                    errors.push(syn::Error::new(
+                        field.ty.span(),
+                        "`#[db(relation)]` field must be `Option<T>` or `Vec<T>`",
+                    ));
+                    continue;
+                }
+            };
+            let matches_cardinality = matches!(
+                (relation.cardinality, many),
+                (RelationCardinality::One, false) | (RelationCardinality::Many, true)
+            );
+            if !matches_cardinality {
+                errors.push(syn::Error::new(
+                    field.ty.span(),
+                    "`#[db(relation(one))]` needs `Option<T>` and `relation(many)` needs `Vec<T>`",
+                ));
+            }
+
+            relations.push(RelationAnnotation {
+                field: name,
+                model: type_name(&inner),
+                cardinality: relation.cardinality,
+                table: relation.table,
+                local_key: relation.local_key,
+                target_key: relation.target_key,
             });
             continue;
         }
@@ -298,6 +467,52 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                 "`#[db(tenant)]` field must not have a default",
             ));
         }
+        if fragment || subquery {
+            if annotations.pg_virtual.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(pg_virtual)]` is only legal on a table row",
+                ));
+            }
+            if annotations.foreign_key.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(foreign_key)]` is only legal on a table row",
+                ));
+            }
+            if annotations.unique {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(unique)]` is only legal on a table row",
+                ));
+            }
+        }
+        if annotations.pg_virtual.is_some() {
+            if !field_roles.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(pg_virtual)]` cannot be combined with a role",
+                ));
+            }
+            if annotations.pg_default.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(pg_virtual)]` cannot be combined with `pgdefault`",
+                ));
+            }
+        }
+        if let Some(foreign_key) = annotations.foreign_key.take() {
+            foreign_key_fields.push((name.clone(), foreign_key));
+        }
+        if annotations.unique {
+            if field_roles.contains(&Role::PrimaryKey) {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(unique)]` is redundant on a primary-key field",
+                ));
+            }
+            field_unique_keys.push(vec![plain_name(&name)]);
+        }
 
         for &role in field_roles {
             check_field_type(role, field, &mut errors);
@@ -322,6 +537,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             pg_default,
             query_ops: annotations.query_ops.clone(),
             orderable: annotations.orderable,
+            generated: annotations.pg_virtual.clone(),
         });
     }
 
@@ -344,6 +560,112 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         ));
     }
 
+    let mut foreign_keys = Vec::new();
+    for (field, foreign_key) in foreign_key_fields {
+        let field_name = plain_name(&field);
+        let (columns, referenced_columns) = match foreign_key.scope {
+            Some(scope) => {
+                if scope == field_name {
+                    errors.push(syn::Error::new(
+                        field.span(),
+                        "`scope` must name another scalar column, not the annotated field",
+                    ));
+                }
+                if !is_scalar_column(&columns, &scope) {
+                    errors.push(syn::Error::new(
+                        field.span(),
+                        format!("`scope` `{scope}` is not a scalar column"),
+                    ));
+                }
+                (
+                    vec![scope.clone(), field_name],
+                    vec![scope, foreign_key.column],
+                )
+            }
+            None => (vec![field_name], vec![foreign_key.column]),
+        };
+
+        foreign_keys.push(ResolvedForeignKey {
+            columns,
+            table: foreign_key.table,
+            referenced_columns,
+        });
+    }
+
+    for relation in &relations {
+        if relation.local_key.len() != relation.target_key.len() {
+            errors.push(syn::Error::new(
+                relation.field.span(),
+                "`local_key` and `target_key` must have the same length",
+            ));
+        }
+        for key in &relation.local_key {
+            if !is_scalar_column(&columns, key) {
+                errors.push(syn::Error::new(
+                    relation.field.span(),
+                    format!("`local_key` `{key}` is not a scalar column"),
+                ));
+            }
+        }
+    }
+
+    if !table && !triggers.is_empty() {
+        errors.push(syn::Error::new(
+            input.span(),
+            "`#[db(pg_trigger)]` is only legal on a table row",
+        ));
+    }
+
+    let mut unique_keys = struct_unique_keys;
+    unique_keys.extend(field_unique_keys);
+    if !table && !unique_keys.is_empty() {
+        errors.push(syn::Error::new(
+            input.span(),
+            "`#[db(unique)]` is only legal on a table row",
+        ));
+    }
+    let primary_key_names: Vec<String> = primary_key.iter().map(plain_name).collect();
+    let mut seen_unique_keys: Vec<Vec<String>> = Vec::new();
+    for key in &unique_keys {
+        if key.is_empty() {
+            errors.push(syn::Error::new(
+                input.span(),
+                "`#[db(unique(columns = [...]))]` needs at least one column",
+            ));
+        }
+        let mut seen = Vec::new();
+        for column in key {
+            if !is_scalar_column(&columns, column) {
+                errors.push(syn::Error::new(
+                    input.span(),
+                    format!("`unique` column `{column}` is not a scalar column"),
+                ));
+            }
+            if seen.contains(column) {
+                errors.push(syn::Error::new(
+                    input.span(),
+                    format!("`unique` key repeats column `{column}`"),
+                ));
+            }
+            seen.push(column.clone());
+        }
+
+        let mut sorted = key.clone();
+        sorted.sort();
+        let mut primary = primary_key_names.clone();
+        primary.sort();
+        if !sorted.is_empty() && sorted == primary {
+            errors.push(syn::Error::new(
+                input.span(),
+                "a `unique` key cannot repeat the primary key",
+            ));
+        }
+        if seen_unique_keys.contains(&sorted) {
+            errors.push(syn::Error::new(input.span(), "duplicate `unique` key"));
+        }
+        seen_unique_keys.push(sorted);
+    }
+
     combine(errors)?;
 
     let Some(shape) = shape else {
@@ -358,6 +680,10 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         updated_at,
         tenant,
         columns,
+        relations,
+        foreign_keys,
+        triggers,
+        unique_keys,
     })
 }
 
@@ -441,6 +767,8 @@ pub fn parse_type(input: &DeriveInput) -> syn::Result<TypeAnnotations> {
 fn shape(
     attrs: &[Attribute],
     span: proc_macro2::Span,
+    triggers: &mut Vec<String>,
+    unique_keys: &mut Vec<Vec<String>>,
     errors: &mut Vec<syn::Error>,
 ) -> Option<Shape> {
     let mut shape = None;
@@ -478,9 +806,40 @@ fn shape(
                     return Err(meta.error(shape_conflict(&shape, "fragment")));
                 }
                 shape = Some(Shape::Fragment);
+            } else if meta.path.is_ident("pg_trigger") {
+                let value: LitStr = meta.value()?.parse()?;
+                let name = value.value();
+                if name.is_empty() {
+                    return Err(meta.error("`pg_trigger` must not be empty"));
+                }
+                if triggers.contains(&name) {
+                    return Err(meta.error("duplicate `pg_trigger` name"));
+                }
+                triggers.push(name);
+            } else if meta.path.is_ident("unique") {
+                let mut columns = None;
+                meta.parse_nested_meta(|option| {
+                    if !option.path.is_ident("columns") {
+                        return Err(option.error(
+                            "unknown `unique` option; the struct form accepts `columns = [...]`",
+                        ));
+                    }
+                    if columns.is_some() {
+                        return Err(option.error("duplicate `unique` columns"));
+                    }
+                    columns = Some(parse_key_list(option.value()?)?);
+                    Ok(())
+                })?;
+                let Some(columns) = columns else {
+                    return Err(
+                        meta.error("the struct form of `unique` requires `columns = [...]`")
+                    );
+                };
+                unique_keys.push(columns);
             } else {
                 return Err(meta.error(
-                    "unknown attribute; the struct accepts `table`, `subquery` or `fragment`",
+                    "unknown attribute; the struct accepts `table`, `subquery`, `fragment`, \
+                     `pg_trigger` or `unique`",
                 ));
             }
 
@@ -591,6 +950,145 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                     return Err(meta.error("duplicate `orderable`"));
                 }
                 annotations.orderable = true;
+            } else if meta.path.is_ident("pg_virtual") {
+                let value: LitStr = meta.value()?.parse()?;
+                if value.value().is_empty() {
+                    return Err(meta.error("`pg_virtual` must not be empty"));
+                }
+                if annotations.pg_virtual.replace(value.value()).is_some() {
+                    return Err(meta.error("duplicate `pg_virtual`"));
+                }
+            } else if meta.path.is_ident("unique") {
+                if annotations.unique {
+                    return Err(meta.error("duplicate `unique`"));
+                }
+                annotations.unique = true;
+            } else if meta.path.is_ident("relation") {
+                if annotations.relation.is_some() {
+                    return Err(meta.error("duplicate `relation`"));
+                }
+                let mut cardinality = None;
+                let mut table = None;
+                let mut local_key = None;
+                let mut target_key = None;
+                meta.parse_nested_meta(|option| {
+                    if option.path.is_ident("one") {
+                        if cardinality.replace(RelationCardinality::One).is_some() {
+                            return Err(option.error("duplicate relation cardinality"));
+                        }
+                    } else if option.path.is_ident("many") {
+                        if cardinality.replace(RelationCardinality::Many).is_some() {
+                            return Err(option.error("duplicate relation cardinality"));
+                        }
+                    } else if option.path.is_ident("table") {
+                        let value: LitStr = option.value()?.parse()?;
+                        if value.value().is_empty() {
+                            return Err(option.error("`table` must not be empty"));
+                        }
+                        if table.replace(value.value()).is_some() {
+                            return Err(option.error("duplicate `table`"));
+                        }
+                    } else if option.path.is_ident("local_key") {
+                        if local_key.is_some() {
+                            return Err(option.error("duplicate `local_key`"));
+                        }
+                        local_key = Some(parse_key_list(option.value()?)?);
+                    } else if option.path.is_ident("target_key") {
+                        if target_key.is_some() {
+                            return Err(option.error("duplicate `target_key`"));
+                        }
+                        target_key = Some(parse_key_list(option.value()?)?);
+                    } else {
+                        return Err(option.error(
+                            "unknown `relation` option; expected `one`, `many`, `table`, \
+                             `local_key` or `target_key`",
+                        ));
+                    }
+
+                    Ok(())
+                })?;
+
+                let Some(cardinality) = cardinality else {
+                    return Err(meta.error("`relation` requires `one` or `many`"));
+                };
+                let Some(table) = table else {
+                    return Err(meta.error("`relation` requires `table = \"...\"`"));
+                };
+                let Some(local_key) = local_key else {
+                    return Err(meta.error("`relation` requires `local_key`"));
+                };
+                let Some(target_key) = target_key else {
+                    return Err(meta.error("`relation` requires `target_key`"));
+                };
+                if local_key.len() != target_key.len() {
+                    return Err(
+                        meta.error("`local_key` and `target_key` must have the same length")
+                    );
+                }
+
+                let model = relation_field(&field.ty)
+                    .map(|(inner, _)| type_name(&inner))
+                    .unwrap_or_default();
+                annotations.relation = Some(RelationAnnotation {
+                    field: field.ident.clone().expect("named field"),
+                    model,
+                    cardinality,
+                    table,
+                    local_key,
+                    target_key,
+                });
+            } else if meta.path.is_ident("foreign_key") {
+                if annotations.foreign_key.is_some() {
+                    return Err(meta.error("duplicate `foreign_key`"));
+                }
+                let mut table = None;
+                let mut column = None;
+                let mut scope = None;
+                meta.parse_nested_meta(|option| {
+                    if option.path.is_ident("table") {
+                        let value: LitStr = option.value()?.parse()?;
+                        if value.value().is_empty() {
+                            return Err(option.error("`table` must not be empty"));
+                        }
+                        if table.replace(value.value()).is_some() {
+                            return Err(option.error("duplicate `table`"));
+                        }
+                    } else if option.path.is_ident("column") {
+                        let value: LitStr = option.value()?.parse()?;
+                        if value.value().is_empty() {
+                            return Err(option.error("`column` must not be empty"));
+                        }
+                        if column.replace(value.value()).is_some() {
+                            return Err(option.error("duplicate `column`"));
+                        }
+                    } else if option.path.is_ident("scope") {
+                        let value: LitStr = option.value()?.parse()?;
+                        if value.value().is_empty() {
+                            return Err(option.error("`scope` must not be empty"));
+                        }
+                        if scope.replace(value.value()).is_some() {
+                            return Err(option.error("duplicate `scope`"));
+                        }
+                    } else {
+                        return Err(option.error(
+                            "unknown `foreign_key` option; expected `table`, `column` or `scope`",
+                        ));
+                    }
+
+                    Ok(())
+                })?;
+
+                let Some(table) = table else {
+                    return Err(meta.error("`foreign_key` requires `table = \"...\"`"));
+                };
+                let Some(column) = column else {
+                    return Err(meta.error("`foreign_key` requires `column = \"...\"`"));
+                };
+                annotations.foreign_key = Some(ForeignKeyAnnotation {
+                    table,
+                    column,
+                    scope,
+                });
             } else {
                 let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name))
                 else {
@@ -680,6 +1178,81 @@ fn is(ty: &Type, name: &str) -> bool {
     };
 
     segment.ident == name
+}
+
+/// The inner type of a relation field, and whether it is a `Vec` rather than an `Option`.
+fn relation_field(ty: &Type) -> Option<(Type, bool)> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    let many = match segment.ident.to_string().as_str() {
+        "Option" => false,
+        "Vec" => true,
+        _ => return None,
+    };
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    let inner = arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty.clone()),
+        _ => None,
+    })?;
+
+    Some((inner, many))
+}
+
+/// The last path segment of a type, used as a relation's model name.
+fn type_name(ty: &Type) -> String {
+    let Type::Path(path) = ty else {
+        return ty.to_token_stream().to_string();
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default()
+}
+
+/// A field or column name without a raw-identifier prefix.
+fn plain_name(name: &Ident) -> String {
+    name.to_string().trim_start_matches("r#").to_owned()
+}
+
+/// Whether `name` is a scalar column of the model.
+fn is_scalar_column(columns: &[Column], name: &str) -> bool {
+    columns.iter().any(|column| match column {
+        Column::Scalar { name: field, .. } => plain_name(field) == name,
+        Column::Flattened { .. } => false,
+    })
+}
+
+/// One identifier or a bracketed, comma-separated identifier list, as used by relation keys and unique keys.
+fn parse_key_list(input: syn::parse::ParseStream) -> syn::Result<Vec<String>> {
+    let mut keys = Vec::new();
+
+    if input.peek(syn::token::Bracket) {
+        let content;
+        syn::bracketed!(content in input);
+        while !content.is_empty() {
+            let key: Ident = content.parse()?;
+            keys.push(plain_name(&key));
+            if content.peek(syn::Token![,]) {
+                content.parse::<syn::Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+    } else {
+        let key: Ident = input.parse()?;
+        keys.push(plain_name(&key));
+    }
+
+    if keys.is_empty() {
+        return Err(input.error("expected at least one column name"));
+    }
+
+    Ok(keys)
 }
 
 /// The type inside an `Option`, or the type itself.
@@ -1839,6 +2412,137 @@ mod tests {
 
         assert!(
             message.contains("`#[db(tenant)]` field must not be `Option`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_relation_with_the_wrong_field_type() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(relation(one, table = "other", local_key = id, target_key = id))]
+                other: Vec<Other>,
+            }
+        "#,
+        );
+
+        assert!(message.contains("needs `Option<T>`"), "{message}");
+    }
+
+    #[test]
+    fn rejects_a_relation_local_key_that_is_not_a_column() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(relation(one, table = "other", local_key = missing, target_key = id))]
+                other: Option<Other>,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`local_key` `missing` is not a scalar column"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_foreign_key_scope_that_is_not_a_column() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pgtype = "uuid", foreign_key(table = "other", column = "id", scope = "missing"))]
+                other_id: Uuid,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`scope` `missing` is not a scalar column"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_trigger_on_a_fragment() {
+        let message = error(
+            r#"
+            #[db(fragment)]
+            #[db(pg_trigger = "fragment_trigger")]
+            struct Address {
+                #[db(pgtype = "text")]
+                street: String,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(pg_trigger)]` is only legal on a table row"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_pg_virtual_on_a_role_field() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid", pg_virtual = "1")]
+                id: Uuid,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(pg_virtual)]` cannot be combined with a role"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_unique_on_a_primary_key() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid", unique)]
+                id: Uuid,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(unique)]` is redundant on a primary-key field"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_struct_unique_with_an_unknown_column() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            #[db(unique(columns = [id, missing]))]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`unique` column `missing` is not a scalar column"),
             "{message}"
         );
     }

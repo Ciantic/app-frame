@@ -73,6 +73,9 @@ pub async fn check_live_schema_against_models(
         if !duplicates {
             problems.extend(column_mismatches(connection, meta).await?);
         }
+        problems.extend(foreign_key_mismatches(connection, meta).await?);
+        problems.extend(trigger_mismatches(connection, meta).await?);
+        problems.extend(unique_key_mismatches(connection, meta).await?);
     }
 
     for table in tables {
@@ -94,15 +97,26 @@ async fn column_mismatches(
     let definition: Vec<String> = meta
         .columns
         .iter()
-        .map(|column| match column.pg_default() {
-            Some(default) => format!(
-                "\"{}\" {} DEFAULT {default}",
+        .map(|column| match column.generated() {
+            Some(expression) => format!(
+                "\"{}\" {} GENERATED ALWAYS AS ({expression}) VIRTUAL",
                 column.name(),
                 column.pg_type()
             ),
-            None => format!("\"{}\" {}", column.name(), column.pg_type()),
+            None => match column.pg_default() {
+                Some(default) => format!(
+                    "\"{}\" {} DEFAULT {default}",
+                    column.name(),
+                    column.pg_type()
+                ),
+                None => format!("\"{}\" {}", column.name(), column.pg_type()),
+            },
         })
         .collect();
+    let generated = meta
+        .columns
+        .iter()
+        .any(|column| column.generated().is_some());
     let type_definition: Vec<String> = meta
         .columns
         .iter()
@@ -138,8 +152,13 @@ async fn column_mismatches(
                 meta.table
             )
         } else {
+            let annotation = if generated {
+                "`pgdefault` or `pg_virtual`"
+            } else {
+                "`pgdefault`"
+            };
             format!(
-                "{}: `pgdefault` is not valid in a column definition: {error}",
+                "{}: {annotation} is not valid in a column definition: {error}",
                 meta.table
             )
         }]);
@@ -149,6 +168,8 @@ async fn column_mismatches(
         "SELECT probe.attname AS name,
                 format_type(probe.atttypid, probe.atttypmod) AS probe_type,
                 format_type(real.atttypid, real.atttypmod) AS real_type,
+                probe.attgenerated::text AS probe_generated,
+                COALESCE(real.attgenerated::text, '') AS real_generated,
                 pg_get_expr(probe_default.adbin, probe_default.adrelid) AS probe_default,
                 pg_get_expr(real_default.adbin, real_default.adrelid) AS real_default
          FROM pg_attribute probe
@@ -185,9 +206,25 @@ async fn column_mismatches(
             ));
         }
 
-        if probe_column.probe_default != probe_column.real_default {
+        if probe_column.probe_generated != probe_column.real_generated {
             problems.push(format!(
-                "{}: column \"{}\" default is {}, the model says {}",
+                "{}: column \"{}\" generated is {}, the model says {}",
+                meta.table,
+                column.name(),
+                generated_kind(&probe_column.real_generated),
+                generated_kind(&probe_column.probe_generated),
+            ));
+            continue;
+        }
+
+        if probe_column.probe_default != probe_column.real_default {
+            let label = if probe_column.probe_generated.is_empty() {
+                "default"
+            } else {
+                "generated expression"
+            };
+            problems.push(format!(
+                "{}: column \"{}\" {label} is {}, the model says {}",
                 meta.table,
                 column.name(),
                 probe_column.real_default.as_deref().unwrap_or("none"),
@@ -199,11 +236,243 @@ async fn column_mismatches(
     Ok(problems)
 }
 
+/// Compares the model's foreign keys with the live constraints on its table.
+async fn foreign_key_mismatches(
+    connection: &mut PgConnection,
+    meta: &TableMeta,
+) -> sqlx::Result<Vec<String>> {
+    let live: Vec<LiveForeignKey> = sqlx::query_as(
+        "SELECT con.conname AS name,
+                target.relname AS target,
+                ARRAY(
+                    SELECT att.attname
+                    FROM unnest(con.conkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                    JOIN pg_attribute att
+                      ON att.attrelid = con.conrelid
+                     AND att.attnum = k.attnum
+                    ORDER BY k.ord
+                ) AS columns,
+                ARRAY(
+                    SELECT att.attname
+                    FROM unnest(con.confkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                    JOIN pg_attribute att
+                      ON att.attrelid = con.confrelid
+                     AND att.attnum = k.attnum
+                    ORDER BY k.ord
+                ) AS referenced_columns
+         FROM pg_constraint con
+         JOIN pg_class target ON target.oid = con.confrelid
+         WHERE con.contype = 'f'
+           AND con.conrelid = to_regclass($1)",
+    )
+    .bind(quoted_table(meta.table))
+    .fetch_all(&mut *connection)
+    .await?;
+
+    let mut problems = Vec::new();
+    for declared in meta.foreign_keys {
+        match live
+            .iter()
+            .find(|candidate| same_columns(&candidate.columns, declared.columns))
+        {
+            None => problems.push(format!(
+                "{}: foreign key {} is declared but no constraint exists",
+                meta.table,
+                column_list(declared.columns),
+            )),
+            Some(live)
+                if live.target != declared.table
+                    || !same_columns(&live.referenced_columns, declared.referenced_columns) =>
+            {
+                problems.push(format!(
+                    "{}: foreign key {} references {}{}, the model says {}{}",
+                    meta.table,
+                    column_list(declared.columns),
+                    live.target,
+                    column_list(&live.referenced_columns),
+                    declared.table,
+                    column_list(declared.referenced_columns),
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    for live in &live {
+        if !meta
+            .foreign_keys
+            .iter()
+            .any(|declared| same_columns(&live.columns, declared.columns))
+        {
+            problems.push(format!(
+                "{}: foreign key constraint `{}` on {} has no model declaration",
+                meta.table,
+                live.name,
+                column_list(&live.columns),
+            ));
+        }
+    }
+
+    Ok(problems)
+}
+
+/// Compares the model's trigger names with the table's non-internal triggers.
+async fn trigger_mismatches(
+    connection: &mut PgConnection,
+    meta: &TableMeta,
+) -> sqlx::Result<Vec<String>> {
+    let live: Vec<String> = sqlx::query_scalar(
+        "SELECT t.tgname
+         FROM pg_trigger t
+         WHERE t.tgrelid = to_regclass($1)
+           AND NOT t.tgisinternal
+         ORDER BY t.tgname",
+    )
+    .bind(quoted_table(meta.table))
+    .fetch_all(&mut *connection)
+    .await?;
+
+    let declared: BTreeSet<&str> = meta.triggers.iter().copied().collect();
+    let live: BTreeSet<&str> = live.iter().map(String::as_str).collect();
+    let mut problems = Vec::new();
+
+    for trigger in declared.difference(&live) {
+        problems.push(format!(
+            "{}: trigger `{trigger}` is declared but does not exist",
+            meta.table
+        ));
+    }
+    for trigger in live.difference(&declared) {
+        problems.push(format!(
+            "{}: trigger `{trigger}` has no model declaration",
+            meta.table
+        ));
+    }
+
+    Ok(problems)
+}
+
+/// Compares the model's unique keys with the table's unique, non-primary indexes.
+async fn unique_key_mismatches(
+    connection: &mut PgConnection,
+    meta: &TableMeta,
+) -> sqlx::Result<Vec<String>> {
+    let live: Vec<LiveUnique> = sqlx::query_as(
+        "SELECT idx.indexrelid::regclass::text AS name,
+                ARRAY(
+                    SELECT att.attname
+                    FROM unnest(idx.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                    JOIN pg_attribute att
+                      ON att.attrelid = idx.indrelid
+                     AND att.attnum = k.attnum
+                    WHERE k.ord <= idx.indnkeyatts
+                    ORDER BY k.ord
+                ) AS columns
+         FROM pg_index idx
+         WHERE idx.indrelid = to_regclass($1)
+           AND idx.indisunique
+           AND NOT idx.indisprimary
+           AND idx.indpred IS NULL
+           AND idx.indexprs IS NULL",
+    )
+    .bind(quoted_table(meta.table))
+    .fetch_all(&mut *connection)
+    .await?;
+
+    let declared: BTreeSet<Vec<String>> = meta
+        .unique_keys
+        .iter()
+        .map(|key| normalized_columns(key.columns))
+        .collect();
+    let live_columns: BTreeSet<Vec<String>> = live
+        .iter()
+        .map(|index| normalized_columns(&index.columns))
+        .collect();
+    let mut problems = Vec::new();
+
+    for key in declared.difference(&live_columns) {
+        problems.push(format!(
+            "{}: unique key {} is declared but no index exists",
+            meta.table,
+            column_list(key),
+        ));
+    }
+    for index in live
+        .iter()
+        .filter(|index| !declared.contains(&normalized_columns(&index.columns)))
+    {
+        problems.push(format!(
+            "{}: unique index `{}` on {} has no model declaration",
+            meta.table,
+            index.name,
+            column_list(&index.columns),
+        ));
+    }
+
+    Ok(problems)
+}
+
+fn quoted_table(table: &str) -> String {
+    format!("\"{table}\"")
+}
+
+fn same_columns(live: &[String], declared: &[&str]) -> bool {
+    live.len() == declared.len()
+        && live
+            .iter()
+            .zip(declared)
+            .all(|(live, declared)| live == declared)
+}
+
+fn normalized_columns(columns: &[impl AsRef<str>]) -> Vec<String> {
+    let mut columns: Vec<String> = columns
+        .iter()
+        .map(|column| column.as_ref().to_owned())
+        .collect();
+    columns.sort();
+    columns
+}
+
+fn column_list(columns: &[impl AsRef<str>]) -> String {
+    format!(
+        "({})",
+        columns
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct LiveForeignKey {
+    name: String,
+    target: String,
+    columns: Vec<String>,
+    referenced_columns: Vec<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct LiveUnique {
+    name: String,
+    columns: Vec<String>,
+}
+
 #[derive(sqlx::FromRow)]
 struct ProbeColumn {
     name: String,
     probe_type: String,
     real_type: Option<String>,
+    probe_generated: String,
+    real_generated: String,
     probe_default: Option<String>,
     real_default: Option<String>,
+}
+
+fn generated_kind(kind: &str) -> &'static str {
+    match kind {
+        "s" => "stored",
+        "v" => "virtual",
+        _ => "none",
+    }
 }

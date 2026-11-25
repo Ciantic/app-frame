@@ -26,7 +26,7 @@ create table "invoice" (
     "due_date" date,
     "net_amount" numeric(14,2) not null default 0,
     "tax_amount" numeric(14,2) not null default 0,
-    "total_amount" numeric(14,2) not null default 0,
+    "total_amount" numeric(14,2) generated always as ("net_amount" + "tax_amount") virtual not null,
     "notes" text,
     "created_at" timestamptz not null default now(),
     "updated_at" timestamptz not null default now(),
@@ -85,7 +85,6 @@ begin
         select sum("tax_amount") from "invoice_row"
         where "invoice_id" = new."id" and "tenant_id" = new."tenant_id"
     ), 0);
-    new."total_amount" := new."net_amount" + new."tax_amount";
     return new;
 end;
 $$;

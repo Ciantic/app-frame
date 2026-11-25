@@ -113,7 +113,7 @@ fn invoice_patch_reads_all_three_states() {
         "customer_id": Uuid::from_u128(4),
         "notes": null,
         "issue_date": "2026-01-15",
-        "total_amount": "12.55",
+        "tax_amount": "12.55",
     }))
     .unwrap();
 
@@ -124,7 +124,7 @@ fn invoice_patch_reads_all_three_states() {
     );
     assert_eq!(patch.notes, Patch::Null);
     assert_eq!(patch.due_date, Patch::Absent);
-    assert_eq!(patch.total_amount, Patch::Set(money(1255, 2)));
+    assert_eq!(patch.tax_amount, Patch::Set(money(1255, 2)));
     assert_eq!(
         patch.issue_date,
         Patch::Set(Date(chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()))

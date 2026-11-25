@@ -80,8 +80,12 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 ty,
                 nullable,
                 pg_default,
+                generated,
                 ..
             } => {
+                if generated.is_some() {
+                    continue;
+                }
                 let text = field_text(field);
                 let column = syn::LitStr::new(&text, field.span());
                 let role = annotations.primary_key.contains(field)

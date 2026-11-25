@@ -10,6 +10,8 @@ Demonstration of invoices in the app frame; not a production billing system.
   change with PostgreSQL triggers.
 - Provide `Customer`, `Invoice` and `InvoiceRow` models with dbkit query,
   insert, patch, delete and select derives.
+- Describe the customer and row relations and the schema constraints with
+  dbkit annotations; dbkit records the joins but does not load them.
 - Expose the schema as `invoice_service::db::schema::SCHEMA`.
 
 ## Layout
@@ -33,14 +35,14 @@ every writer, including a dbkit patch, sees the same values:
 
 - A row's `net_amount` is `round(quantity * unit_price, 2)`, `tax_amount` is
   `round(net_amount * tax_rate, 2)` and `total_amount` is their sum.
-- An invoice's `net_amount` and `tax_amount` are the sums of its rows, and
-  `total_amount` is their sum.
+- An invoice's `net_amount` and `tax_amount` are the sums of its rows; a
+  generated column computes `total_amount` from them.
 - Changing a row bumps its invoice's `updated_at` and `version`.
 
-Relations, child collections, watch subscriptions, upsert, REST routes and
-default query filters from the source schema have no counterpart in this
-repository yet; a query that hides trashed invoices passes `deleted_at.is_null()`
-explicitly.
+The `customer` and `rows` relation fields are filled by the caller; dbkit does
+not load them. Watch subscriptions, upsert, REST routes and default query
+filters from the source schema have no counterpart in this repository yet; a
+query that hides trashed invoices passes `deleted_at.is_null()` explicitly.
 
 ## Development
 

@@ -27,6 +27,7 @@ use user_service::db::models::tenant::TenantId;
     DbSelect,
 )]
 #[db(table = "customer")]
+#[db(unique(columns = [tenant_id, id]))]
 pub struct Customer {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]

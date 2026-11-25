@@ -169,12 +169,87 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let primary_key: Vec<String> = annotations
                 .primary_key
                 .iter()
-                .map(ToString::to_string)
+                .map(|name| name.to_string().trim_start_matches("r#").to_owned())
                 .collect();
             let version = optional(annotations.version.as_ref());
             let created_at = optional(annotations.created_at.as_ref());
             let updated_at = optional(annotations.updated_at.as_ref());
             let tenant = optional(annotations.tenant.as_ref());
+
+            let relations: Vec<TokenStream2> = annotations
+                .relations
+                .iter()
+                .map(|relation| {
+                    let field = relation
+                        .field
+                        .to_string()
+                        .trim_start_matches("r#")
+                        .to_owned();
+                    let model = &relation.model;
+                    let table = &relation.table;
+                    let cardinality = match relation.cardinality {
+                        annotations::RelationCardinality::One => {
+                            quote!(::dbkit::Cardinality::One)
+                        }
+                        annotations::RelationCardinality::Many => {
+                            quote!(::dbkit::Cardinality::Many)
+                        }
+                    };
+                    let local_key: Vec<&str> =
+                        relation.local_key.iter().map(String::as_str).collect();
+                    let target_key: Vec<&str> =
+                        relation.target_key.iter().map(String::as_str).collect();
+
+                    quote! {
+                        ::dbkit::Relation {
+                            field: #field,
+                            model: #model,
+                            table: #table,
+                            cardinality: #cardinality,
+                            local_key: &[#(#local_key),*],
+                            target_key: &[#(#target_key),*],
+                        }
+                    }
+                })
+                .collect();
+
+            let foreign_keys: Vec<TokenStream2> = annotations
+                .foreign_keys
+                .iter()
+                .map(|foreign_key| {
+                    let table = &foreign_key.table;
+                    let columns: Vec<&str> =
+                        foreign_key.columns.iter().map(String::as_str).collect();
+                    let referenced_columns: Vec<&str> = foreign_key
+                        .referenced_columns
+                        .iter()
+                        .map(String::as_str)
+                        .collect();
+
+                    quote! {
+                        ::dbkit::ForeignKey {
+                            columns: &[#(#columns),*],
+                            table: #table,
+                            referenced_columns: &[#(#referenced_columns),*],
+                        }
+                    }
+                })
+                .collect();
+
+            let unique_keys: Vec<TokenStream2> = annotations
+                .unique_keys
+                .iter()
+                .map(|columns| {
+                    let columns: Vec<&str> = columns.iter().map(String::as_str).collect();
+                    quote! {
+                        ::dbkit::UniqueKey {
+                            columns: &[#(#columns),*],
+                        }
+                    }
+                })
+                .collect();
+
+            let triggers: Vec<&str> = annotations.triggers.iter().map(String::as_str).collect();
 
             quote! {
                 static META: ::std::sync::OnceLock<::dbkit::TableMeta> =
@@ -185,6 +260,13 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         ::std::vec::Vec::new();
                     #(#push_columns)*
 
+                    let relations: ::std::vec::Vec<::dbkit::Relation> = vec![#(#relations),*];
+                    let foreign_keys: ::std::vec::Vec<::dbkit::ForeignKey> =
+                        vec![#(#foreign_keys),*];
+                    let unique_keys: ::std::vec::Vec<::dbkit::UniqueKey> =
+                        vec![#(#unique_keys),*];
+                    let triggers: ::std::vec::Vec<&'static str> = vec![#(#triggers),*];
+
                     ::dbkit::TableMeta {
                         table: #table,
                         primary_key: &[#(#primary_key),*],
@@ -193,6 +275,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         updated_at: #updated_at,
                         tenant: #tenant,
                         columns: ::std::boxed::Box::leak(columns.into_boxed_slice()),
+                        relations: ::std::boxed::Box::leak(relations.into_boxed_slice()),
+                        foreign_keys: ::std::boxed::Box::leak(foreign_keys.into_boxed_slice()),
+                        unique_keys: ::std::boxed::Box::leak(unique_keys.into_boxed_slice()),
+                        triggers: ::std::boxed::Box::leak(triggers.into_boxed_slice()),
                     }
                 }))
             }

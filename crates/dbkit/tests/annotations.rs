@@ -112,6 +112,42 @@ struct Frame {
     label: String,
 }
 
+#[derive(DbModel, dbkit::DbInsert, dbkit::DbPatch)]
+#[db(table = "annotated")]
+#[db(pg_trigger = "annotated_trigger")]
+#[db(unique(columns = [tenant_id, id]))]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Annotated {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "uuid")]
+    tenant_id: Uuid,
+
+    #[db(pgtype = "uuid")]
+    #[db(foreign_key(table = "widget", column = "id", scope = "tenant_id"))]
+    widget_id: Option<Uuid>,
+
+    #[db(relation(
+        one,
+        table = "widget",
+        local_key = [tenant_id, widget_id],
+        target_key = [tenant_id, id]
+    ))]
+    widget: Option<Widget>,
+
+    #[db(pgtype = "text")]
+    #[db(unique)]
+    name: String,
+
+    #[db(pgtype = "int8")]
+    #[db(pg_virtual = "1")]
+    generated: i64,
+}
+
 /// Flattening a table is a mistake the derive cannot see; `meta()` rejects it.
 #[derive(DbModel)]
 #[db(table = "wrong_flatten")]
@@ -206,6 +242,55 @@ fn derive_inherits_pgtype_and_pgdefault_from_the_field_type() {
             ("deleted_id", true, "uuid", Some("uuidv7()")),
         ]
     );
+}
+
+#[test]
+fn derive_generates_relations_constraints_and_generated_columns() {
+    let meta = Annotated::meta().into_table();
+
+    let columns: Vec<&str> = meta.columns.iter().map(|column| column.name()).collect();
+    assert_eq!(
+        columns,
+        ["id", "tenant_id", "widget_id", "name", "generated"]
+    );
+
+    assert_eq!(meta.relations.len(), 1);
+    let relation = meta.relations[0];
+    assert_eq!(relation.field, "widget");
+    assert_eq!(relation.model, "Widget");
+    assert_eq!(relation.table, "widget");
+    assert_eq!(relation.cardinality, dbkit::Cardinality::One);
+    assert_eq!(relation.local_key, ["tenant_id", "widget_id"]);
+    assert_eq!(relation.target_key, ["tenant_id", "id"]);
+
+    assert_eq!(meta.foreign_keys.len(), 1);
+    let foreign_key = meta.foreign_keys[0];
+    assert_eq!(foreign_key.columns, ["tenant_id", "widget_id"]);
+    assert_eq!(foreign_key.table, "widget");
+    assert_eq!(foreign_key.referenced_columns, ["tenant_id", "id"]);
+
+    assert_eq!(meta.triggers, ["annotated_trigger"]);
+
+    assert_eq!(meta.unique_keys.len(), 2);
+    assert_eq!(meta.unique_keys[0].columns, ["tenant_id", "id"]);
+    assert_eq!(meta.unique_keys[1].columns, ["name"]);
+
+    assert_eq!(meta.columns[4].generated(), Some("1"));
+    assert_eq!(meta.columns[0].generated(), None);
+}
+
+#[test]
+fn generated_and_relation_fields_are_absent_from_write_inputs() {
+    let insert = AnnotatedInsert::new(Uuid::nil(), Uuid::nil(), "sample".to_owned());
+    let value = serde_json::to_value(insert).unwrap();
+    assert!(value.get("generated").is_none(), "{value}");
+    assert!(value.get("widget").is_none(), "{value}");
+    assert!(value.get("name").is_some(), "{value}");
+
+    let patch = AnnotatedPatch::new(Uuid::nil());
+    let value = serde_json::to_value(patch).unwrap();
+    assert!(value.get("generated").is_none(), "{value}");
+    assert!(value.get("widget").is_none(), "{value}");
 }
 
 #[test]

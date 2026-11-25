@@ -29,6 +29,7 @@ pub(crate) fn expand(
     let mut types = Vec::new();
     let mut defaults = Vec::new();
     let mut nullability = Vec::new();
+    let mut generated = Vec::new();
     let mut operators = Vec::new();
     let mut orderability = Vec::new();
     let mut literals = Vec::new();
@@ -46,6 +47,7 @@ pub(crate) fn expand(
                 pg_default,
                 query_ops,
                 orderable,
+                generated: generated_expression,
             } => {
                 let variant = variant(field);
                 let literal = column_name(field);
@@ -106,6 +108,11 @@ pub(crate) fn expand(
                 types.push(quote!(Self::#variant => #pg_type));
                 defaults.push(quote!(Self::#variant => #pg_default));
                 nullability.push(quote!(Self::#variant => #nullable));
+                let generated_expression = match generated_expression {
+                    Some(expression) => quote!(::core::option::Option::Some(#expression)),
+                    None => quote!(::core::option::Option::None),
+                };
+                generated.push(quote!(Self::#variant => #generated_expression));
                 operators.push(quote!(Self::#variant => &[#(#query_ops),*]));
                 orderability.push(quote!(Self::#variant => #orderable));
             }
@@ -125,6 +132,7 @@ pub(crate) fn expand(
                 types.push(quote!(Self::#variant(inner) => ::dbkit::Column::pg_type(inner)));
                 defaults.push(quote!(Self::#variant(inner) => ::dbkit::Column::pg_default(inner)));
                 nullability.push(quote!(Self::#variant(inner) => ::dbkit::Column::nullable(inner)));
+                generated.push(quote!(Self::#variant(inner) => ::dbkit::Column::generated(inner)));
                 operators.push(quote!(Self::#variant(inner) => ::dbkit::Column::query_ops(inner)));
                 orderability
                     .push(quote!(Self::#variant(inner) => ::dbkit::Column::orderable(inner)));
@@ -156,6 +164,7 @@ pub(crate) fn expand(
     let type_doc = "The column type as DDL spells it.";
     let default_doc = "The column default as DDL spells it, or `None` when the column has none.";
     let nullable_doc = "Whether the column is nullable.";
+    let generated_doc = "The generated-column expression, or `None` when the column is ordinary.";
     let ops_doc = "The comparisons the column may be queried with, in declaration order.";
     let orderable_doc = "Whether the column may appear in `ORDER BY`.";
 
@@ -247,6 +256,13 @@ pub(crate) fn expand(
                 }
             }
 
+            #[doc = #generated_doc]
+            pub fn generated(self) -> ::core::option::Option<&'static str> {
+                match self {
+                    #(#generated),*
+                }
+            }
+
             #[doc = #ops_doc]
             pub fn query_ops(self) -> &'static [::dbkit::FilterOperator] {
                 match self {
@@ -287,6 +303,10 @@ pub(crate) fn expand(
 
             fn nullable(self) -> bool {
                 #columns::nullable(self)
+            }
+
+            fn generated(self) -> ::core::option::Option<&'static str> {
+                #columns::generated(self)
             }
 
             fn query_ops(self) -> &'static [::dbkit::FilterOperator] {

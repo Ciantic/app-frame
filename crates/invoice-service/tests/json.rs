@@ -56,6 +56,7 @@ fn invoice() -> Invoice {
         tenant_id: tenant(),
         number: None,
         customer_id: Some(CustomerId(Uuid::from_u128(3))),
+        customer: None,
         seller_id: None,
         language: None,
         issue_date: Some(Date(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap())),
@@ -63,6 +64,7 @@ fn invoice() -> Invoice {
         net_amount: money(1000, 2),
         tax_amount: money(255, 2),
         total_amount: money(1255, 2),
+        rows: Vec::new(),
         notes: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -161,6 +163,18 @@ fn omitted_optionals_deserialize() {
     assert!(invoice.number.is_none());
     assert!(invoice.customer_id.is_none());
     assert!(invoice.deleted_at.is_none());
+}
+
+#[test]
+fn relations_are_present_when_set() {
+    let mut invoice = invoice();
+    invoice.customer = Some(customer());
+    invoice.rows = vec![invoice_row()];
+
+    let invoice = serde_json::to_value(invoice).unwrap();
+
+    assert_eq!(invoice["customer"]["name"], json!("Acme"));
+    assert!(invoice["rows"].is_array(), "{invoice}");
 }
 
 #[test]

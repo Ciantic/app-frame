@@ -43,6 +43,27 @@ struct BrokenDefault {
 }
 
 #[derive(DbModel)]
+#[db(table = "generated")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Generated {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "int8")]
+    net: i64,
+
+    #[db(pgtype = "int8")]
+    tax: i64,
+
+    #[db(pgtype = "int8")]
+    #[db(pg_virtual = "\"net\" + \"tax\"")]
+    total: i64,
+}
+
+#[derive(DbModel)]
 #[db(fragment)]
 #[expect(
     dead_code,
@@ -105,6 +126,44 @@ struct Duplicated {
     left: Left,
     #[db(flatten)]
     right: Right,
+}
+
+#[derive(DbModel)]
+#[db(table = "parent")]
+#[db(unique(columns = [tenant_id, id]))]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Parent {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "uuid")]
+    tenant_id: Uuid,
+
+    #[db(pgtype = "text")]
+    #[db(unique)]
+    name: String,
+}
+
+#[derive(DbModel)]
+#[db(table = "child")]
+#[db(pg_trigger = "child_trigger")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Child {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "uuid")]
+    tenant_id: Uuid,
+
+    #[db(pgtype = "uuid")]
+    #[db(foreign_key(table = "parent", column = "id", scope = "tenant_id"))]
+    parent_id: Uuid,
 }
 
 /// Returns the problems `check_live_schema_against_models` reports for `schema`.
@@ -279,5 +338,179 @@ async fn reports_a_column_declared_twice() {
     assert_eq!(
         problems(schema, &[Duplicated::meta().into_table()]).await,
         ["duplicated: column \"note\" is declared more than once"]
+    );
+}
+
+const GENERATED: &str = r#"
+    create table "generated" (
+        "id" uuid not null,
+        "net" int8 not null,
+        "tax" int8 not null,
+        "total" int8 generated always as ("net" + "tax") virtual not null
+    )
+"#;
+
+#[tokio::test]
+async fn generated_columns_match_the_schema() {
+    let problems: Vec<String> = problems(GENERATED, &[Generated::meta().into_table()]).await;
+
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[tokio::test]
+async fn reports_a_generated_expression_mismatch() {
+    let schema = GENERATED.replace("\"net\" + \"tax\"", "\"net\" + \"tax\" + 1");
+
+    let problems = problems(&schema, &[Generated::meta().into_table()]).await;
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("\"total\" generated expression is"),
+        "{problems:?}"
+    );
+}
+
+#[tokio::test]
+async fn reports_a_stored_generated_column_as_virtual_mismatch() {
+    let schema = GENERATED.replace(") virtual not null", ") stored not null");
+
+    assert_eq!(
+        problems(&schema, &[Generated::meta().into_table()]).await,
+        ["generated: column \"total\" generated is stored, the model says virtual"]
+    );
+}
+
+#[tokio::test]
+async fn reports_an_ordinary_column_as_generated() {
+    let schema = GENERATED.replace(
+        "\"total\" int8 generated always as (\"net\" + \"tax\") virtual",
+        "\"total\" int8 not null",
+    );
+
+    assert_eq!(
+        problems(&schema, &[Generated::meta().into_table()]).await,
+        ["generated: column \"total\" generated is none, the model says virtual"]
+    );
+}
+
+const CONSTRAINTS: &str = r#"
+    create table "parent" (
+        "id" uuid not null,
+        "tenant_id" uuid not null,
+        "name" text not null,
+        constraint "parent_pkey" primary key ("id"),
+        constraint "parent_tenant_id_id_key" unique ("tenant_id", "id"),
+        constraint "parent_name_key" unique ("name")
+    );
+
+    create table "child" (
+        "id" uuid not null,
+        "tenant_id" uuid not null,
+        "parent_id" uuid not null,
+        constraint "child_pkey" primary key ("id"),
+        constraint "child_parent_fkey" foreign key ("tenant_id", "parent_id")
+            references "parent" ("tenant_id", "id")
+    );
+
+    create function "child_trigger"() returns trigger language plpgsql as $$
+    begin
+        return new;
+    end;
+    $$;
+
+    create trigger "child_trigger"
+    before insert on "child"
+    for each row execute function "child_trigger"();
+"#;
+
+fn constraint_models() -> [dbkit::TableMeta; 2] {
+    [Parent::meta().into_table(), Child::meta().into_table()]
+}
+
+#[tokio::test]
+async fn constraints_match_the_schema() {
+    let problems: Vec<String> = problems(CONSTRAINTS, &constraint_models()).await;
+
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[tokio::test]
+async fn reports_a_missing_foreign_key() {
+    let schema =
+        CONSTRAINTS.replace(
+            ",\n        constraint \"child_parent_fkey\" foreign key (\"tenant_id\", \
+             \"parent_id\")\n            references \"parent\" (\"tenant_id\", \"id\")",
+            "",
+        );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: foreign key (tenant_id, parent_id) is declared but no constraint exists"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_missing_trigger() {
+    let schema = CONSTRAINTS.replace(
+        "\n    create trigger \"child_trigger\"\n    before insert on \"child\"\n    for each row \
+         execute function \"child_trigger\"();",
+        "",
+    );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: trigger `child_trigger` is declared but does not exist"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_missing_unique_key() {
+    let schema = CONSTRAINTS.replace(
+        ",\n        constraint \"parent_name_key\" unique (\"name\")",
+        "",
+    );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["parent: unique key (name) is declared but no index exists"]
+    );
+}
+
+#[tokio::test]
+async fn reports_an_extra_foreign_key() {
+    let schema = format!(
+        "{CONSTRAINTS}\nalter table \"child\" add constraint \"child_extra_fkey\"\nforeign key \
+         (\"id\") references \"parent\" (\"id\");"
+    );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: foreign key constraint `child_extra_fkey` on (id) has no model declaration"]
+    );
+}
+
+#[tokio::test]
+async fn reports_an_extra_trigger() {
+    let schema = format!(
+        "{CONSTRAINTS}\ncreate trigger \"child_extra_trigger\"\nbefore insert on \"child\"\nfor \
+         each row execute function \"child_trigger\"();"
+    );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: trigger `child_extra_trigger` has no model declaration"]
+    );
+}
+
+#[tokio::test]
+async fn reports_an_extra_unique_key() {
+    let schema = format!(
+        "{CONSTRAINTS}\ncreate unique index \"parent_tenant_id_key\" on \"parent\" \
+         (\"tenant_id\");"
+    );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["parent: unique index `parent_tenant_id_key` on (tenant_id) has no model declaration"]
     );
 }

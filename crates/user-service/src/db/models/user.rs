@@ -35,6 +35,7 @@ pub struct User {
     pub id: UserId,
 
     #[db(pgtype = "text")]
+    #[db(unique)]
     pub email: Email,
 
     #[db(pgtype = "timestamptz")]

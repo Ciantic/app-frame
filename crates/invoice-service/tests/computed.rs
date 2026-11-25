@@ -103,13 +103,14 @@ async fn computed_amounts_follow_row_writes() {
     assert_eq!(header.version, 2);
 
     Invoice::patch([
-        InvoicePatch::new(invoice_id, tenant, header.version).set_total_amount(money(99900, 2))
+        InvoicePatch::new(invoice_id, tenant, header.version).set_net_amount(money(99900, 2))
     ])
     .execute(&db)
     .await
     .unwrap();
 
     let header = invoice(&db, invoice_id).await;
+    assert_eq!(header.net_amount, money(3150, 2));
     assert_eq!(header.total_amount, money(3953, 2));
     assert_eq!(header.version, 3);
 

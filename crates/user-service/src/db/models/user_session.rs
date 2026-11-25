@@ -36,10 +36,12 @@ pub struct UserSession {
     #[db(query_ops(eq, any))]
     pub id: UserSessionId,
 
+    #[db(foreign_key(table = "user", column = "id"))]
     pub user_id: UserId,
 
     #[db(pgtype = "text")]
     #[db(query_ops(eq))]
+    #[db(unique)]
     pub token_hash: SessionToken,
 
     #[db(pgtype = "timestamptz")]
