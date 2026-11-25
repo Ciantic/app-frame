@@ -1517,7 +1517,8 @@ These are deliberately out of scope until a model needs them:
   but dbkit does not execute the second query.
 - Generating `schema.sql` from `MODELS`: triggers are fully described, but the
   generator does not exist yet. Non-unique indexes and foreign-key actions are
-  not modelled either, so a generated schema would currently lose them.
+  not modelled either, so a generated schema would currently lose them. See
+  [Schema SQL generator](todo-schema-sql-generator.md).
 - Foreign-key `on delete` and `on update` actions: only the columns and target
   are compared.
 - Stored generated columns: `#[db(pg_virtual)]` describes a virtual column.
