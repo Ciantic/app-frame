@@ -19,8 +19,19 @@ fn email(text: &str) -> EmailAddress {
 
 async fn database() -> PgPool {
     let db = PgtestServer::start().await.database().await;
-    sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+    SCHEMA.apply(&db).await.unwrap();
     db
+}
+
+async fn ensure_tenant(db: &PgPool, id: TenantId) {
+    sqlx::query(
+        r#"insert into "tenant" ("id", "name") values ($1, $2) on conflict ("id") do nothing"#,
+    )
+    .bind(id)
+    .bind("test")
+    .execute(db)
+    .await
+    .unwrap();
 }
 
 async fn customer(db: &PgPool, id: CustomerId) -> Customer {
@@ -37,6 +48,7 @@ async fn customer(db: &PgPool, id: CustomerId) -> Customer {
 async fn a_customer_takes_database_defaults_and_keeps_optionals() {
     let db = database().await;
     let tenant = TenantId(Uuid::from_u128(30));
+    ensure_tenant(&db, tenant).await;
 
     let keys = Customer::insert([CustomerInsert::new(
         tenant,
@@ -70,6 +82,8 @@ async fn an_invoice_cannot_reference_another_tenants_customer() {
     let db = database().await;
     let tenant_a = TenantId(Uuid::from_u128(40));
     let tenant_b = TenantId(Uuid::from_u128(41));
+    ensure_tenant(&db, tenant_a).await;
+    ensure_tenant(&db, tenant_b).await;
 
     let keys = Customer::insert([CustomerInsert::new(
         tenant_a,

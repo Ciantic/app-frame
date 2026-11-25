@@ -121,6 +121,156 @@ added as annotations when a model needs them:
 
 The generated file is not a migration. It applies to an empty database.
 
+## Service composition
+
+The deployment is one database with one PostgreSQL schema. Services are Rust
+crates that own models, not separate database schemas. A backend crate depends
+on the services, combines their `MODELS`, and is the composition root for the
+database.
+
+### Current composition
+
+`dbkit::schema::Schema` is the interim mechanism, before the generator exists:
+
+```rust
+pub struct Schema {
+    pub name: &'static str,
+    pub sql: &'static str,
+    pub models: &'static LazyLock<Vec<TableMeta>>,
+    pub dependencies: &'static [&'static Schema],
+}
+```
+
+Each service exposes a `SCHEMA` static. `invoice-service` declares its
+dependency on `user-service` at that level:
+
+```rust
+// crates/invoice-service/src/db/schema.rs
+pub static SCHEMA: Schema = Schema {
+    name: "invoice",
+    sql: include_str!("../db/schema.sql"),
+    models: &MODELS,
+    dependencies: &[&user_service::db::schema::SCHEMA],
+};
+```
+
+- `SCHEMA.all_sql()` returns dependency SQL first, then the service's own SQL,
+  with each service included once.
+- `SCHEMA.all_models()` does the same for `TableMeta`.
+- `SCHEMA.apply(&db)` applies the composed SQL to a pool.
+- `SCHEMA.check(&mut connection)` runs
+  `check_live_schema_against_models` against the composed model list.
+
+An invoice test therefore needs no knowledge of `user-service`:
+
+```rust
+SCHEMA.apply(&db).await.unwrap();
+let mut connection = db.acquire().await.unwrap();
+let problems = SCHEMA.check(&mut connection).await.unwrap();
+```
+
+A compile-time `concat!` cannot do this: it accepts literals only, and
+`user_service::db::schema::SCHEMA` is a cross-crate `const`, not a literal.
+Including the other crate's file by a relative `include_str!` path would be
+fragile and would duplicate the SQL. The `Schema` value carries the link and
+the models instead.
+
+`SCHEMA` is a service-level composition. It is still fine for a single service
+to test its own tables, because the composed SQL and models include the
+dependencies.
+
+### Future composition
+
+Once the generator exists, the backend can build one combined `MODELS` and
+generate one schema. The backend owns the combined descriptors:
+
+```rust
+pub static MODELS: LazyLock<Vec<TableMeta>> = LazyLock::new(|| {
+    let services: &[&[TableMeta]] = &[
+        &user_service::db::models::MODELS[..],
+        &invoice_service::db::models::MODELS[..],
+        &email_service::db::models::MODELS[..],
+    ];
+
+    services
+        .iter()
+        .flat_map(|models| models.iter().copied())
+        .collect()
+});
+
+pub static SCHEMA: Schema = Schema {
+    name: "backend",
+    sql: include_str!("../db/schema.sql"),
+    models: &MODELS,
+    dependencies: &[],
+};
+```
+
+The checked-in `schema.sql` is produced by `dbkit::schema::generate(&MODELS)`; the
+backend does not generate it at runtime.
+
+- Each service keeps its own `MODELS`; that is what the backend composes.
+- A service-local `schema.sql` is a fragment for tests, not the deployment
+  artifact. The backend's generated schema is the deployment artifact.
+- Table names must be globally unique across services. The generator reports a
+  duplicate table name before emitting SQL.
+- Cross-service foreign keys are ordinary foreign keys. No `external` marker is
+  needed because the target table is in the combined `MODELS`.
+- The generator emits every table first and every foreign key with
+  `alter table` afterwards, so service order and foreign-key cycles do not
+  matter.
+- Triggers are still local in ownership even though they share the schema. An
+  invoice trigger may write invoice tables; do not write another service's
+  tables from it.
+
+For the invoice tenant:
+
+```rust
+#[db(tenant)]
+#[db(foreign_key(table = "tenant", column = "id"))]
+pub tenant_id: TenantId,
+```
+
+- `tenant` is `user-service`'s table but is present in the combined `MODELS`,
+  so the schema test and generator treat it as a normal foreign key.
+- Add the same foreign key to `Customer.tenant_id` and, if desired,
+  `InvoiceRow.tenant_id`. `InvoiceRow` is already constrained transitively by
+  its `(tenant_id, invoice_id)` reference to `Invoice`; a direct tenant foreign
+  key is optional but makes the tenant invariant explicit.
+- `seller_id` stays opaque until a seller service and table join the
+  composition.
+- Decide `on delete` for the tenant foreign keys. `cascade` deletes every
+  service's tenant rows when the tenant is deleted; `restrict` or the default
+  `no action` forces an explicit tenant-deletion workflow. The choice is a
+  product decision, not a generator detail.
+
+Service tests use the service's `SCHEMA` rather than composing dependencies by
+hand:
+
+- `SCHEMA.apply` applies the dependency fragments first, so a service-local
+  `schema.sql` may keep inline cross-service foreign keys.
+- `SCHEMA.check` passes the combined `TableMeta` list, so the checker does not
+  report the dependency's tables as unmodelled.
+- Insert the referenced rows. Invoice tests that use a tenant id need a
+  `tenant` row before the customer, invoice or row insert, or the foreign key
+  rejects it.
+- Keep a separate backend integration test that applies the full combined
+  schema and checks the full combined model list. That is the authoritative
+  cross-service test.
+
+A service-local `schema.sql` with inline cross-service foreign keys only works
+when its dependencies are applied first; `SCHEMA.all_sql` guarantees that
+order. Once the generator exists, prefer the generated combined schema and
+`alter table` for foreign keys. Concatenating per-service generated files is
+not a composition strategy: each file may contain `alter table` statements
+whose target table is in a later file.
+
+`TenantId` currently lives in `user-service`, and `invoice-service` imports it
+from there. That is a Rust type dependency, not a database dependency, but it
+still couples the build. A small shared contract crate for ids such as
+`TenantId` and `UserId` keeps the service boundary explicit without making one
+service depend on another. It does not change the single-schema composition.
+
 ## Generator API
 
 Add to `crates/dbkit/src/schema.rs`:
@@ -142,8 +292,8 @@ pub fn statements(models: &[TableMeta]) -> Result<Vec<String>, Vec<String>>;
   function names, a trigger on an unmodelled table, duplicate tables,
   duplicate index names and generated identifiers over 63 bytes.
 - A checked-in generated file is preferred to runtime generation. It is
-  reviewable, it can be diffed, and it keeps `SCHEMA` a `&'static str` through
-  `include_str!`.
+  reviewable, it can be diffed, and it keeps the SQL a `&'static str` through
+  `include_str!` inside `Schema`.
 
 ## Output layout
 
@@ -275,11 +425,11 @@ Trigger rules:
 
 ## Integration
 
-Add one small binary to each service that owns a schema:
+Add one generator binary to the backend composition crate:
 
 ```rust
-// crates/invoice-service/src/bin/schema.rs
-use invoice_service::db::models::MODELS;
+// crates/backend/src/bin/schema.rs
+use backend::db::schema::MODELS;
 
 fn main() {
     match dbkit::schema::generate(&MODELS) {
@@ -297,10 +447,10 @@ fn main() {
 Regenerate with:
 
 ```bash
-cargo run -p invoice-service --bin schema > crates/invoice-service/src/db/schema.sql
+cargo run -p backend --bin schema > crates/backend/src/db/schema.sql
 ```
 
-The service keeps `SCHEMA` as `include_str!`. Add a drift test:
+The backend keeps its generated file as `include_str!`. Add a drift test:
 
 ```rust
 #[test]
@@ -308,15 +458,19 @@ fn schema_sql_is_generated() {
     let generated = dbkit::schema::generate(&MODELS).unwrap();
     assert_eq!(
         generated,
-        SCHEMA,
-        "regenerate with `cargo run -p invoice-service --bin schema`"
+        SCHEMA.sql,
+        "regenerate with `cargo run -p backend --bin schema`"
     );
 }
 ```
 
 The existing live test still applies `SCHEMA` and runs
-`check_live_schema_against_models`, so a generated file that omits an object
-fails there too.
+`check_live_schema_against_models` with the combined `MODELS`, so a generated
+file that omits an object fails there too.
+
+Per-service binaries are optional and only useful for local test fragments.
+They must not become the deployment artifact: a service-local file cannot see
+another service's tables, and concatenating generated files is not safe.
 
 Runtime generation, `LazyLock<String>`, is possible but not recommended first:
 it removes the reviewable file and makes the schema invisible in a diff.
@@ -334,8 +488,8 @@ Add, in order:
 3. An error test for each cross-model problem: conflicting trigger
    definitions, conflicting function bodies, a trigger on a table without a
    model, duplicate table names and a generated identifier over 63 bytes.
-4. A drift test once `schema.sql` is generated: `generate(&MODELS)` equals the
-   checked-in file.
+4. A drift test once the backend schema is generated: `generate(&MODELS)`
+   equals the checked-in combined file.
 5. A determinism test: generating twice returns the same bytes. Tables follow
    `MODELS` order; functions and triggers are sorted, so the output does not
    depend on hash-map iteration.
@@ -347,12 +501,14 @@ Add, in order:
 2. Add `on_delete` and `on_update` to `foreign_key`, update the metadata and
    the schema check.
 3. Implement `generate` and `statements` with unit tests.
-4. Add the per-service `schema` binary and generate the files, but keep the
-   hand-written `schema.sql` for one commit.
+4. Add the backend composition crate, its combined `MODELS` and the `schema`
+   binary, but keep the hand-written fragments for one commit.
 5. Add the round-trip test and fix every difference it reports. This is the
    point where missing indexes or foreign-key actions surface.
-6. Replace each `schema.sql` with the generated file and add the drift test.
-7. Only then consider removing `schema.sql` and generating at runtime.
+6. Replace the deployment schema with the backend's generated file and add the
+   drift test. Keep per-service fragments only for isolated tests, or remove
+   them once those tests apply the composed schema.
+7. Only then consider generating at runtime.
 
 ## Open decisions
 
@@ -367,5 +523,6 @@ Add, in order:
 - Trigger target tables outside `MODELS`: reject versus allow when the table is
   owned by another schema. This document recommends rejecting for the first
   version, so one generated file describes one complete schema.
-- Whether `schema.sql` remains checked in and drift-tested, or `SCHEMA` becomes
-  a `LazyLock<String>`. This document recommends the checked-in file.
+- Whether the backend's `schema.sql` remains checked in and drift-tested, or
+  `SCHEMA` is generated at runtime. This document recommends the checked-in
+  file.

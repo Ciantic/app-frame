@@ -24,7 +24,7 @@ fn parts(header: header::HeaderName, value: &str) -> Parts {
 
 async fn state() -> (AppState, Uuid) {
     let db = PgtestServer::start().await.database().await;
-    sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+    SCHEMA.apply(&db).await.unwrap();
 
     let user_id = Uuid::from_u128(1);
     let session_id = Uuid::from_u128(2);

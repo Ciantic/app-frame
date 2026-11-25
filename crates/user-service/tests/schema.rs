@@ -135,12 +135,10 @@ fn every_model_has_an_insert_fixture() {
 #[tokio::test]
 async fn models_and_schema_share_columns() {
     let db = PgtestServer::start().await.database().await;
-    sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+    SCHEMA.apply(&db).await.unwrap();
     let mut connection = db.acquire().await.unwrap();
 
-    let problems = dbkit::schema::check_live_schema_against_models(&mut connection, &MODELS)
-        .await
-        .unwrap();
+    let problems = SCHEMA.check(&mut connection).await.unwrap();
 
     assert!(
         problems.is_empty(),
@@ -152,7 +150,7 @@ async fn models_and_schema_share_columns() {
 #[tokio::test]
 async fn models_insert() {
     let db = PgtestServer::start().await.database().await;
-    sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+    SCHEMA.apply(&db).await.unwrap();
 
     for fixture in FIXTURES {
         let meta = (fixture.meta)().into_table();
@@ -170,7 +168,7 @@ async fn models_insert() {
 #[tokio::test]
 async fn models_select() {
     let db = PgtestServer::start().await.database().await;
-    sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+    SCHEMA.apply(&db).await.unwrap();
 
     for fixture in FIXTURES {
         let meta = (fixture.meta)().into_table();

@@ -58,6 +58,7 @@ pub struct Invoice {
 
     #[db(tenant)]
     #[db(query_ops(eq, any))]
+    #[db(foreign_key(table = "tenant", column = "id"))]
     pub tenant_id: TenantId,
 
     #[db(pgtype = "text")]

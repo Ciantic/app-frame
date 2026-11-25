@@ -508,6 +508,9 @@ Marks the tenant ownership column.
   same predicate.
 - Generated insert, patch and key types implement `dbkit::TenantRow`, which the
   HTTP layer uses to choose tenant or global permission per entry.
+- The tenant table is owned by another service. A single backend schema can
+  still declare `#[db(foreign_key(table = "tenant", column = "id"))]` on the
+  tenant column; see [Service composition](todo-schema-sql-generator.md#service-composition).
 
 ## `pg_trigger`
 
@@ -1483,8 +1486,9 @@ session-local:
 
 ```rust
 let db = PgtestServer::start().await.database().await;
-sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+SCHEMA.apply(&db).await.unwrap();
 let mut connection = db.acquire().await.unwrap();
+let problems = SCHEMA.check(&mut connection).await.unwrap();
 ```
 
 A model and `schema.sql` drifting apart is a test failure, not a runtime

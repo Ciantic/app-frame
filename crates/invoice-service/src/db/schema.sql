@@ -12,7 +12,8 @@ create table "customer" (
     "updated_at" timestamptz not null default now(),
     "version" bigint not null default 0,
     constraint "customer_pkey" primary key ("id"),
-    constraint "customer_tenant_id_id_key" unique ("tenant_id", "id")
+    constraint "customer_tenant_id_id_key" unique ("tenant_id", "id"),
+    constraint "customer_tenant_id_fkey" foreign key ("tenant_id") references "tenant" ("id")
 );
 
 create table "invoice" (
@@ -35,7 +36,8 @@ create table "invoice" (
     constraint "invoice_pkey" primary key ("id"),
     constraint "invoice_tenant_id_id_key" unique ("tenant_id", "id"),
     constraint "invoice_customer_id_fkey" foreign key ("tenant_id", "customer_id")
-        references "customer" ("tenant_id", "id")
+        references "customer" ("tenant_id", "id"),
+    constraint "invoice_tenant_id_fkey" foreign key ("tenant_id") references "tenant" ("id")
 );
 
 create index "invoice_customer_id_idx" on "invoice" ("customer_id");

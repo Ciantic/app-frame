@@ -1,4 +1,4 @@
-//! Comparison of a crate's models against a live database.
+//! Service schema composition and comparison of a crate's models against a live database.
 
 use crate::TableMeta;
 use crate::Trigger;
@@ -7,8 +7,74 @@ use crate::TriggerLevel;
 use crate::TriggerTiming;
 use sqlx::AssertSqlSafe;
 use sqlx::PgConnection;
+use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
+
+/// One service's schema fragment, its models and the fragments it depends on.
+pub struct Schema {
+    pub name: &'static str,
+    pub sql: &'static str,
+    pub models: &'static LazyLock<Vec<TableMeta>>,
+    pub dependencies: &'static [&'static Schema],
+}
+
+impl Schema {
+    /// Applies every dependency fragment and this fragment, dependencies first.
+    pub async fn apply(&self, pool: &PgPool) -> sqlx::Result<()> {
+        sqlx::raw_sql(AssertSqlSafe(self.all_sql()))
+            .execute(pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Checks the live schema against this fragment and all of its dependencies.
+    pub async fn check(&self, connection: &mut PgConnection) -> sqlx::Result<Vec<String>> {
+        check_live_schema_against_models(connection, &self.all_models()).await
+    }
+
+    /// The dependencies' SQL followed by this fragment's, each service once.
+    pub fn all_sql(&self) -> String {
+        let mut visited = BTreeSet::new();
+        let mut statements = Vec::new();
+        self.collect_sql(&mut visited, &mut statements);
+        statements.join("\n")
+    }
+
+    /// The dependencies' models followed by this fragment's, each service once.
+    pub fn all_models(&self) -> Vec<TableMeta> {
+        let mut visited = BTreeSet::new();
+        let mut models = Vec::new();
+        self.collect_models(&mut visited, &mut models);
+        models
+    }
+
+    fn collect_sql(
+        &self,
+        visited: &mut BTreeSet<&'static str>,
+        statements: &mut Vec<&'static str>,
+    ) {
+        if !visited.insert(self.name) {
+            return;
+        }
+        for dependency in self.dependencies {
+            dependency.collect_sql(visited, statements);
+        }
+        statements.push(self.sql);
+    }
+
+    fn collect_models(&self, visited: &mut BTreeSet<&'static str>, models: &mut Vec<TableMeta>) {
+        if !visited.insert(self.name) {
+            return;
+        }
+        for dependency in self.dependencies {
+            dependency.collect_models(visited, models);
+        }
+        models.extend(self.models.iter().copied());
+    }
+}
 
 /// Compares `models` with the connection's tables; one message per difference, and an empty list means they agree.
 pub async fn check_live_schema_against_models(
@@ -795,5 +861,36 @@ fn generated_kind(kind: &str) -> &'static str {
         "s" => "stored",
         "v" => "virtual",
         _ => "none",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static MODELS_A: LazyLock<Vec<TableMeta>> = LazyLock::new(Vec::new);
+    static MODELS_B: LazyLock<Vec<TableMeta>> = LazyLock::new(Vec::new);
+    static BASE: Schema = Schema {
+        name: "base",
+        sql: "base;",
+        models: &MODELS_A,
+        dependencies: &[],
+    };
+    static MIDDLE: Schema = Schema {
+        name: "middle",
+        sql: "middle;",
+        models: &MODELS_B,
+        dependencies: &[&BASE],
+    };
+    static TOP: Schema = Schema {
+        name: "top",
+        sql: "top;",
+        models: &MODELS_A,
+        dependencies: &[&MIDDLE, &BASE],
+    };
+
+    #[test]
+    fn composes_dependencies_once_in_order() {
+        assert_eq!(TOP.all_sql(), "base;\nmiddle;\ntop;");
     }
 }

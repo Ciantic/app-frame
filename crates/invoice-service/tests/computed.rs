@@ -25,8 +25,19 @@ fn money(value: i64, scale: u32) -> Money {
 
 async fn database() -> PgPool {
     let db = PgtestServer::start().await.database().await;
-    sqlx::raw_sql(SCHEMA).execute(&db).await.unwrap();
+    SCHEMA.apply(&db).await.unwrap();
     db
+}
+
+async fn ensure_tenant(db: &PgPool, id: TenantId) {
+    sqlx::query(
+        r#"insert into "tenant" ("id", "name") values ($1, $2) on conflict ("id") do nothing"#,
+    )
+    .bind(id)
+    .bind("test")
+    .execute(db)
+    .await
+    .unwrap();
 }
 
 async fn invoice(db: &PgPool, id: InvoiceId) -> Invoice {
@@ -53,6 +64,7 @@ async fn invoice_row(db: &PgPool, id: InvoiceRowId) -> InvoiceRow {
 async fn computed_amounts_follow_row_writes() {
     let db = database().await;
     let tenant = TenantId(Uuid::from_u128(10));
+    ensure_tenant(&db, tenant).await;
 
     let keys = Invoice::insert([InvoiceInsert::new(tenant).set_number("INV-1")])
         .execute(&db)
@@ -142,6 +154,7 @@ async fn computed_amounts_follow_row_writes() {
 async fn deleting_an_invoice_cascades_its_rows() {
     let db = database().await;
     let tenant = TenantId(Uuid::from_u128(20));
+    ensure_tenant(&db, tenant).await;
 
     let keys = Invoice::insert([InvoiceInsert::new(tenant)])
         .execute(&db)
