@@ -16,7 +16,8 @@ query, insert, patch and delete builders. Not implemented yet.
 
 ## Routes
 
-Every entity gets the same path and four methods:
+Every entity uses one path and exposes only the operations declared in
+`crud!`:
 
 - `GET /{entity}?q=<query json>` returns `200 Vec<Model>`.
 - `POST /{entity}` takes `Vec<ModelInsert>` and returns `201 Vec<ModelPK>`.
@@ -223,19 +224,35 @@ is exposed.
 only wiring.
 
 ```rust
-pub trait Crud: Model + Serialize + Send + Unpin + for<'r> FromRow<'r, PgRow> {
+pub trait Queryable: Model + Serialize + Send + Unpin + for<'r> FromRow<'r, PgRow> {
     type Column: Column<Model = Self>;
+}
+
+pub trait Insertable: Model {
     type Insert: InsertRow<Model = Self> + DeserializeOwned + Validate;
+}
+
+pub trait Patchable: Model {
     type Patch: PatchRow<Model = Self> + DeserializeOwned + Validate;
+}
+
+pub trait Deletable: Model {
     type Key: DeleteKey<Model = Self> + DeserializeOwned + Serialize;
 }
 
-pub async fn query<S, M>(state: S, query: Query<M::Column>) -> ApiResult<Json<Vec<M>>>;
-pub async fn insert<S, M>(state: S, entries: Vec<M::Insert>)
+pub async fn query<S, M: Queryable>(state: S, query: Query<M::Column>)
+    -> ApiResult<Json<Vec<M>>>;
+pub async fn insert<S, M: Insertable>(state: S, entries: Vec<M::Insert>)
     -> ApiResult<(StatusCode, Json<Vec<<M::Insert as InsertRow>::Key>>)>;
-pub async fn patch<S, M>(state: S, entries: Vec<M::Patch>) -> ApiResult<StatusCode>;
-pub async fn delete<S, M>(state: S, keys: Vec<M::Key>) -> ApiResult<StatusCode>;
+pub async fn patch<S, M: Patchable>(state: S, entries: Vec<M::Patch>)
+    -> ApiResult<StatusCode>;
+pub async fn delete<S, M: Deletable>(state: S, keys: Vec<M::Key>)
+    -> ApiResult<StatusCode>;
 ```
+
+The traits are split per operation so a model without `DbInsert`, `DbPatch` or
+`DbDelete` can expose only the operations it supports. A single `Crud` trait
+would force every generated type to exist even when its route is absent.
 
 `S` implements a small `DbState` trait that returns the `PgPool`; this avoids
 depending on a particular application state struct.
@@ -272,12 +289,38 @@ against its own tenant. A model without `#[db(tenant)]` uses global permission
 for writes. `tenant_column` remains an override for a column the annotation
 does not cover.
 
-Generated items:
+Operations are opt-in. A block that is absent generates no route, no handler
+and no trait impl, so a model can expose a subset:
 
-- `impl httpkit::Crud for Widget`, naming `WidgetColumn`, `WidgetInsert`,
-  `WidgetPatch` and `WidgetPKV`.
-- Thin handler wrappers that name the concrete extractors and call the generic
-  `httpkit` functions.
+```rust
+httpkit::crud! {
+    model = Widget,
+    path = "/widgets",
+    state = AppState,
+    session = crate::auth::CurrentSession,
+
+    query  { scope = "widget", action = "read" },
+    insert { scope = "widget", action = "create" },
+}
+```
+
+This mounts `GET` and `POST` only; `PATCH` and `DELETE` are not exposed. The
+model needs `DbInsert` for the insert block, but does not need `DbPatch` or
+`DbDelete`. At least one operation block is required. A declared block whose
+derived type is missing, such as `insert` without `DbInsert`, fails at the
+missing `WidgetInsert`; the macro only sees the model name, not its derives.
+
+Generated items depend on the declared blocks:
+
+- `impl httpkit::Queryable for Widget` only when `query` is present, naming
+  `WidgetColumn`.
+- `impl httpkit::Insertable for Widget` only when `insert` is present, naming
+  `WidgetInsert`.
+- `impl httpkit::Patchable for Widget` only when `patch` is present, naming
+  `WidgetPatch`.
+- `impl httpkit::Deletable for Widget` only when `delete` is present, naming
+  `WidgetPKV`.
+- Handler wrappers and route registration only for the declared operations.
 - One `routes(state) -> Router` per entity.
 
 The query wrapper checks permission after parsing, because the tenant scope is
