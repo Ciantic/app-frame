@@ -118,14 +118,25 @@ the tenant column and its Rust type. The input derives use it:
 - `<Model>PK` stays the primary key returned by insert; the caller already
   supplied the tenant.
 
-`TenantRow` exposes the typed tenant value an input carries:
+`TenantRow` exposes the tenant value an input carries, without making the
+macro branch on whether the model is tenant-owned:
 
 ```rust
 pub trait TenantRow {
-    type TenantId;
-    fn tenant_id(&self) -> &Self::TenantId;
+    fn tenant(&self) -> Option<&dyn Bind>;
 }
 ```
+
+`InsertRow`, `PatchRow` and `DeleteKey` require `TenantRow`. Every generated
+insert, patch and key type implements it: a tenant-owned model returns
+`Some(&self.tenant_id)`, a model without `#[db(tenant)]` returns `None`. The
+renderers append the tenant predicate whenever `tenant()` is `Some`, and the
+HTTP permission helper parses the value into `Session::TenantId` through
+`Bind::as_json()`.
+
+This keeps `#[db(tenant)]` as the single source of truth. The macro cannot see
+the model's derives or annotations, so a runtime `Option` is what lets one
+generated wrapper work for both tenant-owned and global models.
 
 The generated patch SQL becomes:
 
@@ -142,11 +153,32 @@ predicate makes that write affect zero rows, which becomes `409 Conflict`.
 
 ## Writes and tenancy
 
-- Insert: check `has_permission` for each entry's tenant before the insert.
-- Patch: check each entry's tenant before the update; the tenant predicate
-  makes the update affect only a row of that tenant.
-- Delete: check each key's tenant before the delete; the tenant predicate does
-  the same for delete.
+`httpkit` checks a write batch through one helper:
+
+```rust
+fn authorize_rows<S: Session, T: TenantRow>(
+    session: &S,
+    rows: &[T],
+    scope: &str,
+    action: &str,
+) -> Result<(), ApiError>
+where
+    S::TenantId: DeserializeOwned;
+```
+
+For each row it reads `TenantRow::tenant()`:
+
+- `Some(value)` checks a tenant permission after deserializing the value into
+  `S::TenantId`;
+- `None` checks a global permission.
+
+Then:
+
+- Insert: check entries before the insert.
+- Patch: check entries before the update; the tenant predicate makes the
+  update affect only a row of that tenant.
+- Delete: check keys before the delete; the tenant predicate does the same for
+  delete.
 - Query: derive `tenant_column` from `TableMeta.tenant` instead of repeating it
   in `crud!`.
 
@@ -283,11 +315,11 @@ httpkit::crud! {
 }
 ```
 
-`Widget` is tenant-owned, so the macro takes the tenant column from
-`TableMeta.tenant` and checks every insert entry, patch entry and delete key
-against its own tenant. A model without `#[db(tenant)]` uses global permission
-for writes. `tenant_column` remains an override for a column the annotation
-does not cover.
+`Widget` is tenant-owned. The macro calls `authorize_rows` for every write
+batch; each entry or key decides through `TenantRow` whether it carries a
+tenant. A model without `#[db(tenant)]` returns `None` and falls back to global
+permission. `TableMeta.tenant` supplies the query column, so `tenant_column` is
+only an override for a column the annotation does not cover.
 
 Operations are opt-in. A block that is absent generates no route, no handler
 and no trait impl, so a model can expose a subset:
@@ -361,11 +393,21 @@ Use `application/problem+json` if a standard error shape is wanted.
 
 - Do not expose `user_session` through `crud!` without column restrictions;
   `token_hash` would become readable.
-- Tenant isolation for writes is not covered by the query rule above.
+- Writes are tenant-isolated by the tenant predicate. Query isolation still
+  depends on the tenant-filter rule above.
 - A missing tenant filter with global permission reads every tenant's rows, by
   design.
 - Tenant filters under `or` must be rejected; otherwise the scope is not a
   bound on the result.
+
+## Open decisions
+
+- Default query limit: a shared constant or a per-route setting.
+- Error body: `application/problem+json` or a minimal `{ code, message }`.
+- Session token source: bearer header, cookie, or both; hashing stays in
+  `user-service`.
+- Composite keys: whether `#[db(tenant)]` may coexist with `#[db(primary_key)]`
+  on one column, or whether the tenant column must be separate from the key.
 
 ## Current model changes
 
@@ -383,7 +425,8 @@ Use `application/problem+json` if a standard error shape is wanted.
    patch/delete tenant predicates to dbkit.
 2. Add `ApiError`, `DbState`, `Session`, `Permission`, `authorize`, and
    `tenant_scope` to `httpkit`.
-3. Add `Crud` and the generic query/insert/patch/delete functions.
+3. Add `Queryable`/`Insertable`/`Patchable`/`Deletable` and the generic
+   query/insert/patch/delete functions.
 4. Add `CurrentSession` and the `Session` implementation to `user-service`.
 5. Add `query_ops` to primary keys and `token_hash`.
 6. Add `httpkit-macros` and the `crud!` macro.
