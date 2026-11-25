@@ -49,7 +49,6 @@ pub struct InvoiceId(#[garde(skip)] pub Uuid);
     DbSelect,
 )]
 #[db(table = "invoice")]
-#[db(pg_trigger = "invoice_totals")]
 #[db(unique(columns = [tenant_id, id]))]
 pub struct Invoice {
     #[db(primary_key)]
@@ -96,9 +95,26 @@ pub struct Invoice {
     pub due_date: Option<Date>,
 
     #[db(pgdefault = inherit)]
+    #[db(pg_trigger(
+        name = "invoice_totals",
+        timing = before,
+        events(insert, update),
+        body = r#"begin
+    new."net_amount" := coalesce((
+        select sum("net_amount") from "invoice_row"
+        where "invoice_id" = new."id" and "tenant_id" = new."tenant_id"
+    ), 0);
+    new."tax_amount" := coalesce((
+        select sum("tax_amount") from "invoice_row"
+        where "invoice_id" = new."id" and "tenant_id" = new."tenant_id"
+    ), 0);
+    return new;
+end;"#
+    ))]
     pub net_amount: Money,
 
     #[db(pgdefault = inherit)]
+    #[db(pg_trigger = "invoice_totals")]
     pub tax_amount: Money,
 
     #[db(pg_virtual = "\"net_amount\" + \"tax_amount\"")]

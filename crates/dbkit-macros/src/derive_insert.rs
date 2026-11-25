@@ -81,9 +81,10 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 nullable,
                 pg_default,
                 generated,
+                triggers,
                 ..
             } => {
-                if generated.is_some() {
+                if generated.is_some() || !triggers.is_empty() {
                     continue;
                 }
                 let text = field_text(field);

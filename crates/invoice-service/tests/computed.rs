@@ -84,8 +84,7 @@ async fn computed_amounts_follow_row_writes() {
     assert_eq!(header.version, 1);
 
     InvoiceRow::patch([InvoiceRowPatch::new(row_id, tenant, row.version)
-        .set_quantity(Quantity(Decimal::new(3, 0)))
-        .set_total_amount(money(99900, 2))])
+        .set_quantity(Quantity(Decimal::new(3, 0)))])
     .execute(&db)
     .await
     .unwrap();
@@ -103,7 +102,7 @@ async fn computed_amounts_follow_row_writes() {
     assert_eq!(header.version, 2);
 
     Invoice::patch([
-        InvoicePatch::new(invoice_id, tenant, header.version).set_net_amount(money(99900, 2))
+        InvoicePatch::new(invoice_id, tenant, header.version).set_notes("recalculated")
     ])
     .execute(&db)
     .await

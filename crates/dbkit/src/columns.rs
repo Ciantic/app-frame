@@ -3,6 +3,7 @@
 use crate::model::ErasedColumn;
 use crate::model::FilterOperator;
 use crate::model::Model;
+use crate::model::TriggerRef;
 use indexmap::IndexSet;
 use serde::Deserialize;
 use serde::Serialize;
@@ -39,6 +40,9 @@ pub trait Column: Copy + Ord + Hash + std::fmt::Debug + Send + Sync + 'static {
 
     /// The comparisons the column may be queried with, in declaration order.
     fn query_ops(self) -> &'static [FilterOperator];
+
+    /// Triggers that fill this column, in declaration order.
+    fn triggers(self) -> &'static [TriggerRef];
 }
 
 impl<C: Column> ErasedColumn for C {
@@ -68,6 +72,10 @@ impl<C: Column> ErasedColumn for C {
 
     fn query_ops(&self) -> &'static [FilterOperator] {
         Column::query_ops(*self)
+    }
+
+    fn triggers(&self) -> &'static [TriggerRef] {
+        Column::triggers(*self)
     }
 }
 

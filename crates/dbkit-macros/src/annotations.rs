@@ -100,10 +100,75 @@ pub struct Annotations {
     pub relations: Vec<RelationAnnotation>,
     /// Foreign keys in declaration order, declared with `#[db(foreign_key)]`.
     pub foreign_keys: Vec<ResolvedForeignKey>,
-    /// Trigger names in declaration order, declared with `#[db(pg_trigger)]`.
-    pub triggers: Vec<String>,
+    /// Trigger declarations in declaration order, from `#[db(pg_trigger)]`.
+    pub triggers: Vec<TriggerRef>,
+    /// Full trigger definitions in declaration order, from `#[db(pg_trigger(...))]` with a `body`.
+    pub trigger_definitions: Vec<TriggerDefinition>,
     /// Unique keys in declaration order, from `#[db(unique)]`.
     pub unique_keys: Vec<Vec<String>>,
+}
+
+/// When a trigger fires, from `timing = before` or `timing = after`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerTiming {
+    Before,
+    After,
+}
+
+/// Whether a trigger fires once per row or once per statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TriggerLevel {
+    Row,
+    Statement,
+}
+
+/// A statement that fires a trigger, from `events(...)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+    Truncate,
+}
+
+/// A trigger declaration after the declaring model's table fills in its default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriggerRef {
+    pub name: String,
+    pub table: String,
+}
+
+/// A full trigger definition after the declaring model's table fills in its default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriggerDefinition {
+    pub name: String,
+    pub table: String,
+    pub timing: TriggerTiming,
+    pub events: Vec<TriggerEvent>,
+    pub level: TriggerLevel,
+    pub condition: Option<String>,
+    pub function: String,
+    pub language: String,
+    pub body: String,
+}
+
+#[derive(Debug)]
+struct TriggerInput {
+    name: String,
+    table: Option<String>,
+    definition: Option<TriggerDefinitionInput>,
+    span: proc_macro2::Span,
+}
+
+#[derive(Debug)]
+struct TriggerDefinitionInput {
+    timing: TriggerTiming,
+    events: Vec<TriggerEvent>,
+    level: TriggerLevel,
+    condition: Option<String>,
+    function: Option<String>,
+    language: String,
+    body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +216,8 @@ pub enum Column {
         orderable: bool,
         /// The generated-column expression from `#[db(pg_virtual = "...")]`.
         generated: Option<String>,
+        /// Triggers that fill this column, from `#[db(pg_trigger)]`.
+        triggers: Vec<TriggerRef>,
     },
     /// A `#[db(flatten)]` field, contributing the columns of its type.
     Flattened { name: Ident, ty: Type },
@@ -194,6 +261,7 @@ struct FieldAnnotations {
     relation: Option<RelationAnnotation>,
     foreign_key: Option<ForeignKeyAnnotation>,
     pg_virtual: Option<String>,
+    triggers: Vec<TriggerInput>,
     unique: bool,
 }
 
@@ -245,18 +313,31 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     };
 
     let mut errors = Vec::new();
-    let mut triggers = Vec::new();
+    let mut trigger_inputs = Vec::new();
     let mut struct_unique_keys = Vec::new();
     let shape = shape(
         &input.attrs,
         input.span(),
-        &mut triggers,
+        &mut trigger_inputs,
         &mut struct_unique_keys,
         &mut errors,
     );
     let fragment = matches!(shape, Some(Shape::Fragment));
     let subquery = matches!(shape, Some(Shape::SubQuery(_)));
     let table = matches!(shape, Some(Shape::Table(_)));
+    let model_table = match &shape {
+        Some(Shape::Table(table)) => table.as_str(),
+        Some(Shape::SubQuery(_)) | Some(Shape::Fragment) | None => "",
+    };
+    let mut triggers = Vec::new();
+    let mut trigger_definitions = Vec::new();
+    resolve_triggers(
+        trigger_inputs,
+        model_table,
+        &mut triggers,
+        &mut trigger_definitions,
+        &mut errors,
+    );
 
     if !fragment && !input.generics.params.is_empty() {
         errors.push(syn::Error::new(
@@ -330,6 +411,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                     "`#[db(flatten)]` cannot be combined with `pg_virtual`",
                 ));
             }
+            if !annotations.triggers.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(flatten)]` cannot be combined with `pg_trigger`",
+                ));
+            }
             if annotations.unique {
                 errors.push(syn::Error::new(
                     field.span(),
@@ -397,6 +484,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                 errors.push(syn::Error::new(
                     field.span(),
                     "`#[db(relation)]` cannot be combined with `pg_virtual`",
+                ));
+            }
+            if !annotations.triggers.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(relation)]` cannot be combined with `pg_trigger`",
                 ));
             }
             if annotations.unique {
@@ -501,6 +594,27 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
                 ));
             }
         }
+        if !annotations.triggers.is_empty() {
+            if annotations.pg_virtual.is_some() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(pg_trigger)]` cannot be combined with `pg_virtual`",
+                ));
+            }
+            if !field_roles.is_empty() {
+                errors.push(syn::Error::new(
+                    field.span(),
+                    "`#[db(pg_trigger)]` cannot be combined with a role",
+                ));
+            }
+        }
+        let field_triggers = resolve_triggers(
+            std::mem::take(&mut annotations.triggers),
+            model_table,
+            &mut triggers,
+            &mut trigger_definitions,
+            &mut errors,
+        );
         if let Some(foreign_key) = annotations.foreign_key.take() {
             foreign_key_fields.push((name.clone(), foreign_key));
         }
@@ -538,6 +652,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             query_ops: annotations.query_ops.clone(),
             orderable: annotations.orderable,
             generated: annotations.pg_virtual.clone(),
+            triggers: field_triggers,
         });
     }
 
@@ -683,6 +798,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         relations,
         foreign_keys,
         triggers,
+        trigger_definitions,
         unique_keys,
     })
 }
@@ -767,7 +883,7 @@ pub fn parse_type(input: &DeriveInput) -> syn::Result<TypeAnnotations> {
 fn shape(
     attrs: &[Attribute],
     span: proc_macro2::Span,
-    triggers: &mut Vec<String>,
+    triggers: &mut Vec<TriggerInput>,
     unique_keys: &mut Vec<Vec<String>>,
     errors: &mut Vec<syn::Error>,
 ) -> Option<Shape> {
@@ -807,15 +923,7 @@ fn shape(
                 }
                 shape = Some(Shape::Fragment);
             } else if meta.path.is_ident("pg_trigger") {
-                let value: LitStr = meta.value()?.parse()?;
-                let name = value.value();
-                if name.is_empty() {
-                    return Err(meta.error("`pg_trigger` must not be empty"));
-                }
-                if triggers.contains(&name) {
-                    return Err(meta.error("duplicate `pg_trigger` name"));
-                }
-                triggers.push(name);
+                triggers.push(parse_trigger(meta)?);
             } else if meta.path.is_ident("unique") {
                 let mut columns = None;
                 meta.parse_nested_meta(|option| {
@@ -1089,13 +1197,15 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                     column,
                     scope,
                 });
+            } else if meta.path.is_ident("pg_trigger") {
+                annotations.triggers.push(parse_trigger(meta)?);
             } else {
                 let Some((_, role)) = ROLES.iter().find(|(name, _)| meta.path.is_ident(name))
                 else {
                     return Err(meta.error(
                         "unknown attribute; expected `primary_key`, `version`, `created_at`, \
-                         `updated_at`, `tenant`, `flatten`, `pgtype`, `pgdefault`, `query_ops` or \
-                         `orderable`",
+                         `updated_at`, `tenant`, `flatten`, `pgtype`, `pgdefault`, `query_ops`, \
+                         `orderable` or `pg_trigger`",
                     ));
                 };
 
@@ -1117,6 +1227,290 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
     }
 
     annotations
+}
+
+fn parse_trigger(meta: syn::meta::ParseNestedMeta<'_>) -> syn::Result<TriggerInput> {
+    let span = meta.path.span();
+
+    if meta.input.peek(syn::Token![=]) {
+        let value: LitStr = meta.value()?.parse()?;
+        let name = value.value();
+        if name.is_empty() {
+            return Err(meta.error("`pg_trigger` must not be empty"));
+        }
+
+        return Ok(TriggerInput {
+            name,
+            table: None,
+            definition: None,
+            span,
+        });
+    }
+
+    let mut name = None;
+    let mut table = None;
+    let mut timing = None;
+    let mut events = None;
+    let mut level = None;
+    let mut condition = None;
+    let mut function = None;
+    let mut language = None;
+    let mut body = None;
+
+    meta.parse_nested_meta(|option| {
+        if option.path.is_ident("name") {
+            let value: LitStr = option.value()?.parse()?;
+            let value = value.value();
+            if value.is_empty() {
+                return Err(option.error("`name` must not be empty"));
+            }
+            if name.replace(value).is_some() {
+                return Err(option.error("duplicate `name`"));
+            }
+        } else if option.path.is_ident("on") {
+            let value: LitStr = option.value()?.parse()?;
+            let value = value.value();
+            if value.is_empty() {
+                return Err(option.error("`on` must not be empty"));
+            }
+            if table.replace(value).is_some() {
+                return Err(option.error("duplicate `on`"));
+            }
+        } else if option.path.is_ident("timing") {
+            let value: Ident = option.value()?.parse()?;
+            let value = match value.to_string().as_str() {
+                "before" => TriggerTiming::Before,
+                "after" => TriggerTiming::After,
+                _ => {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "expected `before` or `after` after `timing =`",
+                    ));
+                }
+            };
+            if timing.replace(value).is_some() {
+                return Err(option.error("duplicate `timing`"));
+            }
+        } else if option.path.is_ident("events") {
+            if events.is_some() {
+                return Err(option.error("duplicate `events`"));
+            }
+            let mut list = Vec::new();
+            option.parse_nested_meta(|event| {
+                let parsed = match event
+                    .path
+                    .get_ident()
+                    .map(|ident| ident.to_string())
+                    .as_deref()
+                {
+                    Some("insert") => TriggerEvent::Insert,
+                    Some("update") => TriggerEvent::Update,
+                    Some("delete") => TriggerEvent::Delete,
+                    Some("truncate") => TriggerEvent::Truncate,
+                    _ => {
+                        return Err(event.error(
+                            "unknown trigger event; expected `insert`, `update`, `delete` or \
+                             `truncate`",
+                        ));
+                    }
+                };
+                if list.contains(&parsed) {
+                    return Err(event.error("duplicate trigger event"));
+                }
+                list.push(parsed);
+                Ok(())
+            })?;
+            events = Some(list);
+        } else if option.path.is_ident("level") {
+            let value: Ident = option.value()?.parse()?;
+            let value = match value.to_string().as_str() {
+                "row" => TriggerLevel::Row,
+                "statement" => TriggerLevel::Statement,
+                _ => {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "expected `row` or `statement` after `level =`",
+                    ));
+                }
+            };
+            if level.replace(value).is_some() {
+                return Err(option.error("duplicate `level`"));
+            }
+        } else if option.path.is_ident("condition") {
+            let value: LitStr = option.value()?.parse()?;
+            let value = value.value();
+            if value.is_empty() {
+                return Err(option.error("`condition` must not be empty"));
+            }
+            if condition.replace(value).is_some() {
+                return Err(option.error("duplicate `condition`"));
+            }
+        } else if option.path.is_ident("function") {
+            let value: LitStr = option.value()?.parse()?;
+            let value = value.value();
+            if value.is_empty() {
+                return Err(option.error("`function` must not be empty"));
+            }
+            if function.replace(value).is_some() {
+                return Err(option.error("duplicate `function`"));
+            }
+        } else if option.path.is_ident("language") {
+            let value: LitStr = option.value()?.parse()?;
+            let value = value.value();
+            if value.is_empty() {
+                return Err(option.error("`language` must not be empty"));
+            }
+            if language.replace(value).is_some() {
+                return Err(option.error("duplicate `language`"));
+            }
+        } else if option.path.is_ident("body") {
+            let value: LitStr = option.value()?.parse()?;
+            let value = value.value();
+            if value.trim().is_empty() {
+                return Err(option.error("`body` must not be empty"));
+            }
+            if body.replace(value).is_some() {
+                return Err(option.error("duplicate `body`"));
+            }
+        } else {
+            return Err(option.error(
+                "unknown `pg_trigger` option; expected `name`, `on`, `timing`, `events`, `level`, \
+                 `condition`, `function`, `language` or `body`",
+            ));
+        }
+
+        Ok(())
+    })?;
+
+    let Some(name) = name else {
+        return Err(meta.error("`pg_trigger` requires `name = \"...\"`"));
+    };
+
+    let definition = match body {
+        Some(body) => {
+            let Some(timing) = timing else {
+                return Err(
+                    meta.error("`pg_trigger` requires `timing = before` or `timing = after`")
+                );
+            };
+            let Some(mut events) = events else {
+                return Err(meta.error("`pg_trigger` requires `events(...)`"));
+            };
+            events.sort();
+            let level = level.unwrap_or(TriggerLevel::Row);
+            if level == TriggerLevel::Statement && condition.is_some() {
+                return Err(meta.error("`condition` is only legal on a row-level trigger"));
+            }
+            if events.contains(&TriggerEvent::Truncate) {
+                if level == TriggerLevel::Row {
+                    return Err(meta.error("`truncate` requires `level = statement`"));
+                }
+                if condition.is_some() {
+                    return Err(meta.error("`truncate` cannot have a `condition`"));
+                }
+            }
+
+            Some(TriggerDefinitionInput {
+                timing,
+                events,
+                level,
+                condition,
+                function,
+                language: language.unwrap_or_else(|| "plpgsql".to_owned()),
+                body,
+            })
+        }
+        None => {
+            if timing.is_some()
+                || events.is_some()
+                || level.is_some()
+                || condition.is_some()
+                || function.is_some()
+                || language.is_some()
+            {
+                return Err(meta.error(
+                    "a `pg_trigger` without `body` is a reference; it accepts only `name` and `on`",
+                ));
+            }
+
+            None
+        }
+    };
+
+    Ok(TriggerInput {
+        name,
+        table,
+        definition,
+        span,
+    })
+}
+
+fn resolve_triggers(
+    inputs: Vec<TriggerInput>,
+    model_table: &str,
+    triggers: &mut Vec<TriggerRef>,
+    definitions: &mut Vec<TriggerDefinition>,
+    errors: &mut Vec<syn::Error>,
+) -> Vec<TriggerRef> {
+    let mut field_refs = Vec::new();
+
+    for input in inputs {
+        let TriggerInput {
+            name,
+            table,
+            definition,
+            span,
+        } = input;
+        let table = table.unwrap_or_else(|| model_table.to_owned());
+        let reference = TriggerRef {
+            name: name.clone(),
+            table: table.clone(),
+        };
+
+        if !triggers
+            .iter()
+            .any(|existing| existing.name == reference.name && existing.table == reference.table)
+        {
+            triggers.push(reference.clone());
+        }
+        if !field_refs.iter().any(|existing: &TriggerRef| {
+            existing.name == reference.name && existing.table == reference.table
+        }) {
+            field_refs.push(reference);
+        }
+
+        let Some(definition) = definition else {
+            continue;
+        };
+        let resolved = TriggerDefinition {
+            function: definition.function.unwrap_or_else(|| name.clone()),
+            name,
+            table,
+            timing: definition.timing,
+            events: definition.events,
+            level: definition.level,
+            condition: definition.condition,
+            language: definition.language,
+            body: definition.body,
+        };
+
+        match definitions
+            .iter()
+            .find(|existing| existing.name == resolved.name && existing.table == resolved.table)
+        {
+            Some(existing) if existing != &resolved => errors.push(syn::Error::new(
+                span,
+                format!(
+                    "conflicting `pg_trigger` definitions for `{}` on table `{}`",
+                    resolved.name, resolved.table,
+                ),
+            )),
+            Some(_) => {}
+            None => definitions.push(resolved),
+        }
+    }
+
+    field_refs
 }
 
 fn check_field_type(role: Role, field: &Field, errors: &mut Vec<syn::Error>) {
@@ -2543,6 +2937,224 @@ mod tests {
 
         assert!(
             message.contains("`unique` column `missing` is not a scalar column"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn reads_a_field_trigger_definition() {
+        let model = parse_model(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pg_trigger(
+                    name = "invoice_totals",
+                    timing = before,
+                    events(update, insert),
+                    body = "begin return new; end;"
+                ))]
+                net_amount: i64,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.triggers,
+            [TriggerRef {
+                name: "invoice_totals".to_owned(),
+                table: "invoice".to_owned(),
+            }]
+        );
+        assert_eq!(model.trigger_definitions.len(), 1);
+        let trigger = &model.trigger_definitions[0];
+        assert_eq!(trigger.name, "invoice_totals");
+        assert_eq!(trigger.table, "invoice");
+        assert_eq!(trigger.timing, TriggerTiming::Before);
+        assert_eq!(trigger.events, [TriggerEvent::Insert, TriggerEvent::Update]);
+        assert_eq!(trigger.level, TriggerLevel::Row);
+        assert_eq!(trigger.function, "invoice_totals");
+        assert_eq!(trigger.language, "plpgsql");
+        assert_eq!(trigger.body, "begin return new; end;");
+
+        let Column::Scalar { triggers, .. } = &model.columns[1] else {
+            panic!("expected a scalar column");
+        };
+        assert_eq!(triggers, &model.triggers);
+    }
+
+    #[test]
+    fn reads_a_trigger_installed_on_another_table() {
+        let model = parse_model(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pg_trigger(name = "invoice_row_totals", on = "invoice_row"))]
+                net_amount: i64,
+                #[db(pg_trigger = "invoice_totals")]
+                tax_amount: i64,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.triggers,
+            [
+                TriggerRef {
+                    name: "invoice_row_totals".to_owned(),
+                    table: "invoice_row".to_owned(),
+                },
+                TriggerRef {
+                    name: "invoice_totals".to_owned(),
+                    table: "invoice".to_owned(),
+                },
+            ]
+        );
+        assert!(model.trigger_definitions.is_empty());
+    }
+
+    #[test]
+    fn rejects_conflicting_trigger_definitions() {
+        let message = error(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pg_trigger(
+                    name = "invoice_totals",
+                    timing = before,
+                    events(insert),
+                    body = "begin return new; end;"
+                ))]
+                net_amount: i64,
+                #[db(pg_trigger(
+                    name = "invoice_totals",
+                    timing = before,
+                    events(update),
+                    body = "begin return new; end;"
+                ))]
+                tax_amount: i64,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("conflicting `pg_trigger` definitions"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_trigger_reference_with_definition_options() {
+        let message = error(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pg_trigger(name = "invoice_totals", timing = before))]
+                net_amount: i64,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("without `body` is a reference"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_trigger_events() {
+        let message = error(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pg_trigger(
+                    name = "invoice_totals",
+                    timing = before,
+                    events(),
+                    body = "begin return new; end;"
+                ))]
+                net_amount: i64,
+            }
+        "#,
+        );
+
+        assert!(message.contains("expected nested attribute"), "{message}");
+    }
+
+    #[test]
+    fn rejects_a_row_level_truncate_trigger() {
+        let message = error(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pg_trigger(
+                    name = "invoice_truncate",
+                    timing = before,
+                    events(truncate),
+                    body = "begin return null; end;"
+                ))]
+                net_amount: i64,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`truncate` requires `level = statement`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_trigger_on_a_virtual_column() {
+        let message = error(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(pg_virtual = "1")]
+                #[db(pg_trigger = "invoice_totals")]
+                net_amount: i64,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(pg_trigger)]` cannot be combined with `pg_virtual`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_trigger_on_a_role_field() {
+        let message = error(
+            r#"
+            #[db(table = "invoice")]
+            struct Invoice {
+                #[db(primary_key, pgtype = "uuid")]
+                id: Uuid,
+                #[db(version, pgtype = "int8")]
+                #[db(pg_trigger = "invoice_totals")]
+                version: i64,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(pg_trigger)]` cannot be combined with a role"),
             "{message}"
         );
     }

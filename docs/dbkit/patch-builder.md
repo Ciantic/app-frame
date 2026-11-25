@@ -64,8 +64,8 @@ pub struct UserPatch {
   means "clear".
 - `created_at` and `updated_at` are not patchable. The builder writes
   `updated_at` itself.
-- A `pg_virtual` column is omitted; PostgreSQL computes it. A `relation` field
-  is not a column and is omitted.
+- A `pg_virtual` or trigger-maintained column is omitted; PostgreSQL computes
+  it. A `relation` field is not a column and is omitted.
 - A flattened fragment contributes its columns as top-level patch fields.
 - The patch derives `garde::Validate`; validation runs before the builder, as
   it does for any other request input.

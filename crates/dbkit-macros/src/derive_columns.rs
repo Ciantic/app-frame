@@ -32,6 +32,7 @@ pub(crate) fn expand(
     let mut generated = Vec::new();
     let mut operators = Vec::new();
     let mut orderability = Vec::new();
+    let mut trigger_lists = Vec::new();
     let mut literals = Vec::new();
     let mut flattened = Vec::new();
     let mut tags = Vec::new();
@@ -48,6 +49,7 @@ pub(crate) fn expand(
                 query_ops,
                 orderable,
                 generated: generated_expression,
+                triggers,
             } => {
                 let variant = variant(field);
                 let literal = column_name(field);
@@ -115,6 +117,20 @@ pub(crate) fn expand(
                 generated.push(quote!(Self::#variant => #generated_expression));
                 operators.push(quote!(Self::#variant => &[#(#query_ops),*]));
                 orderability.push(quote!(Self::#variant => #orderable));
+                let triggers: Vec<TokenStream> = triggers
+                    .iter()
+                    .map(|trigger| {
+                        let name = &trigger.name;
+                        let table = &trigger.table;
+                        quote! {
+                            ::dbkit::TriggerRef {
+                                name: #name,
+                                table: #table,
+                            }
+                        }
+                    })
+                    .collect();
+                trigger_lists.push(quote!(Self::#variant => &[#(#triggers),*]));
             }
             Column::Flattened { name: field, ty } => {
                 let variant = variant(field);
@@ -136,6 +152,8 @@ pub(crate) fn expand(
                 operators.push(quote!(Self::#variant(inner) => ::dbkit::Column::query_ops(inner)));
                 orderability
                     .push(quote!(Self::#variant(inner) => ::dbkit::Column::orderable(inner)));
+                trigger_lists
+                    .push(quote!(Self::#variant(inner) => ::dbkit::Column::triggers(inner)));
                 flattened.push((variant, ty));
             }
         }
@@ -167,6 +185,7 @@ pub(crate) fn expand(
     let generated_doc = "The generated-column expression, or `None` when the column is ordinary.";
     let ops_doc = "The comparisons the column may be queried with, in declaration order.";
     let orderable_doc = "Whether the column may appear in `ORDER BY`.";
+    let triggers_doc = "Triggers that fill the column, in declaration order.";
 
     let handles_type = format_ident!("{name}Columns");
     let handle_doc =
@@ -276,6 +295,13 @@ pub(crate) fn expand(
                     #(#orderability),*
                 }
             }
+
+            #[doc = #triggers_doc]
+            pub fn triggers(self) -> &'static [::dbkit::TriggerRef] {
+                match self {
+                    #(#trigger_lists),*
+                }
+            }
         }
 
         impl ::dbkit::Column for #columns {
@@ -315,6 +341,10 @@ pub(crate) fn expand(
 
             fn orderable(self) -> bool {
                 #columns::orderable(self)
+            }
+
+            fn triggers(self) -> &'static [::dbkit::TriggerRef] {
+                #columns::triggers(self)
             }
         }
 

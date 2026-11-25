@@ -47,8 +47,30 @@ pub struct InvoiceRowId(#[garde(skip)] pub Uuid);
     DbSelect,
 )]
 #[db(table = "invoice_row")]
-#[db(pg_trigger = "invoice_row_amounts")]
-#[db(pg_trigger = "invoice_row_totals")]
+#[db(pg_trigger(
+    name = "invoice_row_totals",
+    timing = after,
+    events(insert, update, delete),
+    body = r#"begin
+    if tg_op = 'DELETE' then
+        update "invoice" set "updated_at" = now(), "version" = "version" + 1
+        where "id" = old."invoice_id" and "tenant_id" = old."tenant_id";
+        return old;
+    end if;
+
+    update "invoice" set "updated_at" = now(), "version" = "version" + 1
+    where "id" = new."invoice_id" and "tenant_id" = new."tenant_id";
+
+    if tg_op = 'UPDATE'
+        and (old."invoice_id", old."tenant_id") is distinct from (new."invoice_id", new."tenant_id")
+    then
+        update "invoice" set "updated_at" = now(), "version" = "version" + 1
+        where "id" = old."invoice_id" and "tenant_id" = old."tenant_id";
+    end if;
+
+    return new;
+end;"#
+))]
 pub struct InvoiceRow {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]
@@ -80,12 +102,25 @@ pub struct InvoiceRow {
     pub tax_rate: Option<TaxRate>,
 
     #[db(pgdefault = inherit)]
+    #[db(pg_trigger(
+        name = "invoice_row_amounts",
+        timing = before,
+        events(insert, update),
+        body = r#"begin
+    new."net_amount" := round(coalesce(new."quantity", 0) * coalesce(new."unit_price", 0), 2);
+    new."tax_amount" := round(new."net_amount" * coalesce(new."tax_rate", 0), 2);
+    new."total_amount" := new."net_amount" + new."tax_amount";
+    return new;
+end;"#
+    ))]
     pub net_amount: Money,
 
     #[db(pgdefault = inherit)]
+    #[db(pg_trigger = "invoice_row_amounts")]
     pub tax_amount: Money,
 
     #[db(pgdefault = inherit)]
+    #[db(pg_trigger = "invoice_row_amounts")]
     pub total_amount: Money,
 
     #[db(created_at)]

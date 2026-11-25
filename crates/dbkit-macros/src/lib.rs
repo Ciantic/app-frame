@@ -249,7 +249,77 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 })
                 .collect();
 
-            let triggers: Vec<&str> = annotations.triggers.iter().map(String::as_str).collect();
+            let triggers: Vec<TokenStream2> = annotations
+                .triggers
+                .iter()
+                .map(|trigger| {
+                    let name = &trigger.name;
+                    let table = &trigger.table;
+                    quote! {
+                        ::dbkit::TriggerRef {
+                            name: #name,
+                            table: #table,
+                        }
+                    }
+                })
+                .collect();
+
+            let trigger_definitions: Vec<TokenStream2> = annotations
+                .trigger_definitions
+                .iter()
+                .map(|trigger| {
+                    let name = &trigger.name;
+                    let table = &trigger.table;
+                    let timing = match trigger.timing {
+                        annotations::TriggerTiming::Before => {
+                            quote!(::dbkit::TriggerTiming::Before)
+                        }
+                        annotations::TriggerTiming::After => quote!(::dbkit::TriggerTiming::After),
+                    };
+                    let events: Vec<TokenStream2> = trigger
+                        .events
+                        .iter()
+                        .map(|event| match event {
+                            annotations::TriggerEvent::Insert => {
+                                quote!(::dbkit::TriggerEvent::Insert)
+                            }
+                            annotations::TriggerEvent::Update => {
+                                quote!(::dbkit::TriggerEvent::Update)
+                            }
+                            annotations::TriggerEvent::Delete => {
+                                quote!(::dbkit::TriggerEvent::Delete)
+                            }
+                            annotations::TriggerEvent::Truncate => {
+                                quote!(::dbkit::TriggerEvent::Truncate)
+                            }
+                        })
+                        .collect();
+                    let level = match trigger.level {
+                        annotations::TriggerLevel::Row => quote!(::dbkit::TriggerLevel::Row),
+                        annotations::TriggerLevel::Statement => {
+                            quote!(::dbkit::TriggerLevel::Statement)
+                        }
+                    };
+                    let condition = optional(trigger.condition.as_deref());
+                    let function = &trigger.function;
+                    let language = &trigger.language;
+                    let body = &trigger.body;
+
+                    quote! {
+                        ::dbkit::Trigger {
+                            name: #name,
+                            table: #table,
+                            timing: #timing,
+                            events: &[#(#events),*],
+                            level: #level,
+                            condition: #condition,
+                            function: #function,
+                            language: #language,
+                            body: #body,
+                        }
+                    }
+                })
+                .collect();
 
             quote! {
                 static META: ::std::sync::OnceLock<::dbkit::TableMeta> =
@@ -265,7 +335,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         vec![#(#foreign_keys),*];
                     let unique_keys: ::std::vec::Vec<::dbkit::UniqueKey> =
                         vec![#(#unique_keys),*];
-                    let triggers: ::std::vec::Vec<&'static str> = vec![#(#triggers),*];
+                    let triggers: ::std::vec::Vec<::dbkit::TriggerRef> = vec![#(#triggers),*];
+                    let trigger_definitions: ::std::vec::Vec<::dbkit::Trigger> =
+                        vec![#(#trigger_definitions),*];
 
                     ::dbkit::TableMeta {
                         table: #table,
@@ -279,6 +351,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         foreign_keys: ::std::boxed::Box::leak(foreign_keys.into_boxed_slice()),
                         unique_keys: ::std::boxed::Box::leak(unique_keys.into_boxed_slice()),
                         triggers: ::std::boxed::Box::leak(triggers.into_boxed_slice()),
+                        trigger_definitions:
+                            ::std::boxed::Box::leak(trigger_definitions.into_boxed_slice()),
                     }
                 }))
             }

@@ -129,6 +129,87 @@ struct Duplicated {
 }
 
 #[derive(DbModel)]
+#[db(table = "conditional")]
+#[db(pg_trigger(
+    name = "conditional_trigger",
+    timing = before,
+    events(update),
+    condition = "old.\"value\" is distinct from new.\"value\"",
+    body = r#"begin
+    return new;
+end;"#
+))]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Conditional {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "int8")]
+    value: i64,
+}
+
+#[derive(DbModel)]
+#[db(table = "invalid_conditional")]
+#[db(pg_trigger(
+    name = "invalid_conditional_trigger",
+    timing = before,
+    events(update),
+    condition = "new.\"missing\" > 0",
+    body = r#"begin
+    return new;
+end;"#
+))]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct InvalidConditional {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "int8")]
+    value: i64,
+}
+
+#[derive(DbModel)]
+#[db(table = "source")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Source {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+}
+
+#[derive(DbModel)]
+#[db(table = "target")]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Target {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "int8")]
+    #[db(pg_trigger(
+        name = "source_writes_target",
+        on = "source",
+        timing = after,
+        events(insert),
+        body = r#"begin
+    update "target" set "value" = 1 where "id" = new."id";
+    return null;
+end;"#
+    ))]
+    value: i64,
+}
+
+#[derive(DbModel)]
 #[db(table = "parent")]
 #[db(unique(columns = [tenant_id, id]))]
 #[expect(
@@ -149,7 +230,14 @@ struct Parent {
 
 #[derive(DbModel)]
 #[db(table = "child")]
-#[db(pg_trigger = "child_trigger")]
+#[db(pg_trigger(
+    name = "child_trigger",
+    timing = before,
+    events(insert),
+    body = r#"begin
+    return new;
+end;"#
+))]
 #[expect(
     dead_code,
     reason = "the fields exist only to derive the table metadata"
@@ -413,10 +501,10 @@ const CONSTRAINTS: &str = r#"
     );
 
     create function "child_trigger"() returns trigger language plpgsql as $$
-    begin
-        return new;
-    end;
-    $$;
+begin
+    return new;
+end;
+$$;
 
     create trigger "child_trigger"
     before insert on "child"
@@ -486,6 +574,186 @@ async fn reports_an_extra_foreign_key() {
     assert_eq!(
         problems(&schema, &constraint_models()).await,
         ["child: foreign key constraint `child_extra_fkey` on (id) has no model declaration"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_trigger_timing_mismatch() {
+    let schema = CONSTRAINTS.replace("before insert on \"child\"", "after insert on \"child\"");
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: trigger `child_trigger` timing is after, the model says before"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_trigger_event_mismatch() {
+    let schema = CONSTRAINTS.replace("before insert on \"child\"", "before update on \"child\"");
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: trigger `child_trigger` events are (update), the model says (insert)"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_trigger_level_mismatch() {
+    let schema = CONSTRAINTS.replace(
+        "for each row execute function \"child_trigger\"()",
+        "for each statement execute function \"child_trigger\"()",
+    );
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: trigger `child_trigger` level is statement, the model says row"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_trigger_condition_mismatch() {
+    let schema = CONSTRAINTS.replace(
+        "for each row execute function",
+        "for each row when (new.\"id\" is not null) execute function",
+    );
+
+    let problems = problems(&schema, &constraint_models()).await;
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("child: trigger `child_trigger` condition is"),
+        "{problems:?}"
+    );
+}
+
+#[tokio::test]
+async fn reports_a_trigger_function_mismatch() {
+    let schema = CONSTRAINTS.replace("\"child_trigger\"()", "\"child_trigger_fn\"()");
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        [
+            "child: trigger `child_trigger` function is `child_trigger_fn`, the model says \
+             `child_trigger`"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_trigger_body_mismatch() {
+    let schema = CONSTRAINTS.replace("    return new;", "    return new; -- changed");
+
+    assert_eq!(
+        problems(&schema, &constraint_models()).await,
+        ["child: trigger `child_trigger` body differs from the model's definition"]
+    );
+}
+
+const CONDITIONAL: &str = r#"
+    create table "conditional" (
+        "id" uuid not null,
+        "value" int8 not null
+    );
+
+    create function "conditional_trigger"() returns trigger language plpgsql as $$
+begin
+    return new;
+end;
+$$;
+
+    create trigger "conditional_trigger"
+    before update on "conditional"
+    for each row when (old."value" is distinct from new."value")
+    execute function "conditional_trigger"();
+"#;
+
+#[tokio::test]
+async fn trigger_conditions_match_the_schema() {
+    let problems = problems(CONDITIONAL, &[Conditional::meta().into_table()]).await;
+
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[tokio::test]
+async fn reports_a_trigger_condition_mismatch_with_a_definition() {
+    let schema = CONDITIONAL.replace(
+        "old.\"value\" is distinct from new.\"value\"",
+        "old.\"value\" <> new.\"value\"",
+    );
+
+    let problems = problems(&schema, &[Conditional::meta().into_table()]).await;
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("trigger `conditional_trigger` condition is"),
+        "{problems:?}"
+    );
+}
+
+#[tokio::test]
+async fn reports_an_invalid_trigger_condition() {
+    let schema = CONDITIONAL.replace("conditional", "invalid_conditional");
+
+    let problems = problems(&schema, &[InvalidConditional::meta().into_table()]).await;
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("condition is not valid in a trigger definition"),
+        "{problems:?}"
+    );
+}
+
+const CROSS_TABLE: &str = r#"
+    create table "source" (
+        "id" uuid not null
+    );
+
+    create table "target" (
+        "id" uuid not null,
+        "value" int8 not null
+    );
+
+    create function "source_writes_target"() returns trigger language plpgsql as $$
+begin
+    update "target" set "value" = 1 where "id" = new."id";
+    return null;
+end;
+$$;
+
+    create trigger "source_writes_target"
+    after insert on "source"
+    for each row execute function "source_writes_target"();
+"#;
+
+fn cross_table_models() -> [dbkit::TableMeta; 2] {
+    [Source::meta().into_table(), Target::meta().into_table()]
+}
+
+#[tokio::test]
+async fn cross_table_triggers_are_checked() {
+    let problems = problems(CROSS_TABLE, &cross_table_models()).await;
+
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[tokio::test]
+async fn reports_a_cross_table_trigger_mismatch() {
+    let schema = CROSS_TABLE.replace("\"value\" = 1", "\"value\" = 2");
+
+    assert_eq!(
+        problems(&schema, &cross_table_models()).await,
+        ["source: trigger `source_writes_target` body differs from the model's definition"]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_trigger_on_a_table_without_a_model() {
+    assert_eq!(
+        problems(CROSS_TABLE, &[Target::meta().into_table()]).await,
+        [
+            "trigger `source_writes_target` is declared on table \"source\", which has no model",
+            "table \"source\" has no model",
+        ]
     );
 }
 

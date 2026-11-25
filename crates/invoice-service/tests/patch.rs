@@ -8,9 +8,7 @@ use invoice_service::db::primitives::date::Date;
 use invoice_service::db::primitives::e_invoice_address::EInvoiceAddress;
 use invoice_service::db::primitives::email_address::EmailAddress;
 use invoice_service::db::primitives::language::Language;
-use invoice_service::db::primitives::money::Money;
 use invoice_service::db::primitives::unit::Unit;
-use rust_decimal::Decimal;
 use serde_json::json;
 use user_service::db::models::tenant::TenantId;
 use uuid::Uuid;
@@ -21,10 +19,6 @@ fn id() -> Uuid {
 
 fn tenant() -> Uuid {
     Uuid::from_u128(2)
-}
-
-fn money(value: i64, scale: u32) -> Money {
-    Money(Decimal::new(value, scale))
 }
 
 #[test]
@@ -113,7 +107,6 @@ fn invoice_patch_reads_all_three_states() {
         "customer_id": Uuid::from_u128(4),
         "notes": null,
         "issue_date": "2026-01-15",
-        "tax_amount": "12.55",
     }))
     .unwrap();
 
@@ -124,7 +117,6 @@ fn invoice_patch_reads_all_three_states() {
     );
     assert_eq!(patch.notes, Patch::Null);
     assert_eq!(patch.due_date, Patch::Absent);
-    assert_eq!(patch.tax_amount, Patch::Set(money(1255, 2)));
     assert_eq!(
         patch.issue_date,
         Patch::Set(Date(chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()))

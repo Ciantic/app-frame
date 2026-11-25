@@ -148,6 +148,44 @@ struct Annotated {
     generated: i64,
 }
 
+#[derive(DbModel, dbkit::DbInsert, dbkit::DbPatch)]
+#[db(table = "triggered")]
+#[db(pg_trigger(
+    name = "triggered_struct",
+    timing = after,
+    events(insert, delete),
+    level = statement,
+    body = "begin return null; end;"
+))]
+#[expect(
+    dead_code,
+    reason = "the fields exist only to derive the table metadata"
+)]
+struct Triggered {
+    #[db(primary_key, pgtype = "uuid")]
+    id: Uuid,
+
+    #[db(pgtype = "text")]
+    label: String,
+
+    #[db(pgtype = "int8")]
+    #[db(pg_trigger(
+        name = "triggered_total",
+        on = "other",
+        timing = after,
+        events(insert, update, delete),
+        condition = "old.\"id\" is distinct from new.\"id\"",
+        function = "triggered_function",
+        language = "plpgsql",
+        body = "begin return null; end;"
+    ))]
+    total: i64,
+
+    #[db(pgtype = "int8")]
+    #[db(pg_trigger = "triggered_struct")]
+    refilled: i64,
+}
+
 /// Flattening a table is a mistake the derive cannot see; `meta()` rejects it.
 #[derive(DbModel)]
 #[db(table = "wrong_flatten")]
@@ -269,7 +307,10 @@ fn derive_generates_relations_constraints_and_generated_columns() {
     assert_eq!(foreign_key.table, "widget");
     assert_eq!(foreign_key.referenced_columns, ["tenant_id", "id"]);
 
-    assert_eq!(meta.triggers, ["annotated_trigger"]);
+    assert_eq!(meta.triggers.len(), 1);
+    assert_eq!(meta.triggers[0].name, "annotated_trigger");
+    assert_eq!(meta.triggers[0].table, "annotated");
+    assert!(meta.trigger_definitions.is_empty());
 
     assert_eq!(meta.unique_keys.len(), 2);
     assert_eq!(meta.unique_keys[0].columns, ["tenant_id", "id"]);
@@ -277,6 +318,93 @@ fn derive_generates_relations_constraints_and_generated_columns() {
 
     assert_eq!(meta.columns[4].generated(), Some("1"));
     assert_eq!(meta.columns[0].generated(), None);
+}
+
+#[test]
+fn derive_generates_trigger_declarations_and_definitions() {
+    let meta = Triggered::meta().into_table();
+
+    assert_eq!(
+        meta.triggers,
+        [
+            dbkit::TriggerRef {
+                name: "triggered_struct",
+                table: "triggered",
+            },
+            dbkit::TriggerRef {
+                name: "triggered_total",
+                table: "other",
+            },
+        ]
+    );
+
+    assert_eq!(meta.trigger_definitions.len(), 2);
+    let definition = &meta.trigger_definitions[0];
+    assert_eq!(definition.name, "triggered_struct");
+    assert_eq!(definition.table, "triggered");
+    assert_eq!(definition.timing, dbkit::TriggerTiming::After);
+    assert_eq!(
+        definition.events,
+        [dbkit::TriggerEvent::Insert, dbkit::TriggerEvent::Delete]
+    );
+    assert_eq!(definition.level, dbkit::TriggerLevel::Statement);
+    assert_eq!(definition.condition, None);
+    assert_eq!(definition.function, "triggered_struct");
+    assert_eq!(definition.language, "plpgsql");
+    assert_eq!(definition.body, "begin return null; end;");
+
+    let definition = &meta.trigger_definitions[1];
+    assert_eq!(definition.name, "triggered_total");
+    assert_eq!(definition.table, "other");
+    assert_eq!(
+        definition.events,
+        [
+            dbkit::TriggerEvent::Insert,
+            dbkit::TriggerEvent::Update,
+            dbkit::TriggerEvent::Delete,
+        ]
+    );
+    assert_eq!(
+        definition.condition,
+        Some("old.\"id\" is distinct from new.\"id\"")
+    );
+    assert_eq!(definition.function, "triggered_function");
+
+    let column = |name: &str| {
+        meta.columns
+            .iter()
+            .find(|column| column.name() == name)
+            .expect("a column")
+    };
+    assert_eq!(
+        column("total").triggers(),
+        [dbkit::TriggerRef {
+            name: "triggered_total",
+            table: "other",
+        }]
+    );
+    assert_eq!(
+        column("refilled").triggers(),
+        [dbkit::TriggerRef {
+            name: "triggered_struct",
+            table: "triggered",
+        }]
+    );
+    assert!(column("label").triggers().is_empty());
+}
+
+#[test]
+fn trigger_maintained_columns_are_absent_from_write_inputs() {
+    let insert = TriggeredInsert::new(Uuid::nil(), "sample".to_owned());
+    let value = serde_json::to_value(insert).unwrap();
+    assert!(value.get("total").is_none(), "{value}");
+    assert!(value.get("refilled").is_none(), "{value}");
+    assert!(value.get("label").is_some(), "{value}");
+
+    let patch = TriggeredPatch::new(Uuid::nil());
+    let value = serde_json::to_value(patch).unwrap();
+    assert!(value.get("total").is_none(), "{value}");
+    assert!(value.get("refilled").is_none(), "{value}");
 }
 
 #[test]

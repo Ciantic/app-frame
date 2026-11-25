@@ -1,6 +1,10 @@
 //! Comparison of a crate's models against a live database.
 
 use crate::TableMeta;
+use crate::Trigger;
+use crate::TriggerEvent;
+use crate::TriggerLevel;
+use crate::TriggerTiming;
 use sqlx::AssertSqlSafe;
 use sqlx::PgConnection;
 use std::collections::BTreeMap;
@@ -74,9 +78,9 @@ pub async fn check_live_schema_against_models(
             problems.extend(column_mismatches(connection, meta).await?);
         }
         problems.extend(foreign_key_mismatches(connection, meta).await?);
-        problems.extend(trigger_mismatches(connection, meta).await?);
         problems.extend(unique_key_mismatches(connection, meta).await?);
     }
+    problems.extend(trigger_mismatches(connection, models).await?);
 
     for table in tables {
         if !models.iter().any(|meta| meta.table == table) {
@@ -316,40 +320,312 @@ async fn foreign_key_mismatches(
     Ok(problems)
 }
 
-/// Compares the model's trigger names with the table's non-internal triggers.
+/// Compares every model's trigger declarations with the live triggers, including definitions on another table.
 async fn trigger_mismatches(
     connection: &mut PgConnection,
-    meta: &TableMeta,
+    models: &[TableMeta],
 ) -> sqlx::Result<Vec<String>> {
-    let live: Vec<String> = sqlx::query_scalar(
-        "SELECT t.tgname
-         FROM pg_trigger t
-         WHERE t.tgrelid = to_regclass($1)
-           AND NOT t.tgisinternal
-         ORDER BY t.tgname",
-    )
-    .bind(quoted_table(meta.table))
-    .fetch_all(&mut *connection)
-    .await?;
-
-    let declared: BTreeSet<&str> = meta.triggers.iter().copied().collect();
-    let live: BTreeSet<&str> = live.iter().map(String::as_str).collect();
     let mut problems = Vec::new();
+    let mut declared: BTreeMap<&str, BTreeMap<&str, Option<&Trigger>>> = BTreeMap::new();
+    let mut definitions: BTreeMap<(&str, &str), &Trigger> = BTreeMap::new();
 
-    for trigger in declared.difference(&live) {
+    for meta in models {
+        for trigger in meta.triggers {
+            declared
+                .entry(trigger.table)
+                .or_default()
+                .entry(trigger.name)
+                .or_insert(None);
+        }
+        for definition in meta.trigger_definitions {
+            let key = (definition.table, definition.name);
+            match definitions.get(&key) {
+                Some(existing) if *existing != definition => problems.push(format!(
+                    "trigger `{}` on \"{}\" has conflicting definitions in the models",
+                    definition.name, definition.table
+                )),
+                Some(_) => {}
+                None => {
+                    definitions.insert(key, definition);
+                }
+            }
+        }
+    }
+
+    for ((table, name), definition) in &definitions {
+        if let Some(table_triggers) = declared.get_mut(table)
+            && let Some(slot) = table_triggers.get_mut(name)
+        {
+            *slot = Some(definition);
+        }
+    }
+
+    let mut checked = BTreeSet::new();
+    for meta in models {
+        let table_triggers = declared.get(meta.table);
+        let live = live_triggers(connection, meta.table).await?;
+
+        if let Some(table_triggers) = table_triggers {
+            for (&name, definition) in table_triggers {
+                let Some(live) = live.iter().find(|live| live.name == name) else {
+                    problems.push(format!(
+                        "{}: trigger `{name}` is declared but does not exist",
+                        meta.table
+                    ));
+                    continue;
+                };
+                if let Some(definition) = definition {
+                    problems.extend(
+                        trigger_definition_mismatches(connection, meta, live, definition).await?,
+                    );
+                }
+            }
+        }
+
+        for live in &live {
+            if !table_triggers.is_some_and(|triggers| triggers.contains_key(live.name.as_str())) {
+                problems.push(format!(
+                    "{}: trigger `{}` has no model declaration",
+                    meta.table, live.name
+                ));
+            }
+        }
+
+        checked.insert(meta.table);
+    }
+
+    for (table, table_triggers) in &declared {
+        if checked.contains(table) {
+            continue;
+        }
+        for name in table_triggers.keys() {
+            problems.push(format!(
+                "trigger `{name}` is declared on table \"{table}\", which has no model"
+            ));
+        }
+    }
+
+    Ok(problems)
+}
+
+/// Compares one live trigger's timing, events, level, condition, function and body with its definition.
+async fn trigger_definition_mismatches(
+    connection: &mut PgConnection,
+    meta: &TableMeta,
+    live: &LiveTrigger,
+    declared: &Trigger,
+) -> sqlx::Result<Vec<String>> {
+    let table = meta.table;
+    let mut problems = Vec::new();
+    let timing = live.timing();
+    if timing != declared.timing {
         problems.push(format!(
-            "{}: trigger `{trigger}` is declared but does not exist",
-            meta.table
+            "{table}: trigger `{}` timing is {}, the model says {}",
+            declared.name,
+            timing.as_str(),
+            declared.timing.as_str()
         ));
     }
-    for trigger in live.difference(&declared) {
+    let level = live.level();
+    if level != declared.level {
         problems.push(format!(
-            "{}: trigger `{trigger}` has no model declaration",
-            meta.table
+            "{table}: trigger `{}` level is {}, the model says {}",
+            declared.name,
+            level.as_str(),
+            declared.level.as_str()
+        ));
+    }
+    let events = live.events();
+    if events.as_slice() != declared.events {
+        problems.push(format!(
+            "{table}: trigger `{}` events are {}, the model says {}",
+            declared.name,
+            trigger_events(&events),
+            trigger_events(declared.events)
+        ));
+    }
+
+    match (declared.condition, live.condition.as_deref()) {
+        (None, None) => {}
+        (None, Some(_)) => problems.push(format!(
+            "{table}: trigger `{}` condition is {}, the model says none",
+            declared.name,
+            trigger_condition(&live.definition).unwrap_or("present")
+        )),
+        (Some(condition), None) => problems.push(format!(
+            "{table}: trigger `{}` condition is none, the model says {condition}",
+            declared.name
+        )),
+        (Some(condition), Some(_)) => {
+            match probe_trigger_condition(connection, meta, declared, condition).await {
+                Ok(probed) if probed.as_deref() == live.condition.as_deref() => {}
+                Ok(_) => problems.push(format!(
+                    "{table}: trigger `{}` condition is {}, the model says {condition}",
+                    declared.name,
+                    trigger_condition(&live.definition).unwrap_or("present")
+                )),
+                Err(error) => problems.push(format!(
+                    "{table}: trigger `{}` condition is not valid in a trigger definition: {error}",
+                    declared.name
+                )),
+            }
+        }
+    }
+
+    if live.function != declared.function {
+        problems.push(format!(
+            "{table}: trigger `{}` function is `{}`, the model says `{}`",
+            declared.name, live.function, declared.function
+        ));
+    }
+    if live.language != declared.language {
+        problems.push(format!(
+            "{table}: trigger `{}` language is `{}`, the model says `{}`",
+            declared.name, live.language, declared.language
+        ));
+    }
+    if live.body.trim() != declared.body.trim() {
+        problems.push(format!(
+            "{table}: trigger `{}` body differs from the model's definition",
+            declared.name
         ));
     }
 
     Ok(problems)
+}
+
+/// Creates a temporary trigger with the declared condition so PostgreSQL parses both into comparable trees.
+async fn probe_trigger_condition(
+    connection: &mut PgConnection,
+    meta: &TableMeta,
+    declared: &Trigger,
+    condition: &str,
+) -> Result<Option<String>, String> {
+    let probe = format!("{}_trigger_probe", meta.table);
+    let function = format!("{probe}_fn");
+    let probe_table = format!("pg_temp.\"{probe}\"");
+    let drop_table = format!("DROP TABLE IF EXISTS {probe_table}");
+    let drop_function = format!("DROP FUNCTION IF EXISTS pg_temp.\"{function}\"()");
+    let _ = sqlx::raw_sql(AssertSqlSafe(drop_table.clone()))
+        .execute(&mut *connection)
+        .await;
+    let _ = sqlx::raw_sql(AssertSqlSafe(drop_function.clone()))
+        .execute(&mut *connection)
+        .await;
+
+    let columns: Vec<(String, String)> = sqlx::query_as(
+        "SELECT att.attname, format_type(att.atttypid, att.atttypmod)
+         FROM pg_attribute att
+         WHERE att.attrelid = to_regclass($1)
+           AND att.attnum > 0 AND NOT att.attisdropped
+         ORDER BY att.attnum",
+    )
+    .bind(quoted_table(meta.table))
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|error| error.to_string())?;
+    let definition: Vec<String> = columns
+        .iter()
+        .map(|(name, pg_type)| format!("\"{name}\" {pg_type}"))
+        .collect();
+    let create_table = format!(
+        "CREATE TEMPORARY TABLE {probe_table} ({})",
+        definition.join(", ")
+    );
+    sqlx::raw_sql(AssertSqlSafe(create_table))
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let create_function = format!(
+        "CREATE FUNCTION pg_temp.\"{function}\"() RETURNS trigger LANGUAGE plpgsql AS $$ begin \
+         return null; end; $$"
+    );
+    sqlx::raw_sql(AssertSqlSafe(create_function))
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let timing = declared.timing.as_str();
+    let events: Vec<&str> = declared.events.iter().map(|event| event.as_str()).collect();
+    let create_trigger = format!(
+        "CREATE TRIGGER \"{probe}\" {timing} {} ON {probe_table} FOR EACH ROW WHEN ({condition}) \
+         EXECUTE FUNCTION pg_temp.\"{function}\"()",
+        events.join(" OR "),
+    );
+    let created = sqlx::raw_sql(AssertSqlSafe(create_trigger))
+        .execute(&mut *connection)
+        .await;
+
+    let probed = match created {
+        Ok(_) => {
+            let probed: Option<String> = sqlx::query_scalar(
+                "SELECT tgqual::text FROM pg_trigger
+                 WHERE tgrelid = to_regclass($1) AND tgname = $2",
+            )
+            .bind(&probe_table)
+            .bind(&probe)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| error.to_string())?;
+
+            Ok(probed)
+        }
+        Err(error) => Err(error.to_string()),
+    };
+
+    let _ = sqlx::raw_sql(AssertSqlSafe(drop_table))
+        .execute(&mut *connection)
+        .await;
+    let _ = sqlx::raw_sql(AssertSqlSafe(drop_function))
+        .execute(&mut *connection)
+        .await;
+
+    probed
+}
+
+/// The `WHEN` expression from `pg_get_triggerdef`, for a human-readable mismatch message.
+fn trigger_condition(definition: &str) -> Option<&str> {
+    let start = definition.find(" WHEN (")? + " WHEN (".len();
+    let rest = &definition[start..];
+    let end = rest.find(") EXECUTE ")?;
+
+    Some(rest[..end].trim())
+}
+
+async fn live_triggers(
+    connection: &mut PgConnection,
+    table: &str,
+) -> sqlx::Result<Vec<LiveTrigger>> {
+    sqlx::query_as(
+        "SELECT t.tgname AS name,
+                t.tgtype::int AS kind,
+                t.tgqual::text AS condition,
+                pg_get_triggerdef(t.oid) AS definition,
+                p.proname AS function,
+                l.lanname AS language,
+                p.prosrc AS body
+         FROM pg_trigger t
+         JOIN pg_proc p ON p.oid = t.tgfoid
+         JOIN pg_language l ON l.oid = p.prolang
+         WHERE t.tgrelid = to_regclass($1)
+           AND NOT t.tgisinternal
+         ORDER BY t.tgname",
+    )
+    .bind(quoted_table(table))
+    .fetch_all(&mut *connection)
+    .await
+}
+
+fn trigger_events(events: &[TriggerEvent]) -> String {
+    format!(
+        "({})",
+        events
+            .iter()
+            .map(|event| event.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Compares the model's unique keys with the table's unique, non-primary indexes.
@@ -442,6 +718,51 @@ fn column_list(columns: &[impl AsRef<str>]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+#[derive(sqlx::FromRow)]
+struct LiveTrigger {
+    name: String,
+    kind: i32,
+    condition: Option<String>,
+    definition: String,
+    function: String,
+    language: String,
+    body: String,
+}
+
+impl LiveTrigger {
+    fn timing(&self) -> TriggerTiming {
+        if self.kind & 2 != 0 {
+            TriggerTiming::Before
+        } else {
+            TriggerTiming::After
+        }
+    }
+
+    fn level(&self) -> TriggerLevel {
+        if self.kind & 1 != 0 {
+            TriggerLevel::Row
+        } else {
+            TriggerLevel::Statement
+        }
+    }
+
+    fn events(&self) -> Vec<TriggerEvent> {
+        TriggerEvent::ALL
+            .iter()
+            .copied()
+            .filter(|event| {
+                let bit = match event {
+                    TriggerEvent::Insert => 4,
+                    TriggerEvent::Update => 16,
+                    TriggerEvent::Delete => 8,
+                    TriggerEvent::Truncate => 32,
+                };
+                self.kind & bit != 0
+            })
+            .collect()
+    }
 }
 
 #[derive(sqlx::FromRow)]

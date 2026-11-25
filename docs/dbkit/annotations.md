@@ -5,9 +5,9 @@ They describe the fixed columns of a table row: which fields form the primary
 key, which one carries the optimistic-locking token, which ones are audit
 columns, which columns the database fills in from a default, which comparisons
 each column may be queried with, and whether it may be sorted. They also
-describe related non-column fields, foreign keys, unique keys, trigger names
-and generated columns. Every field carries a `pgtype` unless it is flattened,
-is a relation, or its type declares one with `#[derive(DbType)]`, and a table
+describe related non-column fields, foreign keys, unique keys, trigger
+definitions and generated columns. Every field carries a `pgtype` unless it is
+flattened, is a relation, or its type declares one with `#[derive(DbType)]`, and a table
 row needs a primary key; the other annotations are opt-in.
 
 A struct is one of three shapes:
@@ -75,8 +75,8 @@ pub struct Email {
 ```
 
 Fields without a role are ordinary business columns. They are the fields a
-generated patch would expose unless they are `pg_virtual` or a relation;
-role-annotated fields never are.
+generated patch would expose unless they are `pg_virtual`, trigger-maintained
+or a relation; role-annotated fields never are.
 
 ## Where annotations may appear
 
@@ -84,8 +84,9 @@ role-annotated fields never are.
   the struct, exactly once. They are mutually exclusive; `table` makes the
   struct a table row, `subquery` makes its rows the output of a query, and
   `fragment` makes it a column group.
-- `#[db(pg_trigger = "...")]` on a table row, repeatable; `#[db(unique)]` on a
-  field and `#[db(unique(columns = [...]))]` on a table row.
+- `#[db(pg_trigger = "...")]` or `#[db(pg_trigger(...))]` on a table row or a
+  scalar field of a table row, repeatable; `#[db(unique)]` on a field and
+  `#[db(unique(columns = [...]))]` on a table row.
 - `#[db(pgtype = "...")]` on every field that is not `#[db(flatten)]`,
   `#[db(relation)]`, unless the field type implements `dbkit::DbType`, exactly
   once.
@@ -99,6 +100,8 @@ role-annotated fields never are.
 - `#[db(orderable)]` on a field, at most once.
 - `#[db(pg_virtual = "...")]`, `#[db(unique)]`, `#[db(foreign_key(...))]` or
   `#[db(relation(...))]` on a field, at most once each.
+- `#[db(pg_trigger(...))]` on a field may hold a full definition or reference a
+  trigger declared elsewhere; see [`pg_trigger`](#pg_trigger).
 - `#[db(flatten)]` on a field of a table row or a subquery row, at most once.
 - Multiple `#[db(...)]` attributes on one field are allowed; the roles are
   collected across all of them.
@@ -114,10 +117,10 @@ not use that form:
 
 - One annotation per line, each in its own `#[db(...)]` attribute.
 - Role first, then `pgtype`, then `pgdefault`, then `query_ops`, then
-  `orderable`, then `pg_virtual`, `unique`, `foreign_key` or `relation`:
-  `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
+  `orderable`, then `pg_trigger`, then `pg_virtual`, `unique`, `foreign_key` or
+  `relation`: `#[db(primary_key)]` above `#[db(pgtype = "uuid")]` above
   `#[db(pgdefault = "uuidv7()")]` above `#[db(query_ops(eq, any))]` above
-  `#[db(orderable)]`.
+  `#[db(orderable)]` above `#[db(pg_trigger = "...")]`.
 - Struct-level `pg_trigger` and `unique(columns = [...])` follow the shape
   annotation.
 - `#[serde(...)]` attributes follow the `#[db(...)]` block.
@@ -508,25 +511,82 @@ Marks the tenant ownership column.
 
 ## `pg_trigger`
 
-Declares that a table has a trigger. The annotation is a name marker: the
-trigger function and its body stay in `schema.sql`, and the schema test checks
-that the name exists.
+Declares a trigger and, when the annotation has a `body`, its full definition.
+A trigger is installed on a table; that table is the declaring model's table
+unless `on = "..."` names another one. The annotation may sit on the struct or
+on the scalar field the trigger fills.
 
 ```rust
 #[db(table = "invoice")]
-#[db(pg_trigger = "invoice_totals")]
-pub struct Invoice { /* ... */ }
+pub struct Invoice {
+    #[db(primary_key)]
+    #[db(pgdefault = inherit)]
+    pub id: InvoiceId,
+
+    #[db(pg_trigger(
+        name = "invoice_row_net_amount",
+        on = "invoice_row",
+        timing = after,
+        events(insert, update, delete),
+        body = r#"begin
+            update "invoice" set "net_amount" = (...)
+            where "id" in (old."invoice_id", new."invoice_id");
+            return null;
+        end;"#
+    ))]
+    #[db(pgdefault = inherit)]
+    pub net_amount: Money,
+
+    #[db(pg_trigger = "invoice_row_net_amount")]
+    #[db(pgdefault = inherit)]
+    pub tax_amount: Money,
+}
 ```
 
-- Legal on: a table row, repeatable. Not legal on a fragment or a subquery.
-- Value: a non-empty string literal. Repeating a name on one table is an error.
-- The schema test compares declared names with the table's non-internal
-  triggers. Internal constraint triggers and foreign-key enforcement triggers
+- Legal on: the struct of a table row, or a scalar field of a table row.
+  Repeatable. Not legal on a fragment or a subquery.
+- Two forms:
+  - `#[db(pg_trigger = "name")]` declares that a trigger named `name` exists
+    on the model's table. It is a name-only reference.
+  - `#[db(pg_trigger(...))]` names a trigger and optionally defines it.
+- Options:
+  - `name = "..."` is required and non-empty. Trigger names are unique per
+    table, not per schema.
+  - `on = "..."` is the table the trigger is installed on; it defaults to the
+    model's table. A field on one model may therefore declare a trigger that
+    fires on another table.
+  - `timing = before|after` is required in a definition.
+  - `events(insert, update, delete, truncate)` is required in a definition and
+    needs at least one event. The derive records events in canonical order and
+    rejects repeats.
+  - `level = row|statement` defaults to `row`. `truncate` requires
+    `level = statement`, and a statement-level trigger cannot have a
+    `condition`.
+  - `condition = "..."` is an optional `WHEN` expression.
+  - `function = "..."` is the trigger function's name; it defaults to the
+    trigger name.
+  - `language = "..."` defaults to `plpgsql`.
+  - `body = "..."` is the function body as a plpgsql block, including
+    `begin`/`end` and `return`. Without `body`, the nested form is a reference
+    and accepts only `name` and `on`.
+- Definitions are deduplicated by `(on, name)`. Repeating one with identical
+  fields is fine; repeating it with different fields is a compile error.
+- Any field carrying `pg_trigger`, definition or reference, is
+  trigger-maintained: `DbInsert` and `DbPatch` omit it, like
+  `#[db(pg_virtual)]`. Reads, filters and projections keep the column. It
+  cannot combine with a role, `pg_virtual`, `flatten` or `relation`.
+- `pgdefault`, `query_ops`, `orderable`, `unique` and `foreign_key` still work
+  on the same field.
+- The schema test collects declarations from every model, groups them by
+  `(table, name)`, and compares names in both directions. When a definition
+  exists, it also compares timing, events, level, function, language and body;
+  the `condition` is parsed by PostgreSQL on a temporary trigger and compared
+  as a tree. Internal constraint triggers and foreign-key enforcement triggers
   are ignored.
-- Timing, events, function and body are not part of the annotation; only the
-  name is compared.
-- A trigger does not make a field read-only. A column maintained by a trigger
-  is still a normal model field.
+- A trigger declared on a table that is not in `MODELS` cannot be checked; the
+  schema test reports it.
+- Full schema generation is not implemented yet; the fields are recorded so a
+  generator can emit `CREATE FUNCTION` and `CREATE TRIGGER`.
 
 ## `foreign_key`
 
@@ -641,7 +701,8 @@ pub rows: Vec<InvoiceRow>,
 - dbkit does not load relations. A higher layer fills the field after the row
   query.
 - The annotation must not combine with `pgtype`, `pgdefault`, `query_ops`,
-  `orderable`, a role, `flatten`, `unique`, `foreign_key` or `pg_virtual`.
+  `orderable`, a role, `flatten`, `unique`, `foreign_key`, `pg_trigger` or
+  `pg_virtual`.
 - There is no schema-test counterpart; a relation is not a DDL object.
 
 ## Legality rules enforced by the derive
@@ -662,14 +723,19 @@ Every rule below produces a compile error.
 - Every field that is not `#[db(flatten)]` or `#[db(relation)]` must carry
   `#[db(pgtype = "...")]` or have a type that implements `dbkit::DbType`.
 - `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`,
-  `orderable`, `pg_virtual`, `unique`, `foreign_key`, `relation` or a role,
-  and its field must not be `Option`.
+  `orderable`, `pg_trigger`, `pg_virtual`, `unique`, `foreign_key`, `relation`
+  or a role, and its field must not be `Option`.
 - A fragment cannot `#[db(flatten)]` another struct.
 - `#[db(relation)]` is legal only on a table row; its field must be `Option<T>`
   for `one` or `Vec<T>` for `many`, and it cannot combine with a column
   annotation or a role.
-- `#[db(pg_trigger)]` is legal only on a table row; names must be non-empty and
-  unique on the table.
+- `#[db(pg_trigger)]` is legal only on a table row or a scalar field of a table
+  row. A name is required and must be non-empty. A definition also needs
+  `timing`, `events(...)` and `body`; a reference accepts only `name` and
+  `on`. `truncate` requires `level = statement` and no `condition`;
+  a `condition` requires a row-level trigger. Conflicting definitions for the
+  same `(on, name)` are an error. A trigger field cannot combine with a role,
+  `pg_virtual`, `flatten` or `relation`.
 - `#[db(foreign_key)]` is legal only on a scalar field of a table row; `table`
   and `column` are required, and `scope` must name another scalar column.
 - `#[db(pg_virtual)]` is legal only on a scalar field of a table row and cannot
@@ -702,7 +768,7 @@ Every rule below produces a compile error.
 - `orderable` appears at most once per field and takes no value.
 - The `DbModel` struct attribute accepts `table`, `subquery`, `fragment`,
   `pg_trigger` and `unique`; the field-level attribute accepts `pgtype`,
-  `pgdefault`, `query_ops`, `orderable`, `pg_virtual`, `unique`,
+  `pgdefault`, `query_ops`, `orderable`, `pg_trigger`, `pg_virtual`, `unique`,
   `foreign_key`, `relation`, `flatten` and the five roles. The `DbType` struct
   attribute accepts only `pgtype` and `pgdefault`.
 - A `DbType` struct must not annotate its fields, and it must carry `pgtype`.
@@ -750,14 +816,15 @@ For reference when reading a compile failure:
 - `` `DbPatch` cannot be derived for a `#[db(subquery = "...")]` struct; a subquery is read-only ``
 - ``unknown attribute; expected `primary_key`, `version`, `created_at`,
   `updated_at`, `tenant`, `flatten`, `pgtype`, `pgdefault`, `query_ops`,
-  `orderable`, `pg_virtual`, `unique`, `foreign_key` or `relation` ``
+  `orderable`, `pg_trigger`, `pg_virtual`, `unique`, `foreign_key` or
+  `relation` ``
 - ``duplicate `orderable` ``
 - `` `#[db(flatten)]` cannot be combined with `orderable` ``
 - `` a fragment cannot carry `#[db(...)]` roles ``
 - `` a fragment cannot `#[db(flatten)]` another struct ``
 - `` `#[db(flatten)]` cannot be combined with `pgtype` `` (and the same for
-  `pgdefault`, `query_ops`, `orderable`, `pg_virtual`, `unique`, `foreign_key`,
-  `relation` and a role)
+  `pgdefault`, `query_ops`, `orderable`, `pg_trigger`, `pg_virtual`, `unique`,
+  `foreign_key`, `relation` and a role)
 - `` `#[db(flatten)]` field must not be `Option` ``
 - `` `pgtype` must not be empty ``
 - ``duplicate `pgtype` ``
@@ -780,7 +847,21 @@ For reference when reading a compile failure:
 - ``duplicate query operator``
 - `` `#[db(pg_trigger)]` is only legal on a table row ``
 - `` `#[db(pg_trigger)]` must not be empty ``
-- ``duplicate `pg_trigger` name ``
+- `` `pg_trigger` requires `name = "..."` ``
+- `` `pg_trigger` requires `timing = before` or `timing = after` ``
+- `` `pg_trigger` requires `events(...)` ``
+- ``unknown `pg_trigger` option; expected `name`, `on`, `timing`, `events`,
+  `level`, `condition`, `function`, `language` or `body` ``
+- ``a `pg_trigger` without `body` is a reference; it accepts only `name` and
+  `on` ``
+- ``conflicting `pg_trigger` definitions for `name` on table `table` ``
+- `` `truncate` requires `level = statement` ``
+- `` `truncate` cannot have a `condition` ``
+- `` `condition` is only legal on a row-level trigger ``
+- `` `#[db(pg_trigger)]` cannot be combined with `pg_virtual` ``
+- `` `#[db(pg_trigger)]` cannot be combined with a role ``
+- `` `#[db(flatten)]` cannot be combined with `pg_trigger` ``
+- `` `#[db(relation)]` cannot be combined with `pg_trigger` ``
 - `` `#[db(pg_virtual)]` is only legal on a table row ``
 - `` `#[db(pg_virtual)]` cannot be combined with a role ``
 - `` `#[db(pg_virtual)]` cannot be combined with `pgdefault` ``
@@ -829,15 +910,22 @@ matches `Meta` and panics on the other variants:
   `DbType` type's `PG_TYPE`, `pg_default` is its `pgdefault` annotation, its
   `DbType` type's `PG_DEFAULT`, or `None`, `generated` is the `pg_virtual`
   expression or `None`, `query_ops` is the `query_ops` list in declaration order
-  or an empty slice, and `orderable` says whether the column declared
-  `#[db(orderable)]`.
+  or an empty slice, `orderable` says whether the column declared
+  `#[db(orderable)]`, and `triggers()` lists the trigger references that fill
+  the column in declaration order, or an empty slice.
 - `relations` — every `#[db(relation)]` field in declaration order, with its
   field name, model name, target table, cardinality, local key and target key.
 - `foreign_keys` — every `#[db(foreign_key)]` in declaration order, with its
   local columns, target table and referenced columns.
 - `unique_keys` — every field-level `#[db(unique)]` and struct-level
   `#[db(unique(columns = [...]))]`, with its column list.
-- `triggers` — every `#[db(pg_trigger = "...")]` name in declaration order.
+- `triggers` — every `#[db(pg_trigger)]` declaration in declaration order as a
+  `dbkit::TriggerRef { name, table }`. `table` is `on = "..."` or the model's
+  table, so an entry may name another model's table.
+- `trigger_definitions` — every declaration that carries a `body`, in
+  declaration order, as a `dbkit::Trigger` with `name`, `table`, `timing`,
+  `events`, `level`, `condition`, `function`, `language` and `body`. A name-only
+  reference has no entry here.
 
 A `#[db(subquery = "...")]` struct emits
 `Meta::SubQuery(&SubQuery { sql, columns })` instead, where `sql` is the
@@ -963,7 +1051,8 @@ pub struct UserPatch {
 - A nullable column's field is `Patch<T>`, not `Patch<Option<T>>`, so `null`
   means "clear" rather than "set to null".
 - `created_at` and `updated_at` are not patchable and are omitted.
-- A `#[db(pg_virtual)]` field is omitted; PostgreSQL computes it.
+- A `#[db(pg_virtual)]` field is omitted; PostgreSQL computes it. A
+  trigger-maintained field, one with `#[db(pg_trigger)]`, is omitted too.
 - A `#[db(flatten)]` field becomes a `#[serde(flatten)]` field of type
   `<FieldType>Patch`, so the fragment's columns are top-level keys of the same
   patch object. The fragment must therefore derive `DbPatch` too. On a
@@ -1095,8 +1184,8 @@ pub struct UserInsert {
   stores `NULL`.
 - A `#[db(tenant)]` field is always required; the derive rejects a default, so
   the insert cannot leave the tenant to the database.
-- A `#[db(pg_virtual)]` field is omitted; PostgreSQL computes it. A
-  `#[db(relation)]` field is not a column and is omitted.
+- A `#[db(pg_virtual)]` or trigger-maintained field is omitted; PostgreSQL
+  computes it. A `#[db(relation)]` field is not a column and is omitted.
 - `new(...)` takes the required fields in declaration order, plus each
   flattened fragment insert. Every optional field starts `None`.
 - `set_<field>(value)` sets one column. There is no `clear_` method: on insert,
@@ -1184,6 +1273,7 @@ impl WidgetColumn {
     pub fn generated(self) -> Option<&'static str> { /* the pg_virtual expression, ... */ }
     pub fn query_ops(self) -> &'static [FilterOperator] { /* ... */ }
     pub fn orderable(self) -> bool { /* ... */ }
+    pub fn triggers(self) -> &'static [TriggerRef] { /* ... */ }
 }
 
 impl Serialize for WidgetColumn { /* serialize_str(self.name()) */ }
@@ -1366,9 +1456,9 @@ assert!(
 Each problem is one line naming the table and column, so a failing test says
 what to fix. The check covers names and nullability from
 `information_schema.columns`, tables without a model, types and defaults,
-generated columns, foreign keys, unique indexes, trigger names, and a column
-declared more than once — which is what two `#[db(flatten)]` fragments sharing a
-column name produce.
+generated columns, foreign keys, unique indexes, triggers, and a column declared
+more than once — which is what two `#[db(flatten)]` fragments sharing a column
+name produce.
 Types are compared structurally: the helper creates a temporary table whose
 columns use the `pgtype` annotations and compares each column's `atttypid` and
 `atttypmod` with the real table's, so length and precision must match and any
@@ -1377,9 +1467,16 @@ compared from the same probe table: the helper adds each `pgdefault` as a
 `DEFAULT` clause, or each `pg_virtual` as a `GENERATED ALWAYS AS (...) VIRTUAL`
 clause, and compares the normalized expression PostgreSQL reports for it with
 the real column's expression. A missing or extra default, generated kind or
-expression is reported. Foreign keys, unique indexes and trigger names are
-compared in both directions, so a live object without a model declaration is a
-problem too.
+expression is reported.
+
+Triggers are collected from every model before they are compared, because a
+field on one model may declare a trigger installed on another table. Names are
+compared in both directions, so a live trigger without a declaration is a
+problem too. For a declaration with a `body`, the check also compares timing,
+events, row or statement level, function name, language and body; a `WHEN`
+condition is parsed by PostgreSQL on a temporary trigger in `pg_temp` and the
+two expression trees are compared, so formatting and identifier quoting do not
+matter. A declaration without a `body` checks only the name.
 
 The helper takes a single connection, not a pool, because its temporary table is
 session-local:
@@ -1418,7 +1515,9 @@ These are deliberately out of scope until a model needs them:
   new annotation.
 - Loading a `#[db(relation)]`: the annotation records the field and the join,
   but dbkit does not execute the second query.
-- Trigger timing, events and bodies: `#[db(pg_trigger)]` checks only the name.
+- Generating `schema.sql` from `MODELS`: triggers are fully described, but the
+  generator does not exist yet. Non-unique indexes and foreign-key actions are
+  not modelled either, so a generated schema would currently lose them.
 - Foreign-key `on delete` and `on update` actions: only the columns and target
   are compared.
 - Stored generated columns: `#[db(pg_virtual)]` describes a virtual column.
