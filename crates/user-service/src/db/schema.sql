@@ -1,3 +1,9 @@
+create table "tenant" (
+    "id" uuid not null default uuidv7(),
+    "name" text not null,
+    constraint "tenant_pkey" primary key ("id")
+);
+
 create table "user" (
     "id" uuid not null default uuidv7(),
     "email" text not null unique,

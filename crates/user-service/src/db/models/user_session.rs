@@ -1,3 +1,4 @@
+use super::tenant::TenantId;
 use super::user::UserId;
 use crate::db::primitives::session_token::SessionToken;
 use chrono::DateTime;
@@ -60,4 +61,16 @@ pub struct UserSession {
     #[db(pgtype = "bigint")]
     #[db(pgdefault = "0")]
     pub version: i64,
+}
+
+impl UserSession {
+    pub fn has_global_permissions(&self, scope: &str, action: &str) -> bool {
+        // Out of scope for now, but can be used to check global permissions
+        true
+    }
+
+    pub fn has_tenant_permissions(&self, tenant_id: TenantId, scope: &str, action: &str) -> bool {
+        // Out of scope for now, but can be used to check tenant-specific permissions
+        true
+    }
 }

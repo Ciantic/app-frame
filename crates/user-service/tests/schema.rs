@@ -7,6 +7,8 @@ use sqlx::postgres::PgArguments;
 use sqlx::postgres::PgRow;
 use sqlx::query::Query;
 use user_service::db::models::MODELS;
+use user_service::db::models::tenant::Tenant;
+use user_service::db::models::tenant::TenantId;
 use user_service::db::models::user::User;
 use user_service::db::models::user::UserId;
 use user_service::db::models::user_session::UserSession;
@@ -29,6 +31,26 @@ struct Fixture {
 }
 
 const FIXTURES: &[Fixture] = &[
+    Fixture {
+        meta: Tenant::meta,
+        insert: || {
+            let tenant = Tenant {
+                id: TenantId(Uuid::from_u128(3)),
+                name: "sample".to_owned(),
+            };
+
+            sqlx::query::<Postgres>(
+                r#"INSERT INTO "tenant" (id, name) VALUES ($1, $2) RETURNING *"#,
+            )
+            .bind(tenant.id)
+            .bind(tenant.name)
+        },
+        decode: |row| {
+            Tenant::from_row(row)
+                .map(drop)
+                .map_err(|error| error.to_string())
+        },
+    },
     Fixture {
         meta: User::meta,
         insert: || {
