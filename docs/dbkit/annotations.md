@@ -1192,6 +1192,9 @@ surprise.
 
 ## Not yet supported
 
+The annotation gaps found while converting the invoice models, with proposed
+syntax and schema checks, are tracked in [missing annotations](missing-annotations.md).
+
 These are deliberately out of scope until a model needs them:
 
 - Soft-delete columns (`deleted_at`) and any read filter convention around
