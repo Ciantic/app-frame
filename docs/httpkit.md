@@ -1,7 +1,7 @@
-# httpkit plan
+# httpkit
 
-Plan for `httpkit` and `httpkit-macros`: generate axum routes for the dbkit
-query, insert, patch and delete builders. Implemented in `crates/httpkit`,
+How `httpkit` and `httpkit-macros` generate axum routes for the dbkit query,
+insert, patch and delete builders. Implemented in `crates/httpkit`,
 `crates/httpkit-macros` and the dbkit tenant support.
 
 ## Scope
