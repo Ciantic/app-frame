@@ -174,6 +174,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let version = optional(annotations.version.as_ref());
             let created_at = optional(annotations.created_at.as_ref());
             let updated_at = optional(annotations.updated_at.as_ref());
+            let tenant = optional(annotations.tenant.as_ref());
 
             quote! {
                 static META: ::std::sync::OnceLock<::dbkit::TableMeta> =
@@ -190,6 +191,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         version: #version,
                         created_at: #created_at,
                         updated_at: #updated_at,
+                        tenant: #tenant,
                         columns: ::std::boxed::Box::leak(columns.into_boxed_slice()),
                     }
                 }))
@@ -199,6 +201,22 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     let columns = derive_columns::expand(input, &annotations)?;
     let keys = derive_keys::expand(input, &annotations)?;
+    let tenant_owned = match (&annotations.shape, &annotations.tenant) {
+        (annotations::Shape::Table(_), Some(tenant)) => {
+            let column =
+                syn::LitStr::new(tenant.to_string().trim_start_matches("r#"), tenant.span());
+
+            quote! {
+                #[automatically_derived]
+                impl #impl_generics ::dbkit::TenantOwned for #name #type_generics
+                    #where_clause
+                {
+                    const TENANT_COLUMN: &'static str = #column;
+                }
+            }
+        }
+        _ => quote!(),
+    };
 
     Ok(quote! {
         #[automatically_derived]
@@ -211,6 +229,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #keys
 
         #columns
+
+        #tenant_owned
     })
 }
 

@@ -1,4 +1,4 @@
-//! Generation of `{Model}PK` and, with a version column, `{Model}PKV`, decoded from `RETURNING` by column name.
+//! Generation of `{Model}PK` and, with a tenant or version column, `{Model}PKV`, decoded by column name.
 
 use crate::annotations;
 use crate::annotations::Column;
@@ -29,21 +29,43 @@ pub(crate) fn expand(
     let pk = format_ident!("{name}PK");
     let pk_doc = format!("The primary key of [`{name}`].");
 
-    let pkv = format_ident!("{name}PKV");
-    let pkv = if let Some(version) = &annotations.version {
-        let mut key_and_version = key.clone();
-        key_and_version.push(column(annotations, version)?);
+    let tenant = annotations.tenant.as_ref();
+    let mut identity = key.clone();
+    if let Some(tenant) = tenant
+        && !annotations.primary_key.contains(tenant)
+    {
+        identity.push(column(annotations, tenant)?);
+    }
+    if let Some(version) = &annotations.version {
+        identity.push(column(annotations, version)?);
+    }
 
-        let doc = format!(
-            "The primary key and version of [`{name}`], for operations that identify a row and \
-             check its version."
-        );
+    let pkv_ident = format_ident!("{name}PKV");
+    let pkv = if tenant.is_some() || annotations.version.is_some() {
+        let doc = match (tenant.is_some(), annotations.version.is_some()) {
+            (true, true) => format!(
+                "The primary key, tenant and version of [`{name}`], for operations that identify \
+                 a row and check its tenant and version."
+            ),
+            (true, false) => format!(
+                "The primary key and tenant of [`{name}`], for operations that identify a row \
+                 within a tenant."
+            ),
+            (false, true) => format!(
+                "The primary key and version of [`{name}`], for operations that identify a row \
+                 and check its version."
+            ),
+            (false, false) => unreachable!("the key struct exists only with a tenant or version"),
+        };
 
-        key_struct(&pkv, visibility, &key_and_version, doc)
+        key_struct(&pkv_ident, visibility, &identity, doc)
     } else {
         let doc = format!(
-            "The primary key of [`{name}`]; the model has no version, so this is [`{pk}`]."
+            "The primary key of [`{name}`]; the model has no tenant or version, so this is \
+             [`{pk}`]."
         );
+
+        let pkv = &pkv_ident;
 
         quote! {
             #[doc = #doc]
@@ -52,15 +74,35 @@ pub(crate) fn expand(
         }
     };
 
+    let tenant_row = match tenant {
+        Some(tenant) => quote! {
+            #[automatically_derived]
+            impl ::dbkit::TenantRow for #pkv_ident {
+                fn tenant(&self) -> ::core::option::Option<&dyn ::dbkit::Bind> {
+                    ::core::option::Option::Some(&self.#tenant)
+                }
+            }
+        },
+        None => quote! {
+            #[automatically_derived]
+            impl ::dbkit::TenantRow for #pkv_ident {
+                fn tenant(&self) -> ::core::option::Option<&dyn ::dbkit::Bind> {
+                    ::core::option::Option::None
+                }
+            }
+        },
+    };
+
     let pk = key_struct(&pk, visibility, &key, pk_doc);
 
     Ok(quote! {
         #pk
         #pkv
+        #tenant_row
     })
 }
 
-/// The key fields as written in the model: the first is the primary key and the last, when present, is the version.
+/// The key fields as written in the model: primary key, then a separate tenant column, then version.
 fn key_struct(
     name: &Ident,
     visibility: &Visibility,

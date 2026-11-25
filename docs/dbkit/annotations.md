@@ -87,7 +87,7 @@ generated patch would expose; role-annotated fields never are.
 - `#[db(pgtype = "...")]` and `#[db(pgdefault = "...")]` on the struct of a
   value type that derives `DbType`, instead of on a field.
 - `#[db(primary_key)]`, `#[db(version)]`, `#[db(created_at)]`,
-  `#[db(updated_at)]` on a field of a table row.
+  `#[db(updated_at)]`, `#[db(tenant)]` on a field of a table row.
 - `#[db(query_ops(...))]` on a field, at most once; the parentheses hold a
   comma-separated operator list.
 - `#[db(orderable)]` on a field, at most once.
@@ -473,6 +473,28 @@ Marks the modification timestamp.
   omitted, the builder writes the creation timestamp to both, so an imported row
   does not look freshly modified.
 
+## `tenant`
+
+Marks the tenant ownership column.
+
+- Legal on: one field of a table row, optional; not on a fragment or a
+  subquery.
+- The field must not be `Option` and must not have a default, so every write
+  states its tenant explicitly.
+- The field may also carry `#[db(primary_key)]`. In that case the primary key
+  predicate already constrains the tenant and the patch and delete renderers
+  do not add it again.
+- `TableMeta::tenant` records the column name, and `#[derive(DbModel)]`
+  implements `dbkit::TenantOwned` with `TENANT_COLUMN`.
+- The insert input keeps the tenant column as a required plain field.
+- The patch input makes it a required plain field, like the primary key and
+  version; it is not `Patch<T>` and cannot be changed. The renderer adds
+  `AND "tenant_id" = $n` to `WHERE`.
+- `<Model>PKV` includes the tenant column, and the delete renderer adds the
+  same predicate.
+- Generated insert, patch and key types implement `dbkit::TenantRow`, which the
+  HTTP layer uses to choose tenant or global permission per entry.
+
 ## Legality rules enforced by the derive
 
 Every rule below produces a compile error.
@@ -493,11 +515,14 @@ Every rule below produces a compile error.
 - `#[db(flatten)]` cannot be combined with `pgtype`, `pgdefault`, `query_ops`,
   `orderable` or a role, and its field must not be `Option`.
 - A fragment cannot `#[db(flatten)]` another struct.
-- `version`, `created_at` and `updated_at` may each appear at most once.
+- `version`, `created_at`, `updated_at` and `tenant` may each appear at most
+  once.
 - A single field may carry at most one role, even if the roles are split across
-  several `#[db(...)]` attributes; a primary key column therefore never also
-  takes `version`, `created_at` or `updated_at`.
+  several `#[db(...)]` attributes, with one exception: `primary_key` and
+  `tenant` may share a field. A primary key column therefore never also takes
+  `version`, `created_at` or `updated_at`.
 - A role must not be applied to an `Option` field.
+- A `tenant` field must not carry `pgdefault`.
 - `version` must be `i64`.
 - `created_at` and `updated_at` must be `DateTime`.
 - An empty `#[db]` attribute is an error.
@@ -581,6 +606,7 @@ For reference when reading a compile failure:
   other role)
 - `` `#[db(version)]` field must be `i64` ``
 - `` `#[db(created_at)]` field must be a `DateTime` ``
+- `` `#[db(tenant)]` field must not have a default ``
 - ``unknown query operator; expected `eq`, `neq`, ...``
 - ``duplicate query operator``
 
@@ -605,8 +631,10 @@ matches `Meta` and panics on the other variants:
 `dbkit::TableMeta`:
 
 - `table` — the value of `#[db(table = "...")]`.
-- `primary_key`, `version`, `created_at`, `updated_at` — the annotated field
-  names, or `None` for absent optional roles.
+- `primary_key` — the annotated key field names in declaration order.
+- `version`, `created_at`, `updated_at`, `tenant` — the annotated field names,
+  or `None` for absent optional roles. A table with `tenant` also implements
+  `dbkit::TenantOwned` with `TENANT_COLUMN`.
 - `columns` — every column in declaration order as
   `&'static dyn dbkit::ErasedColumn`, whose `name()`, `nullable()`,
   `pg_type()`, `pg_default()` and `query_ops()` answer like the generated
@@ -662,21 +690,23 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for UserPK {
 }
 ```
 
-`<Model>PKV` holds the same fields and appends the version column when the model
-has one:
+`<Model>PKV` holds the same fields, then the tenant column when the model has
+one that is not already part of the key, then the version column:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPKV {
     pub id: UserId,
+    pub tenant_id: TenantId,
     pub version: i64,
 }
 ```
 
 - PK fields follow `TableMeta::primary_key`, which is model declaration order. A
   composite key contributes one field per key column.
-- PKV appends `version` after the key fields. A model without a version gets an
-  alias instead: `pub type UserPKV = UserPK;`.
+- PKV appends `tenant_id` unless the primary key already contains it, then
+  `version`. A model without a tenant or version gets an alias instead:
+  `pub type UserPKV = UserPK;`.
 - Both names have the model's visibility and work with `Debug`, `Clone`,
   `Serialize`, `Deserialize` and `sqlx::FromRow`, so a `RETURNING` list decodes
   into either.
@@ -730,6 +760,9 @@ pub struct UserPatch {
 - When the model has a `#[db(version)]` field, the patch carries it as a
   required field too, so an update states the version it expects. A model
   without one, such as an append-only table, gets a patch without a version.
+- When the model has a `#[db(tenant)]` column, the patch also carries it as a
+  required plain field and adds it to `WHERE`. It is not `Patch<T>`, so a patch
+  cannot move a row to another tenant.
 - Every other column becomes a `dbkit::Patch<T>` field: a missing key is
   `Patch::Absent` (leave the column alone), an explicit `null` is `Patch::Null`
   (clear a nullable column) and any other value is `Patch::Set`.
@@ -810,8 +843,10 @@ User::delete([
 - The input is the key struct, not a new `{Model}Delete` type. `DeleteKey::key`
   lists the primary key values in `TableMeta::primary_key` order, and
   `DeleteKey::version` is `Some` exactly when the model has a version.
+- A tenant-owned model includes `tenant_id` in `PKV` and renders
+  `"tenant_id" = $n` in `WHERE` unless the primary key already contains it.
 - A versioned model renders `"version" = $n` in `WHERE`, so a stale version
-  deletes nothing. A model without a version has
+  deletes nothing. A model without a version or tenant has
   `type {Model}PKV = {Model}PK` and deletes by key alone.
 - `DeleteQuery::render()` returns one `dbkit::RenderedDelete` per entry, each a
   `DELETE` whose identifiers come from `TableMeta`.
@@ -863,14 +898,16 @@ pub struct UserInsert {
 - A required field is non-null and has no default. An optional field is omitted
   from the `INSERT` when it is `None`, so PostgreSQL applies the default or
   stores `NULL`.
+- A `#[db(tenant)]` field is always required; the derive rejects a default, so
+  the insert cannot leave the tenant to the database.
 - `new(...)` takes the required fields in declaration order, plus each
   flattened fragment insert. Every optional field starts `None`.
 - `set_<field>(value)` sets one column. There is no `clear_` method: on insert,
   “not given” means the database chooses, not SQL `NULL`.
 - A flattened field nests the fragment's insert type with `serde(flatten)`.
 - The struct derives `Serialize`, `Deserialize` and `garde::Validate`. Role
-  fields (primary key, version, timestamps) are not validated; business fields
-  whose payload type can carry rules are marked `#[garde(dive)]`.
+  fields (primary key, tenant, version, timestamps) are not validated; business
+  fields whose payload type can carry rules are marked `#[garde(dive)]`.
 - An inherited default (`pgdefault = inherit`) makes the field optional and, for
   a non-null column, adds a const assertion that the type has a default.
 

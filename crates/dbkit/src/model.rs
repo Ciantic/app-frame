@@ -186,6 +186,8 @@ pub struct TableMeta {
     pub version: Option<&'static str>,
     pub created_at: Option<&'static str>,
     pub updated_at: Option<&'static str>,
+    /// The tenant ownership column, when the table declares `#[db(tenant)]`.
+    pub tenant: Option<&'static str>,
     /// Every column in declaration order, with the columns of `#[db(flatten)]` fields spliced in place.
     pub columns: &'static [&'static dyn ErasedColumn],
 }
@@ -240,6 +242,11 @@ impl Meta {
         }
     }
 
+    /// The table's tenant ownership column, when it declares `#[db(tenant)]`.
+    pub fn tenant(self) -> Option<&'static str> {
+        self.table().and_then(|table| table.tenant)
+    }
+
     /// The subquery description, or `None` when the model is a table or a fragment.
     pub fn subquery(self) -> Option<&'static SubQuery> {
         match self {
@@ -282,4 +289,15 @@ pub trait Selectable: Model {
 pub trait Model {
     /// What the model describes, built on first use and cached.
     fn meta() -> Meta;
+}
+
+/// A table whose rows belong to a tenant, declared with `#[db(tenant)]` on the ownership column.
+pub trait TenantOwned: Model {
+    /// The tenant ownership column as the database spells it.
+    const TENANT_COLUMN: &'static str;
+}
+
+/// The tenant value an insert, patch or key carries; `None` means the model is not tenant-owned.
+pub trait TenantRow {
+    fn tenant(&self) -> Option<&dyn crate::query::Bind>;
 }

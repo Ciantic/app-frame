@@ -87,7 +87,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 let role = annotations.primary_key.contains(field)
                     || annotations.version.as_ref() == Some(field)
                     || annotations.created_at.as_ref() == Some(field)
-                    || annotations.updated_at.as_ref() == Some(field);
+                    || annotations.updated_at.as_ref() == Some(field)
+                    || annotations.tenant.as_ref() == Some(field);
                 let optional = match pg_default {
                     PgDefault::Declared(_) | PgDefault::Inherited => true,
                     PgDefault::None => *nullable,
@@ -172,6 +173,25 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     }
 
+    let tenant_row = match &annotations.tenant {
+        Some(tenant) => quote! {
+            #[automatically_derived]
+            impl #impl_generics ::dbkit::TenantRow for #insert #type_generics #where_clause {
+                fn tenant(&self) -> ::core::option::Option<&dyn ::dbkit::Bind> {
+                    ::core::option::Option::Some(&self.#tenant)
+                }
+            }
+        },
+        None => quote! {
+            #[automatically_derived]
+            impl #impl_generics ::dbkit::TenantRow for #insert #type_generics #where_clause {
+                fn tenant(&self) -> ::core::option::Option<&dyn ::dbkit::Bind> {
+                    ::core::option::Option::None
+                }
+            }
+        },
+    };
+
     let insert_method = match annotations.shape {
         annotations::Shape::Table(_) => quote! {
             impl #impl_generics #name #type_generics #where_clause {
@@ -215,6 +235,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 columns
             }
         }
+
+        #tenant_row
 
         #insert_method
     })

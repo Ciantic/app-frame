@@ -35,6 +35,8 @@ pub use model::Selectable;
 pub use model::SubQuery;
 pub use model::TableFragment;
 pub use model::TableMeta;
+pub use model::TenantOwned;
+pub use model::TenantRow;
 pub use patch::Assignment;
 pub use patch::Patch;
 pub use patch::PatchError;

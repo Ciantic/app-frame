@@ -16,6 +16,7 @@ pub enum Role {
     Version,
     CreatedAt,
     UpdatedAt,
+    Tenant,
 }
 
 /// A `dbkit::FilterOperator` variant, known to the macro by its annotation name.
@@ -91,6 +92,7 @@ pub struct Annotations {
     pub version: Option<Ident>,
     pub created_at: Option<Ident>,
     pub updated_at: Option<Ident>,
+    pub tenant: Option<Ident>,
     /// Every field in declaration order.
     pub columns: Vec<Column>,
 }
@@ -155,6 +157,7 @@ const ROLES: &[(&str, Role)] = &[
     ("version", Role::Version),
     ("created_at", Role::CreatedAt),
     ("updated_at", Role::UpdatedAt),
+    ("tenant", Role::Tenant),
 ];
 
 const FILTER_OPERATORS: &[(&str, FilterOperator)] = &[
@@ -267,10 +270,14 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         }
 
         let field_roles = &annotations.roles;
-        if field_roles.len() > 1 {
+        let primary_key_and_tenant = field_roles.len() == 2
+            && field_roles.contains(&Role::PrimaryKey)
+            && field_roles.contains(&Role::Tenant);
+        if field_roles.len() > 1 && !primary_key_and_tenant {
             errors.push(syn::Error::new(
                 field.span(),
-                "a field can carry at most one `#[db(...)]` role",
+                "a field can carry at most one `#[db(...)]` role, except `primary_key` and \
+                 `tenant` together",
             ));
         }
         if fragment && !field_roles.is_empty() {
@@ -283,6 +290,12 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
             errors.push(syn::Error::new(
                 field.span(),
                 "a subquery cannot carry `#[db(...)]` roles",
+            ));
+        }
+        if field_roles.contains(&Role::Tenant) && annotations.pg_default.is_some() {
+            errors.push(syn::Error::new(
+                field.span(),
+                "`#[db(tenant)]` field must not have a default",
             ));
         }
 
@@ -320,6 +333,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
     let version = unique(&roles, Role::Version, &mut errors);
     let created_at = unique(&roles, Role::CreatedAt, &mut errors);
     let updated_at = unique(&roles, Role::UpdatedAt, &mut errors);
+    let tenant = unique(&roles, Role::Tenant, &mut errors);
 
     if matches!(shape, Some(Shape::Table(_)))
         && !roles.iter().any(|(role, _, _)| *role == Role::PrimaryKey)
@@ -342,6 +356,7 @@ pub fn parse(input: &DeriveInput) -> syn::Result<Annotations> {
         version,
         created_at,
         updated_at,
+        tenant,
         columns,
     })
 }
@@ -581,7 +596,7 @@ fn field_annotations(field: &Field, errors: &mut Vec<syn::Error>) -> FieldAnnota
                 else {
                     return Err(meta.error(
                         "unknown attribute; expected `primary_key`, `version`, `created_at`, \
-                         `updated_at`, `flatten`, `pgtype`, `pgdefault`, `query_ops` or \
+                         `updated_at`, `tenant`, `flatten`, `pgtype`, `pgdefault`, `query_ops` or \
                          `orderable`",
                     ));
                 };
@@ -612,6 +627,7 @@ fn check_field_type(role: Role, field: &Field, errors: &mut Vec<syn::Error>) {
         Role::Version => "version",
         Role::CreatedAt => "created_at",
         Role::UpdatedAt => "updated_at",
+        Role::Tenant => "tenant",
     };
 
     if is(&field.ty, "Option") {
@@ -1744,6 +1760,85 @@ mod tests {
 
         assert!(
             message.contains("the struct accepts `pgtype` or `pgdefault`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn reads_the_tenant_role() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(tenant, pgtype = "uuid")]
+                tenant_id: TenantId,
+                #[db(pgtype = "text")]
+                name: String,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(model.tenant.unwrap().to_string(), "tenant_id");
+    }
+
+    #[test]
+    fn allows_tenant_and_primary_key_on_one_column() {
+        let model = parse_model(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, tenant, pgtype = "uuid")]
+                tenant_id: TenantId,
+                #[db(pgtype = "text")]
+                name: String,
+            }
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(names(&model.primary_key), ["tenant_id"]);
+        assert_eq!(model.tenant.unwrap().to_string(), "tenant_id");
+    }
+
+    #[test]
+    fn rejects_a_defaulted_tenant_column() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(tenant, pgtype = "uuid", pgdefault = "uuidv7()")]
+                tenant_id: TenantId,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(tenant)]` field must not have a default"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_optional_tenant_column() {
+        let message = error(
+            r#"
+            #[db(table = "widget")]
+            struct Widget {
+                #[db(primary_key, pgtype = "uuid")]
+                id: WidgetId,
+                #[db(tenant, pgtype = "uuid")]
+                tenant_id: Option<TenantId>,
+            }
+        "#,
+        );
+
+        assert!(
+            message.contains("`#[db(tenant)]` field must not be `Option`"),
             "{message}"
         );
     }

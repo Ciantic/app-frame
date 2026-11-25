@@ -31,6 +31,7 @@ pub struct UserId(#[garde(skip)] pub Uuid);
 pub struct User {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]
+    #[db(query_ops(eq, any))]
     pub id: UserId,
 
     #[db(pgtype = "text")]

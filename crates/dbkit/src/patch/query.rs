@@ -19,7 +19,7 @@ pub struct Assignment<'a> {
 }
 
 /// The update view of a patch from `#[derive(DbPatch)]`; it pairs with `TableMeta::primary_key` and `version`.
-pub trait PatchRow {
+pub trait PatchRow: crate::TenantRow {
     type Model: Model;
 
     /// Changed business columns, in declaration order.
@@ -100,6 +100,8 @@ pub enum PatchError {
     KeyColumns { expected: usize, actual: usize },
     /// `TableMeta::version` and `PatchRow::version()` disagree.
     VersionColumns,
+    /// `TableMeta::tenant` and `TenantRow::tenant()` disagree.
+    TenantColumns,
     /// A patch model is a fragment or subquery and has no table.
     NotATable,
     /// `rows_affected` was not exactly one on this entry.
@@ -120,6 +122,8 @@ impl fmt::Display for PatchError {
             ),
             PatchError::VersionColumns => formatter
                 .write_str("the model's version column and the patch's expected version disagree"),
+            PatchError::TenantColumns => formatter
+                .write_str("the model's tenant column and the patch's tenant value disagree"),
             PatchError::NotATable => {
                 formatter.write_str("a patch batch needs a table model, not a fragment or subquery")
             }
@@ -215,6 +219,17 @@ fn render_entry<P: PatchRow>(
         push_identifier(&mut renderer.sql, column);
         renderer.sql.push_str(" = ");
         renderer.push(value)?;
+    }
+
+    if let Some(tenant_column) = meta.tenant
+        && !meta.primary_key.contains(&tenant_column)
+    {
+        let tenant = patch.tenant().ok_or(PatchError::TenantColumns)?;
+
+        renderer.sql.push_str(" AND ");
+        push_identifier(&mut renderer.sql, tenant_column);
+        renderer.sql.push_str(" = ");
+        renderer.push(tenant)?;
     }
 
     if let (Some(version), Some(expected)) = (meta.version, expected_version) {

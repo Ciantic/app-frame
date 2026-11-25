@@ -33,11 +33,13 @@ pub struct UserSessionId(#[garde(skip)] pub Uuid);
 pub struct UserSession {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]
+    #[db(query_ops(eq, any))]
     pub id: UserSessionId,
 
     pub user_id: UserId,
 
     #[db(pgtype = "text")]
+    #[db(query_ops(eq))]
     pub token_hash: SessionToken,
 
     #[db(pgtype = "timestamptz")]
@@ -64,13 +66,39 @@ pub struct UserSession {
 }
 
 impl UserSession {
-    pub fn has_global_permissions(&self, scope: &str, action: &str) -> bool {
+    pub fn has_global_permissions(&self, _scope: &str, _action: &str) -> bool {
         // Out of scope for now, but can be used to check global permissions
         true
     }
 
-    pub fn has_tenant_permissions(&self, tenant_id: TenantId, scope: &str, action: &str) -> bool {
+    pub fn has_tenant_permissions(
+        &self,
+        _tenant_id: TenantId,
+        _scope: &str,
+        _action: &str,
+    ) -> bool {
         // Out of scope for now, but can be used to check tenant-specific permissions
         true
+    }
+
+    pub fn has_permission(&self, permission: &httpkit::Permission<TenantId>) -> bool {
+        match permission {
+            httpkit::Permission::Global { scope, action } => {
+                self.has_global_permissions(scope, action)
+            }
+            httpkit::Permission::Tenant {
+                tenant_id,
+                scope,
+                action,
+            } => self.has_tenant_permissions(*tenant_id, scope, action),
+        }
+    }
+}
+
+impl httpkit::Session for UserSession {
+    type TenantId = TenantId;
+
+    fn has_permission(&self, permission: &httpkit::Permission<TenantId>) -> bool {
+        UserSession::has_permission(self, permission)
     }
 }

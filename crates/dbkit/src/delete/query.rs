@@ -12,7 +12,7 @@ use sqlx::postgres::PgArguments;
 use std::fmt;
 
 /// The delete view of a key from `#[derive(DbDelete)]`; it pairs with `TableMeta::primary_key` and `version`.
-pub trait DeleteKey {
+pub trait DeleteKey: crate::TenantRow {
     type Model: Model;
 
     /// Primary key values, in `TableMeta::primary_key` order.
@@ -87,6 +87,8 @@ pub enum DeleteError {
     KeyColumns { expected: usize, actual: usize },
     /// `TableMeta::version` and `DeleteKey::version()` disagree.
     VersionColumns,
+    /// `TableMeta::tenant` and `TenantRow::tenant()` disagree.
+    TenantColumns,
     /// A delete model is a fragment or subquery and has no table.
     NotATable,
     /// `rows_affected` was not exactly one on this entry.
@@ -104,6 +106,9 @@ impl fmt::Display for DeleteError {
             ),
             DeleteError::VersionColumns => formatter
                 .write_str("the model's version column and the key's expected version disagree"),
+            DeleteError::TenantColumns => {
+                formatter.write_str("the model's tenant column and the key's tenant value disagree")
+            }
             DeleteError::NotATable => formatter
                 .write_str("a delete batch needs a table model, not a fragment or subquery"),
             DeleteError::NotDeleted { index } => write!(
@@ -160,6 +165,17 @@ fn render_entry<K: DeleteKey>(meta: &TableMeta, key: &K) -> Result<RenderedDelet
         push_identifier(&mut renderer.sql, column);
         renderer.sql.push_str(" = ");
         renderer.push(value)?;
+    }
+
+    if let Some(tenant_column) = meta.tenant
+        && !meta.primary_key.contains(&tenant_column)
+    {
+        let tenant = key.tenant().ok_or(DeleteError::TenantColumns)?;
+
+        renderer.sql.push_str(" AND ");
+        push_identifier(&mut renderer.sql, tenant_column);
+        renderer.sql.push_str(" = ");
+        renderer.push(tenant)?;
     }
 
     if let (Some(version), Some(expected)) = (meta.version, expected_version) {

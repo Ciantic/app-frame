@@ -17,6 +17,7 @@ pub struct EmailId(pub Uuid);
 pub struct Email {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]
+    #[db(query_ops(eq, any))]
     pub id: EmailId,
 
     #[db(pgtype = "text")]

@@ -129,6 +129,8 @@ Rules:
 - The table and column names come from `TableMeta`, never from a request.
 - The primary key is the `WHERE` clause, in declaration order. A composite key
   renders `"lang" = $1 AND "key" = $2`.
+- A tenant-owned model adds `"tenant_id" = $n` after the key predicates,
+  unless the tenant column is already part of the primary key.
 - A versioned model appends `"version" = $n` to `WHERE`.
 - Every entry is its own `DELETE`, so the batch preserves input order and a
   failed entry can be named by index. A single multi-row statement could check
@@ -213,6 +215,7 @@ impl<K: DeleteKey> DeleteQuery<K> {
 pub enum DeleteError {
     KeyColumns { expected: usize, actual: usize },
     VersionColumns,
+    TenantColumns,
     NotATable,
     NotDeleted { index: usize },
     Sqlx(sqlx::Error),
@@ -224,6 +227,8 @@ pub enum DeleteError {
   error.
 - `VersionColumns` — the model has a version but the key does not, or the
   reverse. Also a code-generation guard.
+- `TenantColumns` — the model has a tenant column but the key carries no tenant
+  value. Also a code-generation guard.
 - `NotATable` — the model is a fragment or subquery. Generated table deletes
   cannot reach this.
 - `NotDeleted` — an entry affected zero or more than one row. The batch is

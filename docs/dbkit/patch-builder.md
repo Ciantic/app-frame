@@ -183,6 +183,8 @@ Rules:
   placeholder numbering.
 - The primary key is the `WHERE` clause, in declaration order. A composite key
   renders `"lang" = $1 AND "key" = $2`.
+- A tenant-owned model adds `"tenant_id" = $n` after the key predicates,
+  unless the tenant column is already part of the primary key.
 - A versioned model adds `"version" = $n` to `WHERE` and
   `"version" = "version" + 1` to `SET`.
 - A model with `updated_at` adds `"updated_at" = now()` to `SET`.
@@ -277,6 +279,7 @@ pub enum PatchError {
     Empty { index: usize },
     KeyColumns { expected: usize, actual: usize },
     VersionColumns,
+    TenantColumns,
     NotATable,
     NotUpdated { index: usize },
     Sqlx(sqlx::Error),
@@ -290,6 +293,8 @@ pub enum PatchError {
   error.
 - `VersionColumns` — the model has a version but the patch does not, or the
   reverse. Also a code-generation guard.
+- `TenantColumns` — the model has a tenant column but the patch carries no
+  tenant value. Also a code-generation guard.
 - `NotATable` — the model is a fragment or subquery. Generated table patches
   cannot reach this.
 - `NotUpdated` — an entry affected zero or more than one row.

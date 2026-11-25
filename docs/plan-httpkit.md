@@ -1,7 +1,8 @@
 # httpkit plan
 
 Plan for `httpkit` and `httpkit-macros`: generate axum routes for the dbkit
-query, insert, patch and delete builders. Not implemented yet.
+query, insert, patch and delete builders. Implemented in `crates/httpkit`,
+`crates/httpkit-macros` and the dbkit tenant support.
 
 ## Scope
 
@@ -33,8 +34,8 @@ the dbkit builders and avoids a second path shape.
   `GET /widgets?q={"filters":{"tenant_id":"...","id":"..."},"limit":20}`.
 - `httpkit` parses it with `Query::<ModelColumn>::parse`.
 - A missing `q` means no filters, ordering or paging.
-- Apply a default limit when `limit` is absent; `MAX_LIMIT` already rejects a
-  larger explicit limit.
+- Apply `httpkit::DEFAULT_LIMIT` (1000) when `limit` is absent; `MAX_LIMIT`
+  already rejects a larger explicit limit.
 - Reject `select` in the first version and return full rows. Projections need
   `DbSelect` and a response type decision, so they are separate work.
 - Return `Vec<Model>`, not a page envelope. Total count is not part of the
@@ -101,20 +102,22 @@ pub tenant_id: TenantId,
 The role is legal on one table column, not on a fragment or subquery. The
 tenant column must be non-null and must not have a default, so every write
 states its tenant explicitly; the derive rejects a nullable or defaulted
-tenant column. `#[db(tenant_owned)]` is an acceptable alternative name, but
-`#[db(tenant)]` fits the existing role annotations.
+tenant column. The column may also be `#[db(primary_key)]`; the predicate is
+then already in the key and is not rendered a second time.
+`#[db(tenant_owned)]` is an acceptable alternative name, but `#[db(tenant)]`
+fits the existing role annotations.
 
 `#[derive(DbModel)]` records the column as `TableMeta.tenant:
 Option<&'static str>` and generates `impl dbkit::TenantOwned for Widget` with
-the tenant column and its Rust type. The input derives use it:
+the tenant column. The input derives use it:
 
 - `<Model>Insert` keeps the tenant column as a required plain field and exposes
   it through `TenantRow`.
 - `<Model>Patch` makes the tenant column a required plain field, like the
   primary key and version. It is not a `Patch<T>`, so it cannot be changed. The
   patch renderer adds `AND "tenant_id" = $n` to `WHERE`.
-- `<Model>PKV` includes the tenant column beside the primary key. The delete
-  renderer adds it to `WHERE`.
+- `<Model>PKV` includes the tenant column beside the primary key, unless the
+  key already contains it. The delete renderer adds it to `WHERE`.
 - `<Model>PK` stays the primary key returned by insert; the caller already
   supplied the tenant.
 
@@ -218,11 +221,13 @@ from a filter value.
 `user-service` owns the extractor and implements the trait for its session:
 
 - `CurrentSession(pub UserSession)` implements `FromRequestParts<AppState>`.
-- The extractor reads the token, hashes it, looks up `UserSession` by
-  `token_hash`, and rejects revoked or expired sessions.
+- It reads `Cookie: session=...` first and falls back to
+  `Authorization: Bearer ...`.
+- It hashes the raw token with SHA-256 and compares the lowercase hex against
+  `user_session.token_hash`, then rejects revoked or expired sessions.
 - `UserSession::has_permission` matches the enum and applies the global or
-  tenant rule. The current two placeholder methods collapse into it.
-- `UserSession::token_hash` needs `#[db(query_ops(eq))]` for the lookup.
+  tenant rule.
+- `UserSession::token_hash` carries `#[db(query_ops(eq))]` for the lookup.
 
 ```rust
 impl httpkit::Session for UserSession {
@@ -256,35 +261,18 @@ is exposed.
 only wiring.
 
 ```rust
-pub trait Queryable: Model + Serialize + Send + Unpin + for<'r> FromRow<'r, PgRow> {
-    type Column: Column<Model = Self>;
-}
-
-pub trait Insertable: Model {
-    type Insert: InsertRow<Model = Self> + DeserializeOwned + Validate;
-}
-
-pub trait Patchable: Model {
-    type Patch: PatchRow<Model = Self> + DeserializeOwned + Validate;
-}
-
-pub trait Deletable: Model {
-    type Key: DeleteKey<Model = Self> + DeserializeOwned + Serialize;
-}
-
-pub async fn query<S, M: Queryable>(state: S, query: Query<M::Column>)
-    -> ApiResult<Json<Vec<M>>>;
-pub async fn insert<S, M: Insertable>(state: S, entries: Vec<M::Insert>)
-    -> ApiResult<(StatusCode, Json<Vec<<M::Insert as InsertRow>::Key>>)>;
-pub async fn patch<S, M: Patchable>(state: S, entries: Vec<M::Patch>)
-    -> ApiResult<StatusCode>;
-pub async fn delete<S, M: Deletable>(state: S, keys: Vec<M::Key>)
-    -> ApiResult<StatusCode>;
+pub async fn query<S, C>(state: &S, query: Query<C>)
+    -> ApiResult<Json<Vec<C::Model>>>;
+pub async fn insert<S, P>(state: &S, entries: Vec<P>)
+    -> ApiResult<(StatusCode, Json<Vec<P::Key>>)>;
+pub async fn patch<S, P>(state: &S, entries: Vec<P>) -> ApiResult<StatusCode>;
+pub async fn delete<S, K>(state: &S, keys: Vec<K>) -> ApiResult<StatusCode>;
 ```
 
-The traits are split per operation so a model without `DbInsert`, `DbPatch` or
-`DbDelete` can expose only the operations it supports. A single `Crud` trait
-would force every generated type to exist even when its route is absent.
+The generated handler names the concrete column, insert, patch and key types.
+The functions are not constrained by per-model capability traits: the same
+model may be mounted by several `crud!` invocations, and each generated trait
+impl would collide.
 
 `S` implements a small `DbState` trait that returns the `PgPool`; this avoids
 depending on a particular application state struct.
@@ -299,7 +287,9 @@ model. The same model may be mounted at different paths, with different
 guards, in different binaries.
 
 The examples use a made-up `Widget` model with an `id` primary key and a
-`tenant_id` column.
+`tenant_id` column. `model` is the model's path; the generated insert, patch,
+key and column types are found by suffixing its last segment in the same
+module, so pass a qualified path when the model is imported from elsewhere.
 
 ```rust
 httpkit::crud! {
@@ -319,7 +309,7 @@ httpkit::crud! {
 batch; each entry or key decides through `TenantRow` whether it carries a
 tenant. A model without `#[db(tenant)]` returns `None` and falls back to global
 permission. `TableMeta.tenant` supplies the query column, so `tenant_column` is
-only an override for a column the annotation does not cover.
+only a query-side override; tenant-owned writes require the annotation.
 
 Operations are opt-in. A block that is absent generates no route, no handler
 and no trait impl, so a model can expose a subset:
@@ -342,18 +332,15 @@ model needs `DbInsert` for the insert block, but does not need `DbPatch` or
 derived type is missing, such as `insert` without `DbInsert`, fails at the
 missing `WidgetInsert`; the macro only sees the model name, not its derives.
 
-Generated items depend on the declared blocks:
+The macro expands to a module named from the path, for example
+`httpkit_routes_widgets`, containing:
 
-- `impl httpkit::Queryable for Widget` only when `query` is present, naming
-  `WidgetColumn`.
-- `impl httpkit::Insertable for Widget` only when `insert` is present, naming
-  `WidgetInsert`.
-- `impl httpkit::Patchable for Widget` only when `patch` is present, naming
-  `WidgetPatch`.
-- `impl httpkit::Deletable for Widget` only when `delete` is present, naming
-  `WidgetPKV`.
-- Handler wrappers and route registration only for the declared operations.
-- One `routes(state) -> Router` per entity.
+- Handler wrappers only for the declared operations, naming `WidgetColumn`,
+  `WidgetInsert`, `WidgetPatch` or `WidgetPKV` as needed.
+- `routes(state) -> Router`, which registers one method router on the path.
+
+A model may be mounted repeatedly at different paths because the macro does
+not generate per-model trait impls.
 
 The query wrapper checks permission after parsing, because the tenant scope is
 inside the query payload. Write wrappers check each entry or key after parsing
@@ -377,17 +364,16 @@ uniform field. Keep routing as plain axum:
 `httpkit` defines one `ApiError` implementing `IntoResponse`:
 
 - query parse/render errors -> `400`;
-- garde report -> `422` with field paths;
+- garde report -> `422` with the report text;
 - `PatchError::Empty` -> `400`;
 - `PatchError::NotUpdated` and `DeleteError::NotDeleted` -> `409`;
 - constraint violations -> `409` or `422` after inspecting the database error;
 - everything else -> `500`, logged, with a generic body;
 - missing session -> `401`, permission denial -> `403`.
 
-An empty insert, patch or delete batch is a no-op in dbkit; HTTP should reject
-it with `400`.
+An empty insert, patch or delete batch is rejected with `400`.
 
-Use `application/problem+json` if a standard error shape is wanted.
+Every error is `application/problem+json`.
 
 ## Security notes
 
@@ -400,33 +386,33 @@ Use `application/problem+json` if a standard error shape is wanted.
 - Tenant filters under `or` must be rejected; otherwise the scope is not a
   bound on the result.
 
-## Open decisions
+## Decisions
 
-- Default query limit: a shared constant or a per-route setting.
-- Error body: `application/problem+json` or a minimal `{ code, message }`.
-- Session token source: bearer header, cookie, or both; hashing stays in
-  `user-service`.
-- Composite keys: whether `#[db(tenant)]` may coexist with `#[db(primary_key)]`
-  on one column, or whether the tenant column must be separate from the key.
+- Default query limit is `httpkit::DEFAULT_LIMIT` = 1000.
+- Errors use `application/problem+json`.
+- `CurrentSession` reads `Cookie: session=...`, then falls back to
+  `Authorization: Bearer ...`, and compares a SHA-256 hex hash.
+- `#[db(tenant)]` may share a column with `#[db(primary_key)]`; the tenant
+  predicate is skipped when the primary key already contains it.
+- Patch and delete order predicates as primary key, tenant, version.
 
-## Current model changes
+## Implemented
 
+- dbkit has `#[db(tenant)]`, `TableMeta.tenant`, `TenantOwned`, `TenantRow`,
+  tenant-aware keys and tenant predicates in patch and delete.
 - `Tenant` exists in `user-service` with `id: TenantId` and `name: String`.
-- dbkit still needs the `#[db(tenant)]` role, `TableMeta.tenant`,
-  `TenantOwned`/`TenantRow`, and tenant predicates in patch and delete.
-- Primary keys still need `#[db(query_ops(eq, any))]` before HTTP reads cover
-  single-row and batch lookups.
-- `UserSession::token_hash` still needs `#[db(query_ops(eq))]` before the
-  session extractor can use the query builder.
+- Primary keys carry `#[db(query_ops(eq, any))]`; `token_hash` carries
+  `#[db(query_ops(eq))]`.
+- `httpkit` has `ApiError`, `DbState`, `Session`, `Permission`,
+  `tenant_scope`, `authorize_query`, `authorize_rows`, the generic operations
+  and the extractors.
+- `user-service` has `AppState`, `CurrentSession` and the `Session`
+  implementation.
+- `httpkit-macros` provides `crud!`, including opt-in operations.
 
-## Implementation order
+## Remaining work
 
-1. Add `#[db(tenant)]`, `TableMeta.tenant`, `TenantOwned`/`TenantRow`, and the
-   patch/delete tenant predicates to dbkit.
-2. Add `ApiError`, `DbState`, `Session`, `Permission`, `authorize`, and
-   `tenant_scope` to `httpkit`.
-3. Add `Queryable`/`Insertable`/`Patchable`/`Deletable` and the generic
-   query/insert/patch/delete functions.
-4. Add `CurrentSession` and the `Session` implementation to `user-service`.
-5. Add `query_ops` to primary keys and `token_hash`.
-6. Add `httpkit-macros` and the `crud!` macro.
+- Replace the placeholder permission methods with real authorization.
+- Decide whether a tenant model may expose writes that are deliberately global.
+- Add end-to-end HTTP tests once login exists; current tests cover dbkit
+  rendering, permission helpers and router construction.

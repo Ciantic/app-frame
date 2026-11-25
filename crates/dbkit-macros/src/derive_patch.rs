@@ -39,6 +39,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let mut initializers = Vec::new();
     let mut setters = Vec::new();
     let mut key_parameters = Vec::new();
+    let mut tenant_parameter = None;
     let mut version_parameter = None;
 
     for column in &annotations.columns {
@@ -101,6 +102,16 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             continue;
         }
 
+        if annotations.tenant.as_ref() == Some(field_name) {
+            definitions.push(quote! {
+                #[garde(skip)]
+                pub #field_name: #ty
+            });
+            initializers.push(quote!(#field_name));
+            tenant_parameter = Some(quote!(#field_name: #ty));
+            continue;
+        }
+
         let inner = non_optional(ty);
         let garde = if carries_rules(inner) {
             quote!(#[garde(dive)])
@@ -153,7 +164,10 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     }
 
-    let parameters = key_parameters.into_iter().chain(version_parameter);
+    let parameters = key_parameters
+        .into_iter()
+        .chain(tenant_parameter)
+        .chain(version_parameter);
     let builder = quote! {
         impl #impl_generics #patch #type_generics #where_clause {
             #[doc = "Starts a patch with the required key and version fields; every other column \
@@ -164,6 +178,25 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
             #(#setters)*
         }
+    };
+
+    let tenant_row = match &annotations.tenant {
+        Some(tenant) => quote! {
+            #[automatically_derived]
+            impl #impl_generics ::dbkit::TenantRow for #patch #type_generics #where_clause {
+                fn tenant(&self) -> ::core::option::Option<&dyn ::dbkit::Bind> {
+                    ::core::option::Option::Some(&self.#tenant)
+                }
+            }
+        },
+        None => quote! {
+            #[automatically_derived]
+            impl #impl_generics ::dbkit::TenantRow for #patch #type_generics #where_clause {
+                fn tenant(&self) -> ::core::option::Option<&dyn ::dbkit::Bind> {
+                    ::core::option::Option::None
+                }
+            }
+        },
     };
 
     let patch_method = match annotations.shape {
@@ -207,6 +240,8 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 #expected_version
             }
         }
+
+        #tenant_row
 
         #patch_method
     })

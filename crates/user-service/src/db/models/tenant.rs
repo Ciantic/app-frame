@@ -27,6 +27,7 @@ pub struct TenantId(#[garde(skip)] pub Uuid);
 pub struct Tenant {
     #[db(primary_key)]
     #[db(pgdefault = inherit)]
+    #[db(query_ops(eq, any))]
     pub id: TenantId,
 
     #[db(pgtype = "text")]
